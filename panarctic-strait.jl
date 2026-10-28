@@ -25,14 +25,17 @@ wet_face(i, k) = !immersed_inactive_node(i, j₀, k, grid, Center(), Face(), Cen
 wet_column(i)  = any(k -> wet_face(i, k), 1:Nz)
 wet_column(i₀) || error("no water in the v-face row through ($i₀, $j₀)")
 
-i₁ = i₀
-while i₁ > 1 && wet_column(i₁ - 1)
-    i₁ -= 1
+function wet_run(i₀)
+    i₁, i₂ = i₀, i₀
+    while i₁ > 1 && wet_column(i₁ - 1)
+        i₁ -= 1
+    end
+    while i₂ < Nx && wet_column(i₂ + 1)
+        i₂ += 1
+    end
+    return i₁, i₂
 end
-i₂ = i₀
-while i₂ < Nx && wet_column(i₂ + 1)
-    i₂ += 1
-end
+i₁, i₂ = wet_run(i₀)
 section = i₁:i₂
 
 area(i, k)  = wet_face(i, k) ? Δxᶜᶠᶜ(i, j₀, k, grid) * Δzᶜᶠᶜ(i, j₀, k, grid) : 0.0
