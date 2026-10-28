@@ -111,8 +111,8 @@ if isfile(file)
     # GLORYS daily means are centred at noon; take the day whose mean is nearest the last output time
     date = DateTime(1993, 1, 1) + Day(floor(Int, u.times[n] / days - 1/2))
     region = BoundingBox(longitude = (-180, 180), latitude = (45, 90))
-    uᴳ = Field(Metadatum(:u_velocity; date, dataset = GLORYSDaily(), region), grid; inpainting = 100)
-    vᴳ = Field(Metadatum(:v_velocity; date, dataset = GLORYSDaily(), region), grid; inpainting = 100)
+    uᴳ = Field(Metadatum(:u_velocity; date, dataset = GLORYSDaily(), region), grid; inpainting = NumericalEarth.DataWrangling.NearestNeighborInpainting(100))
+    vᴳ = Field(Metadatum(:v_velocity; date, dataset = GLORYSDaily(), region), grid; inpainting = NumericalEarth.DataWrangling.NearestNeighborInpainting(100))
     speedᴳ = sqrt.(Array(interior(uᴳ, is, js, Nz)) .^ 2 .+ Array(interior(vᴳ, is, js, Nz)) .^ 2)
     speedᴳ[isnan.(hb[is, js])] .= NaN
 
