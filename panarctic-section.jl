@@ -1,5 +1,5 @@
 # Vertical sections through the Baffin Bay hot spot from arctic_ocean_full.jld2.
-# Run from the repository folder:  julia --project=. ~/Software/panarctic-section.jl
+# Run from the repository folder:  julia --project=. ../panarctic-tools/panarctic-section.jl
 # Writes panarctic_section.png.
 
 using Oceananigans, CairoMakie, Printf

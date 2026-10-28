@@ -9,9 +9,9 @@
 #   site_<n>.png    at each site: horizontal slices, two vertical sections, profiles
 #
 # Usage, from the clone (Copernicus credentials sourced, in case a file is missing):
-#   julia --project=. ../panarctic-inversions.jl                  # the three worst sites
-#   julia --project=. ../panarctic-inversions.jl 179 337 148 352  # chosen (i, j) pairs
-#   ARCH=CPU julia --project=. ../panarctic-inversions.jl         # without the GPU
+#   julia --project=. ../panarctic-tools/panarctic-inversions.jl                  # the three worst sites
+#   julia --project=. ../panarctic-tools/panarctic-inversions.jl 179 337 148 352  # chosen (i, j) pairs
+#   ARCH=CPU julia --project=. ../panarctic-tools/panarctic-inversions.jl         # without the GPU
 
 using NumericalEarth, Oceananigans, Oceananigans.Units
 using Oceananigans.ImmersedBoundaries: immersed_inactive_node
