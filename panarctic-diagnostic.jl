@@ -95,7 +95,7 @@ bottom_height = regrid_bathymetry(underlying_grid, bathymetry;
 
 grid = ImmersedBoundaryGrid(underlying_grid, PartialCellBottom(bottom_height); active_cells_map = true)
 
-using CairoMakie, SixelTerm
+using CairoMakie
 
 h_bottom = Array(interior(bottom_height, :, :, 1))
 h_bottom[h_bottom .≥ 0] .= NaN
@@ -249,9 +249,38 @@ end
 # near-boundary interior stays matched to the prescribed boundary:
 
 FT = DatasetRestoring(Metadata(:temperature; dates, dataset, region, dir_kw...), grid; rate = 1/1days,     mask = sponge_mask)
-Fu = DatasetRestoring(Metadata(:u_velocity;  dates, dataset, region, dir_kw...), grid; rate = 1/20minutes, mask = sponge_mask, inpainting=100)
-Fv = DatasetRestoring(Metadata(:v_velocity;  dates, dataset, region, dir_kw...), grid; rate = 1/20minutes, mask = sponge_mask, inpainting=100)
+Fu = DatasetRestoring(Metadata(:u_velocity;  dates, dataset, region, dir_kw...), grid; rate = 1/20minutes, mask = sponge_mask, inpainting=100, time_indices_in_memory = length(dates))
+Fv = DatasetRestoring(Metadata(:v_velocity;  dates, dataset, region, dir_kw...), grid; rate = 1/20minutes, mask = sponge_mask, inpainting=100, time_indices_in_memory = length(dates))
 FS = DatasetRestoring(Metadata(:salinity;    dates, dataset, region, dir_kw...), grid; rate = 1/1days,     mask = sponge_mask)
+
+# GLORYS u and v are geographic (east, north) components, while the model's u and v point along the rotated grid's
+# own axes. Rotate the external velocities into the grid axes, at every time index, for the normal-flow and
+# barotropic boundary conditions (uᵉˣᵗ, vᵉˣᵗ) and for the velocity sponge (Fu, Fv).
+
+using Oceananigans.Operators: intrinsic_vector
+
+cpu_grid = Oceananigans.Architectures.on_architecture(CPU(), grid)
+cosθ = [intrinsic_vector(i, j, 1, cpu_grid, 1, 0)[1] for i in 1:Nx, j in 1:Ny]
+sinθ = [intrinsic_vector(i, j, 1, cpu_grid, 1, 0)[2] for i in 1:Nx, j in 1:Ny]
+
+function rotate_to_grid_axes!(u, v)
+    for n in eachindex(u.times)
+        uₑ = Array(interior(u[n]))
+        vₑ = Array(interior(v[n]))
+        interior(u[n]) .= Oceananigans.Architectures.on_architecture(arch, cosθ .* uₑ .- sinθ .* vₑ)
+        interior(v[n]) .= Oceananigans.Architectures.on_architecture(arch, sinθ .* uₑ .+ cosθ .* vₑ)
+        Oceananigans.BoundaryConditions.fill_halo_regions!(u[n])
+        Oceananigans.BoundaryConditions.fill_halo_regions!(v[n])
+    end
+    return nothing
+end
+
+rotate_to_grid_axes!(uᵉˣᵗ, vᵉˣᵗ)
+rotate_to_grid_axes!(Fu.field_time_series, Fv.field_time_series)
+
+# Check at the Strait of Dover, where the grid's +j axis is 44° clockwise from north: a northward 1 m/s should
+# become about (u, v) = (-0.69, 0.72) in grid components.
+@info @sprintf("Rotation check at (366, 31): northward 1 m/s → grid (u, v) = (%.2f, %.2f)", -sinθ[366, 31], cosθ[366, 31])
 
 # ## The ocean component
 #
