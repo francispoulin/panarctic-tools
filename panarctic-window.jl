@@ -6,12 +6,15 @@
 #   julia --project=. ../panarctic-tools/panarctic-window.jl 366 31 20
 #
 # Writes window_<i>_<j>.png. The angle is that of the grid's +j axis, clockwise from geographic north:
-# where it is not small, GLORYS v (northward) is not the grid's v.
+# where it is not small, GLORYS v (northward) is not the grid's v. With the output file, the last panel shows
+# GLORYS's own surface speed for the day the output ends in, on the same colour scale (speed does not depend
+# on the axes, so no rotation is needed).
 
 using NumericalEarth, Oceananigans, Oceananigans.Units, Printf
 using Oceananigans.OrthogonalSphericalShellGrids: RotatedLatitudeLongitudeGrid
 using Oceananigans.Grids: λnode, φnode
-using CairoMakie
+using CairoMakie, Dates
+using CopernicusMarine   # GLORYS files (already downloaded by the model run)
 
 i₀, j₀ = parse(Int, ARGS[1]), parse(Int, ARGS[2])
 w = length(ARGS) ≥ 3 ? parse(Int, ARGS[3]) : 30
@@ -64,8 +67,8 @@ if first(js) == 1
     end
 end
 
-fig = Figure(size = (1500, 560))
-Label(fig[0, 1:3], @sprintf("Window around (i, j) = (%d, %d), %.2f°E %.2f°N", i₀, j₀, λ[i₀, j₀], φ[i₀, j₀]), fontsize = 18)
+fig = Figure(size = (1950, 560))
+Label(fig[0, 1:4], @sprintf("Window around (i, j) = (%d, %d), %.2f°E %.2f°N", i₀, j₀, λ[i₀, j₀], φ[i₀, j₀]), fontsize = 18)
 
 ax = Axis(fig[1, 1][1, 1], title = "bottom height [m]", xlabel = "i", ylabel = "j", aspect = DataAspect())
 hm = heatmap!(ax, is, js, hb[is, js], colormap = :deep, colorrange = (-min(500, -minimum(filter(isfinite, hb[is, js]))), 0),
@@ -104,6 +107,26 @@ if isfile(file)
 
     @printf("Surface velocity at (%d, %d), day %.1f: u = %.2f, v = %.2f m/s (grid axes)\n", i₀, j₀, u.times[n] / days,
             uc[i₀ - first(is) + 1, j₀ - first(js) + 1], vc[i₀ - first(is) + 1, j₀ - first(js) + 1])
+
+    # GLORYS daily means are centred at noon; take the day whose mean is nearest the last output time
+    date = DateTime(1993, 1, 1) + Day(floor(Int, u.times[n] / days - 1/2))
+    region = BoundingBox(longitude = (-180, 180), latitude = (45, 90))
+    uᴳ = Field(Metadatum(:u_velocity; date, dataset = GLORYSDaily(), region), grid; inpainting = 100)
+    vᴳ = Field(Metadatum(:v_velocity; date, dataset = GLORYSDaily(), region), grid; inpainting = 100)
+    speedᴳ = sqrt.(Array(interior(uᴳ, is, js, Nz)) .^ 2 .+ Array(interior(vᴳ, is, js, Nz)) .^ 2)
+    speedᴳ[isnan.(hb[is, js])] .= NaN
+
+    ax = Axis(fig[1, 4][1, 1], title = "GLORYS surface speed [m/s], daily mean " * Dates.format(date, "d u yyyy"),
+              xlabel = "i", aspect = DataAspect())
+    hm = heatmap!(ax, is, js, speedᴳ, colormap = Reverse(:solar), colorrange = (0, 1.5), nan_color = :gray75)
+    Colorbar(fig[1, 4][2, 1], hm, vertical = false)
+    scatter!(ax, [i₀], [j₀], marker = :xcross, color = :blue, markersize = 14)
+
+    @printf("Surface speed at (%d, %d): model %.2f m/s (day %.1f), GLORYS %.2f m/s (mean of %s)\n", i₀, j₀,
+            speed[i₀ - first(is) + 1, j₀ - first(js) + 1], u.times[n] / days, speedᴳ[i₀ - first(is) + 1, j₀ - first(js) + 1],
+            Dates.format(date, "d u yyyy"))
+    @printf("Largest surface speed in the window: model %.2f m/s, GLORYS %.2f m/s\n",
+            maximum(filter(isfinite, speed)), maximum(filter(isfinite, speedᴳ)))
 else
     println("No $file here; skipping the flow panel.")
 end
