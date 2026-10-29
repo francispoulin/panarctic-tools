@@ -1,0 +1,63 @@
+diff --git a/panarctic.jl b/panarctic.jl
+index 6aeb90b..534915d 100644
+--- a/panarctic.jl
++++ b/panarctic.jl
+@@ -270,9 +270,10 @@ end
+ 
+ # ## Atmosphere and coupled model
+ 
+-atmosphere    = JRA55PrescribedAtmosphere(arch; dir_kw...)
+-radiation     = JRA55PrescribedRadiation(arch; dir_kw...)
+-land          = JRA55PrescribedLand(grid; dir_kw...)
++jra55 = (; dataset = MultiYearJRA55(), start_date = dates[1], end_date = dates[end])   # local: 1993 winds
++atmosphere    = JRA55PrescribedAtmosphere(arch; jra55..., dir_kw...)
++radiation     = JRA55PrescribedRadiation(arch; jra55..., dir_kw...)
++land          = JRA55PrescribedLand(grid; jra55..., dir_kw...)
+ coupled_model = EarthSystemModel(; ocean, sea_ice, land, atmosphere, radiation)
+ 
+ # ## Simulation
+@@ -323,6 +324,44 @@ sea_ice.output_writers[:surface] = JLD2Writer(sea_ice.model, sea_ice_outputs;
+                                               schedule = TimeInterval(1hours),
+                                               overwrite_files = true)
+ 
++# Local diagnostics, not for committing. Paste into panarctic.jl just before `run!(simulation)`.
++# Every 6 hours: where are the fastest currents and the salinity extremes? Daily: full 3-D ocean output for the
++# strait and window tools. Uses `cpu_grid` and `wet` from the initial stability check earlier in the script.
++
++function report_extremes(sim)
++    ocean = sim.model.ocean.model
++    u, v, w = ocean.velocities
++    S = ocean.tracers.S
++    ℓ = (Center(), Center(), Center())
++
++    function locate(name, m, I, units)
++        i, j, k = Tuple(I)
++        iᶜ, jᶜ = min(i, Nx), min(j, Ny)
++        @info @sprintf("    %s = %.2f %s at (%d, %d, %d) ≈ %.1f°E %.1f°N, z = %.0f m, %d cells from an open edge",
++                       name, m, units, i, j, k,
++                       Oceananigans.Grids.λnode(iᶜ, jᶜ, k, cpu_grid, ℓ...), Oceananigans.Grids.φnode(iᶜ, jᶜ, k, cpu_grid, ℓ...),
++                       Oceananigans.Grids.znode(iᶜ, jᶜ, k, cpu_grid, ℓ...), min(j - 1, Ny - j))
++    end
++
++    for (name, φ) in (("max|u|", u), ("max|v|", v))
++        a = abs.(Array(interior(φ)))
++        replace!(a, NaN => 0)
++        locate(name, findmax(a)..., "m/s")
++    end
++
++    Sᵃ = Array(interior(S))
++    locate("min S", findmin(ifelse.(wet, Sᵃ, Inf))..., "psu")
++    locate("max S", findmax(ifelse.(wet, Sᵃ, -Inf))..., "psu")
++    return nothing
++end
++
++add_callback!(simulation, report_extremes, TimeInterval(6hours))
++
++ocean.output_writers[:full] = JLD2Writer(ocean.model, merge(ocean.model.tracers, (; u, v, w));
++                                         filename = joinpath(output_dir, "arctic_ocean_full.jld2"),
++                                         schedule = TimeInterval(1days),
++                                         overwrite_files = true)
++
+ run!(simulation)
+ 
+ # ## Movie of SST, SSS, surface speed and ice volume
