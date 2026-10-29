@@ -1,0 +1,52 @@
+# 2026-10-29 17:25:11 on pelee, user fpoulin
+# GPUs 2 (one per rank if several), JULIA_CUDA_MEMORY_POOL=none
+# julia --project=/mnt/autofs/bow.math/scratch/fpoulin/software/panarctic-port panarctic_thin.jl ../panarctic-tools/config_pelee_thin.toml
+  Activating project at `/mnt/autofs/bow.math/scratch/fpoulin/software/panarctic-port`
+┌ Warning: CUDA runtime library `libcusparse.so.12` was loaded from a system path, `/opt/uw/cuda/12.3.2/lib64/libcusparse.so.12`.
+│ This may cause errors.
+│ 
+│ If you're running under a profiler, this situation is expected. Otherwise,
+│ ensure that your library path environment variable (e.g., `PATH` on Windows
+│ or `LD_LIBRARY_PATH` on Linux) does not include CUDA library paths.
+│ 
+│ In any other case, please file an issue.
+└ @ CUDACore /mnt/autofs/bow.math/scratch/fpoulin/julia_depot/packages/CUDACore/6N8AA/src/initialization.jl:203
+┌ Warning: CUDA runtime library `libnvJitLink.so.12` was loaded from a system path, `/opt/uw/cuda/12.3.2/lib64/libnvJitLink.so.12`.
+│ This may cause errors.
+│ 
+│ If you're running under a profiler, this situation is expected. Otherwise,
+│ ensure that your library path environment variable (e.g., `PATH` on Windows
+│ or `LD_LIBRARY_PATH` on Linux) does not include CUDA library paths.
+│ 
+│ In any other case, please file an issue.
+└ @ CUDACore /mnt/autofs/bow.math/scratch/fpoulin/julia_depot/packages/CUDACore/6N8AA/src/initialization.jl:203
+┌ Info: Settings from ../panarctic-tools/config_pelee_thin.toml
+│   config =
+│    Dict{String, Any} with 7 entries:
+│      "boundaries"   => Dict{String, Any}("tracer_inflow_km_atlantic"=>50, "ve…
+│      "architecture" => "GPU"
+│      "grid"         => Dict{String, Any}("Nz"=>20, "depth"=>5000, "spacing_km…
+│      "time"         => Dict{String, Any}("stop_hours"=>120, "start_date"=>Dat…
+│      "atmosphere"   => Dict{String, Any}("jra55"=>"multi_year")
+│      "paths"        => Dict{String, Any}("output_dir"=>"/mnt/autofs/bow.math/…
+└      "output"       => Dict{String, Any}("figures"=>true, "movies"=>false)
+┌ Warning: LambertConformalConicGrid contains the cone apex / pole; longitude is singular there.
+└ @ Oceananigans.OrthogonalSphericalShellGrids /mnt/autofs/bow.math/scratch/fpoulin/julia_depot/packages/Oceananigans/dinzk/src/OrthogonalSphericalShellGrids/lambert_conformal_conic_grid.jl:508
+[ Info: Grid: 460 × 453 × 20, largest spacing 15.0 km
+[ Info: Loading cached field from /mnt/autofs/bow.math/scratch/fpoulin/ocean_data/field_cache/field_bottom_height_460x453x20_2d86dac8.jld2
+┌ Warning: GLORYSDaily holds window means, so this series interpolates only between 1993-01-01T12:00:00 and 1993-01-06T12:00:00. `Cyclical()` fills the 12 hours before that and the 12 hours after it by wrapping around to the other end of the record, which is the cycle itself only if the dates span whole cycles. Extend the dates by one interval at each end to interpolate across the whole span.
+└ @ NumericalEarth.DataWrangling /mnt/autofs/bow.math/scratch/fpoulin/julia_depot/packages/NumericalEarth/Isypr/src/DataWrangling/metadata_field_time_series.jl:105
+[ Info: Rotated GLORYS velocities into the grid frame and interpolated them to faces
+ERROR: LoadError: UndefVarError: `h` not defined in `Main`
+Suggestion: check for spelling errors or missing imports.
+Stacktrace:
+ [1] top-level scope
+   @ /mnt/autofs/bow.math/scratch/fpoulin/software/panarctic-port/panarctic_thin.jl:259
+ [2] include(mod::Module, _path::String)
+   @ Base ./Base.jl:309
+ [3] exec_options(opts::Base.JLOptions)
+   @ Base ./client.jl:344
+ [4] _start()
+   @ Base ./client.jl:577
+in expression starting at /mnt/autofs/bow.math/scratch/fpoulin/software/panarctic-port/panarctic_thin.jl:259
+# 2026-10-29 17:34:24 finished, exit status 1

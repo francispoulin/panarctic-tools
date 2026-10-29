@@ -1,0 +1,100 @@
+# 2026-10-29 17:25:11 on pelee, user fpoulin
+# GPUs 3 (one per rank if several), JULIA_CUDA_MEMORY_POOL=none
+# julia --project=/mnt/autofs/bow.math/scratch/fpoulin/software/panarctic-port panarctic_nodyn.jl ../panarctic-tools/config_pelee_nodyn.toml
+  Activating project at `/mnt/autofs/bow.math/scratch/fpoulin/software/panarctic-port`
+┌ Warning: CUDA runtime library `libcusparse.so.12` was loaded from a system path, `/opt/uw/cuda/12.3.2/lib64/libcusparse.so.12`.
+│ This may cause errors.
+│ 
+│ If you're running under a profiler, this situation is expected. Otherwise,
+│ ensure that your library path environment variable (e.g., `PATH` on Windows
+│ or `LD_LIBRARY_PATH` on Linux) does not include CUDA library paths.
+│ 
+│ In any other case, please file an issue.
+└ @ CUDACore /mnt/autofs/bow.math/scratch/fpoulin/julia_depot/packages/CUDACore/6N8AA/src/initialization.jl:203
+┌ Warning: CUDA runtime library `libnvJitLink.so.12` was loaded from a system path, `/opt/uw/cuda/12.3.2/lib64/libnvJitLink.so.12`.
+│ This may cause errors.
+│ 
+│ If you're running under a profiler, this situation is expected. Otherwise,
+│ ensure that your library path environment variable (e.g., `PATH` on Windows
+│ or `LD_LIBRARY_PATH` on Linux) does not include CUDA library paths.
+│ 
+│ In any other case, please file an issue.
+└ @ CUDACore /mnt/autofs/bow.math/scratch/fpoulin/julia_depot/packages/CUDACore/6N8AA/src/initialization.jl:203
+┌ Info: Settings from ../panarctic-tools/config_pelee_nodyn.toml
+│   config =
+│    Dict{String, Any} with 7 entries:
+│      "boundaries"   => Dict{String, Any}("tracer_inflow_km_atlantic"=>50, "ve…
+│      "architecture" => "GPU"
+│      "grid"         => Dict{String, Any}("Nz"=>20, "depth"=>5000, "spacing_km…
+│      "time"         => Dict{String, Any}("stop_hours"=>120, "start_date"=>Dat…
+│      "atmosphere"   => Dict{String, Any}("jra55"=>"multi_year")
+│      "paths"        => Dict{String, Any}("output_dir"=>"/mnt/autofs/bow.math/…
+└      "output"       => Dict{String, Any}("figures"=>true, "movies"=>false)
+┌ Warning: LambertConformalConicGrid contains the cone apex / pole; longitude is singular there.
+└ @ Oceananigans.OrthogonalSphericalShellGrids /mnt/autofs/bow.math/scratch/fpoulin/julia_depot/packages/Oceananigans/dinzk/src/OrthogonalSphericalShellGrids/lambert_conformal_conic_grid.jl:508
+[ Info: Grid: 460 × 453 × 20, largest spacing 15.0 km
+[ Info: Loading cached field from /mnt/autofs/bow.math/scratch/fpoulin/ocean_data/field_cache/field_bottom_height_460x453x20_2d86dac8.jld2
+┌ Warning: GLORYSDaily holds window means, so this series interpolates only between 1993-01-01T12:00:00 and 1993-01-06T12:00:00. `Cyclical()` fills the 12 hours before that and the 12 hours after it by wrapping around to the other end of the record, which is the cycle itself only if the dates span whole cycles. Extend the dates by one interval at each end to interpolate across the whole span.
+└ @ NumericalEarth.DataWrangling /mnt/autofs/bow.math/scratch/fpoulin/julia_depot/packages/NumericalEarth/Isypr/src/DataWrangling/metadata_field_time_series.jl:105
+[ Info: Rotated GLORYS velocities into the grid frame and interpolated them to faces
+[ Info: GLORYS ice: 143261 / 143265 NaN cells; max h 6.54 m, max ℵ 1.006
+[ Info: 460×453×1 Field{Center, Center, Nothing} reduced over dims = (3,) on ImmersedBoundaryGrid on CUDAGPU: 0 NaN cells set to 0; max 6.54
+[ Info: 460×453×1 Field{Center, Center, Nothing} reduced over dims = (3,) on ImmersedBoundaryGrid on CUDAGPU: 0 NaN cells set to 0; max 1.00
+┌ Warning: 38536 faces with N² < -1e-6 s⁻² in the initial state; the five most unstable (i, j, k):
+└ @ Main /mnt/autofs/bow.math/scratch/fpoulin/software/panarctic-port/panarctic_nodyn.jl:298
+┌ Warning:    (434, 101, 20)   N² = -4.60e-03 s⁻²
+└ @ Main /mnt/autofs/bow.math/scratch/fpoulin/software/panarctic-port/panarctic_nodyn.jl:300
+┌ Warning:    (429, 102, 20)   N² = -4.44e-03 s⁻²
+└ @ Main /mnt/autofs/bow.math/scratch/fpoulin/software/panarctic-port/panarctic_nodyn.jl:300
+┌ Warning:    (434, 102, 20)   N² = -3.88e-03 s⁻²
+└ @ Main /mnt/autofs/bow.math/scratch/fpoulin/software/panarctic-port/panarctic_nodyn.jl:300
+┌ Warning:    (433, 103, 20)   N² = -3.88e-03 s⁻²
+└ @ Main /mnt/autofs/bow.math/scratch/fpoulin/software/panarctic-port/panarctic_nodyn.jl:300
+┌ Warning:    (430, 103, 20)   N² = -3.63e-03 s⁻²
+└ @ Main /mnt/autofs/bow.math/scratch/fpoulin/software/panarctic-port/panarctic_nodyn.jl:300
+┌ Warning: 11407 of 16384 river mouths owned by this rank had no active ocean cell in range and were dropped.
+└ @ NumericalEarth.Lands /mnt/autofs/bow.math/scratch/fpoulin/julia_depot/packages/NumericalEarth/Isypr/src/Lands/river_routing.jl:153
+┌ Warning: 1672 of 1792 river mouths owned by this rank had no active ocean cell in range and were dropped.
+└ @ NumericalEarth.Lands /mnt/autofs/bow.math/scratch/fpoulin/julia_depot/packages/NumericalEarth/Isypr/src/Lands/river_routing.jl:153
+┌ Warning: 1440×720×1×7 PrescribedLand tracks time as Float32 but the EarthSystemModel clock uses Float64; coercing the component clock to keep components synchronized.
+└ @ NumericalEarth.EarthSystemModels /mnt/autofs/bow.math/scratch/fpoulin/julia_depot/packages/NumericalEarth/Isypr/src/EarthSystemModels/components.jl:153
+[ Info: Initializing simulation...
+[ Info: time: 0 seconds, iter: 0, extrema(T, S): (-2.1, 14.2) °C (1.4, 38.8) psu, extrema(u) (1.40e+00, 1.03e+00, 2.27e-02) max(h): 6.54 m, wall: 2.097 minutes
+[ Info:     ice: max |u| = 0.00 m/s, max |v| = 0.00 m/s
+[ Info:     ... simulation initialization complete (1.338 minutes)
+[ Info: Executing initial time step...
+[ Info:     ... initial time step complete (10.592 minutes).
+[ Info: time: 1 hour, iter: 6, extrema(T, S): (NaN, NaN) °C (NaN, NaN) psu, extrema(u) (NaN, NaN, NaN) max(h): NaN m, wall: 10.954 minutes
+[ Info:     ice: max |u| = 0.00 m/s, max |v| = 0.00 m/s
+[ Info: time: 2 hours, iter: 12, extrema(T, S): (NaN, NaN) °C (NaN, NaN) psu, extrema(u) (NaN, NaN, NaN) max(h): NaN m, wall: 526.726 ms
+[ Info:     ice: max |u| = 0.00 m/s, max |v| = 0.00 m/s
+[ Info: time: 3 hours, iter: 18, extrema(T, S): (NaN, NaN) °C (NaN, NaN) psu, extrema(u) (NaN, NaN, NaN) max(h): NaN m, wall: 486.540 ms
+[ Info:     ice: max |u| = 0.00 m/s, max |v| = 0.00 m/s
+[ Info: time: 4 hours, iter: 24, extrema(T, S): (NaN, NaN) °C (NaN, NaN) psu, extrema(u) (NaN, NaN, NaN) max(h): NaN m, wall: 498.350 ms
+[ Info:     ice: max |u| = 0.00 m/s, max |v| = 0.00 m/s
+[ Info: time: 5 hours, iter: 30, extrema(T, S): (NaN, NaN) °C (NaN, NaN) psu, extrema(u) (NaN, NaN, NaN) max(h): NaN m, wall: 483.639 ms
+[ Info:     ice: max |u| = 0.00 m/s, max |v| = 0.00 m/s
+[ Info: time: 6 hours, iter: 36, extrema(T, S): (NaN, NaN) °C (NaN, NaN) psu, extrema(u) (NaN, NaN, NaN) max(h): NaN m, wall: 479.043 ms
+[ Info:     ice: max |u| = 0.00 m/s, max |v| = 0.00 m/s
+[ Info: time: 7 hours, iter: 42, extrema(T, S): (NaN, NaN) °C (NaN, NaN) psu, extrema(u) (NaN, NaN, NaN) max(h): NaN m, wall: 482.840 ms
+[ Info:     ice: max |u| = 0.00 m/s, max |v| = 0.00 m/s
+[ Info: time: 8 hours, iter: 48, extrema(T, S): (NaN, NaN) °C (NaN, NaN) psu, extrema(u) (NaN, NaN, NaN) max(h): NaN m, wall: 479.488 ms
+[ Info:     ice: max |u| = 0.00 m/s, max |v| = 0.00 m/s
+[ Info: time: 9 hours, iter: 54, extrema(T, S): (NaN, NaN) °C (NaN, NaN) psu, extrema(u) (NaN, NaN, NaN) max(h): NaN m, wall: 477.220 ms
+[ Info:     ice: max |u| = 0.00 m/s, max |v| = 0.00 m/s
+[ Info: time: 10 hours, iter: 60, extrema(T, S): (NaN, NaN) °C (NaN, NaN) psu, extrema(u) (NaN, NaN, NaN) max(h): NaN m, wall: 487.573 ms
+[ Info:     ice: max |u| = 0.00 m/s, max |v| = 0.00 m/s
+[ Info: time: 11 hours, iter: 66, extrema(T, S): (NaN, NaN) °C (NaN, NaN) psu, extrema(u) (NaN, NaN, NaN) max(h): NaN m, wall: 488.920 ms
+[ Info:     ice: max |u| = 0.00 m/s, max |v| = 0.00 m/s
+[ Info: time: 12 hours, iter: 72, extrema(T, S): (NaN, NaN) °C (NaN, NaN) psu, extrema(u) (NaN, NaN, NaN) max(h): NaN m, wall: 479.723 ms
+[ Info:     ice: max |u| = 0.00 m/s, max |v| = 0.00 m/s
+[ Info: time: 13 hours, iter: 78, extrema(T, S): (NaN, NaN) °C (NaN, NaN) psu, extrema(u) (NaN, NaN, NaN) max(h): NaN m, wall: 490.159 ms
+[ Info:     ice: max |u| = 0.00 m/s, max |v| = 0.00 m/s
+[ Info: time: 14 hours, iter: 84, extrema(T, S): (NaN, NaN) °C (NaN, NaN) psu, extrema(u) (NaN, NaN, NaN) max(h): NaN m, wall: 486.463 ms
+[ Info:     ice: max |u| = 0.00 m/s, max |v| = 0.00 m/s
+[ Info: time: 15 hours, iter: 90, extrema(T, S): (NaN, NaN) °C (NaN, NaN) psu, extrema(u) (NaN, NaN, NaN) max(h): NaN m, wall: 610.645 ms
+[ Info:     ice: max |u| = 0.00 m/s, max |v| = 0.00 m/s
+[ Info: time: 16 hours, iter: 96, extrema(T, S): (NaN, NaN) °C (NaN, NaN) psu, extrema(u) (NaN, NaN, NaN) max(h): NaN m, wall: 475.992 ms
+[ Info:     ice: max |u| = 0.00 m/s, max |v| = 0.00 m/s
+[ Info: time = 60000.0, iteration = 100: NaN found in field T_ocean. Stopping simulation.
+# 2026-10-29 17:50:31 finished, exit status 0
