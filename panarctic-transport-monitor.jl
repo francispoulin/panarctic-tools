@@ -44,12 +44,12 @@ monitor_glorys_rows = zeros(length(monitor_rows), length(monitor_times))
 monitor_glorys_win  = zeros(length(monitor_times))
 monitor_glorys_η    = zeros(length(monitor_times))
 for n in eachindex(monitor_times)
-    vg = replace(Array(interior(vᶠ[n])), NaN => 0.0)
+    local vg = replace(Array(interior(vᶠ[n])), NaN => 0.0)
     for (r, (j, s)) in enumerate(monitor_rows)
         monitor_glorys_rows[r, n] = s * sum(vg[:, j:j, :] .* monitor_A_cpu[r])
     end
     monitor_glorys_win[n] = sum(vg[:, monitor_window_row:monitor_window_row, :] .* monitor_W_cpu)
-    ηg = replace(Array(interior(ηᵉˣᵗ[n])), NaN => 0.0)
+    local ηg = replace(Array(interior(ηᵉˣᵗ[n])), NaN => 0.0)
     monitor_glorys_η[n] = sum(ηg .* monitor_Aη_cpu) / monitor_area_total
 end
 
