@@ -1,0 +1,340 @@
+\documentclass[11pt]{article}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath,amssymb,bm}
+\usepackage{booktabs,array}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\setlist{itemsep=2pt,topsep=4pt}
+
+\newcommand{\ext}{\mathrm{ext}}
+\newcommand{\pd}[2]{\frac{\partial #1}{\partial #2}}
+
+\title{Open boundary conditions for the barotropic transport:\\
+Flather, Dirichlet, and a balanced/unbalanced split}
+\author{Notes for the PanArcticShenanigans boundary experiments}
+\date{31 October 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+These notes set out the problem in the linear hydrostatic equations, reduce it to rotating shallow water through
+vertical modes, and explain the open boundary conditions to be compared: Flather, Dirichlet, Davies relaxation,
+Flather with a pinned net transport, and a ``balanced Flather'' condition in which the external data prescribe the
+balanced (geostrophic) part of the flow and only the unbalanced part is radiated. The balanced part is defined
+from potential vorticity (PV) inversion, with the streamfunction on the open boundary set by the external
+transport. The last section describes a test: a basin with three walls and one open side, crossed by a steady
+Gaussian vortex.
+\end{abstract}
+
+%=====================================================================================================
+\section{Linear hydrostatic equations and vertical modes}
+
+Linearise the hydrostatic Boussinesq equations on an $f$-plane about a state of rest with stratification
+$N^2(z)$, flat bottom at $z=-H$ and a free surface $\eta$. With $p$ the kinematic pressure perturbation and $b$ the
+buoyancy perturbation,
+\begin{align}
+  u_t - f v &= -p_x, & v_t + f u &= -p_y, & p_z &= b, \\
+  b_t + N^2 w &= 0,  & u_x + v_y + w_z &= 0, &&
+\end{align}
+with $w=0$ at $z=-H$ and, linearised at $z=0$, $w=\eta_t$ and $p=g\eta$.
+
+\paragraph{Separation.} Write $(u,v,p) = \sum_n (u_n,v_n,p_n)(x,y,t)\,F_n(z)$. The vertical structure solves
+\begin{equation}
+  \frac{d}{dz}\!\left(\frac{1}{N^2}\frac{dF_n}{dz}\right) + \frac{F_n}{c_n^2} = 0,\qquad
+  F_n'(-H) = 0,\qquad F_n'(0) + \frac{N^2(0)}{g}F_n(0) = 0,
+  \label{eq:sturm}
+\end{equation}
+and each mode obeys the rotating shallow-water equations with its own speed $c_n$:
+\begin{equation}
+  \partial_t u_n - f v_n = -\partial_x p_n,\qquad
+  \partial_t v_n + f u_n = -\partial_y p_n,\qquad
+  \partial_t p_n + c_n^2\,(\partial_x u_n + \partial_y v_n) = 0.
+  \label{eq:swmode}
+\end{equation}
+The barotropic mode has $c_0\approx\sqrt{gH}$ and $F_0\approx 1$ (exactly so with a rigid lid); baroclinic modes
+have $c_n = O(1\text{ m s}^{-1})$. Everything below is written for one mode; the barotropic case is the one that
+sets the transport.
+
+\paragraph{Barotropic mode in transport form.} With $U=Hu$, $V=Hv$ and $c=\sqrt{gH}$:
+\begin{equation}
+  U_t - fV = -gH\,\eta_x,\qquad V_t + fU = -gH\,\eta_y,\qquad \eta_t + U_x + V_y = 0.
+  \label{eq:sw}
+\end{equation}
+This is what a hydrostatic model with $N_z=1$ and no advection solves, and what the split-explicit free surface
+solves for the depth-integrated transport in the full model.
+
+%=====================================================================================================
+\section{Waves, balance and potential vorticity}
+
+\paragraph{Normal modes.} Plane waves $e^{i(kx+ly-\omega t)}$ of \eqref{eq:sw} satisfy
+\begin{equation}
+  \omega\left(\omega^2 - f^2 - c^2(k^2+l^2)\right) = 0 .
+\end{equation}
+There are two kinds of motion:
+\begin{itemize}
+  \item the \emph{geostrophic} (balanced) mode, $\omega=0$: steady, with $fv = g\eta_x$, $fu=-g\eta_y$;
+  \item \emph{inertia--gravity} (unbalanced) waves, $|\omega|\ge f$: dispersive, with phase and group speeds that
+        depend on wavenumber; non-dispersive at speed $c$ only for $\omega\gg f$.
+\end{itemize}
+With $\beta$ or topography the balanced mode becomes slow Rossby or topographic waves rather than strictly steady,
+but the frequency gap at $f$ remains.
+
+\paragraph{Potential vorticity.} The linear PV
+\begin{equation}
+  q = \zeta - \frac{f}{H}\,\eta,\qquad \zeta = v_x - u_y,
+\end{equation}
+is conserved pointwise: $q_t = 0$. Inertia--gravity waves carry no PV; all PV is in the balanced part.
+
+\paragraph{Balanced/unbalanced decomposition.} The balanced part is the geostrophic state with the same PV. With
+$\psi = g\eta/f$ (so $u=-\psi_y$, $v=\psi_x$ for geostrophic flow),
+\begin{equation}
+  \left(\nabla^2 - \frac{1}{L_d^2}\right)\psi_B = q,\qquad L_d = \frac{c}{f},
+  \label{eq:inversion}
+\end{equation}
+and
+\begin{equation}
+  \eta_B = \frac{f}{g}\psi_B,\quad u_B=-\partial_y\psi_B,\quad v_B=\partial_x\psi_B;\qquad
+  (\eta,u,v) = (\eta_B,u_B,v_B) + (\eta',u',v').
+\end{equation}
+The remainder $(\eta',u',v')$ has $q'=0$ and is a sum of inertia--gravity waves. On an unbounded or periodic
+$f$-plane the two parts are orthogonal in the energy norm $E=\tfrac12\int\left(H(u^2+v^2)+g\eta^2\right)dA$, so the
+energy splits cleanly into balanced and unbalanced parts.
+
+For a baroclinic mode, \eqref{eq:inversion} holds with $c_n$, so $L_{d,n}$ is a few kilometres in the Arctic: the
+inversion is then nearly local. For the barotropic mode $L_d$ is $O(1000\text{ km})$ and the inversion is global.
+
+%=====================================================================================================
+\section{Boundary conditions for the streamfunction}
+\label{sec:psibc}
+
+Equation \eqref{eq:inversion} needs $\psi_B$ on the whole boundary.
+
+\begin{itemize}
+  \item \textbf{Walls.} No normal flow: $\psi_B$ is constant along a connected coastline, say $\psi_B=\psi_w$.
+  \item \textbf{Open boundary} (south side, $y=0$, $x_W\le x\le x_E$). The normal velocity of the balanced flow is
+        $v_B = \partial_x\psi_B$. If the balanced normal flow is the external one, then
+        \begin{equation}
+          \psi_B(x,0) = \psi_w + \int_{x_W}^{x} v_\ext(x')\,dx'.
+          \label{eq:psiopen}
+        \end{equation}
+        Continuity at the south-east corner requires $\int_{x_W}^{x_E} v_\ext\,dx = 0$: a steady balanced state in a
+        basin with one connected coastline has zero net transport through the open side. A non-zero net transport
+        changes the basin volume and is treated separately (Section~\ref{sec:net}).
+\end{itemize}
+
+So the external transport \emph{is} the Dirichlet condition for the streamfunction on the open side, and the
+balanced state is fixed up to the single constant $\psi_w$.
+
+\paragraph{Fixing the constant.} By linearity, $\psi_B = \psi_p + \psi_w\,\phi_1$, where $\psi_p$ solves
+\eqref{eq:inversion} with $\psi_w=0$ in \eqref{eq:psiopen} and $\phi_1$ solves the homogeneous problem with
+$\phi_1=1$ on the whole boundary (computed once). Requiring the balanced part to carry the basin volume,
+$\int \eta_B\,dA = \int \eta\,dA$, gives
+\begin{equation}
+  \psi_w = \frac{\tfrac{g}{f}\int\eta\,dA - \int\psi_p\,dA}{\int\phi_1\,dA}.
+  \label{eq:psiw}
+\end{equation}
+
+\paragraph{The balanced free surface on the open side.} From \eqref{eq:psiopen}, $\eta_B$ along the open side has
+the same shape as the external free surface, which is itself geostrophic with $v_\ext$:
+\begin{equation}
+  \eta_B(x,0,t) = \eta_\ext(x,t) + C(t),
+  \label{eq:etaB}
+\end{equation}
+where $C$ is a single constant set by \eqref{eq:psiw}. This is the key relation: \emph{the model's balanced free
+surface may differ from the external one along the open side only by a constant.}
+
+%=====================================================================================================
+\section{One-dimensional characteristics and reflection}
+
+Take \eqref{eq:sw} without rotation and without $x$-dependence near the south boundary, domain $y>0$:
+$\eta_t+V_y=0$, $V_t+c^2\eta_y=0$. The Riemann invariants are
+\begin{equation}
+  R^+ = V + c\eta \;\;(\text{speed } +c,\ \text{into the domain}),\qquad
+  R^- = V - c\eta \;\;(\text{speed } -c,\ \text{out of the domain}).
+\end{equation}
+At the boundary $R^-$ is known from the interior; one condition is needed, on $R^+$. Consider the family
+\begin{equation}
+  V + \alpha\,c\,\eta = \text{data},\qquad \alpha\ge 0 .
+\end{equation}
+Substituting $V=(R^++R^-)/2$, $c\eta=(R^+-R^-)/2$, an outgoing wave $R^-$ is reflected into
+\begin{equation}
+  R^+_{\text{refl}} = r\,R^-,\qquad r = -\frac{1-\alpha}{1+\alpha}.
+\end{equation}
+Flather is $\alpha=1$ ($r=0$); Dirichlet on the transport is $\alpha=0$ ($r=-1$); Dirichlet on $\eta$ is
+$\alpha\to\infty$ ($r=+1$).
+
+\paragraph{With rotation.} Coriolis terms are lower order, so the characteristic structure (one incoming
+characteristic at speed $c$, one outgoing, one at zero speed for the tangential flow) is unchanged, and so is the
+number of conditions. What rotation changes is the quality of absorption: Flather is nearly transparent for
+$\omega\gg f$ at normal incidence and only partly so near $\omega=f$ or at oblique incidence. This is measurable in
+the test below.
+
+\paragraph{Why Flather turns a free-surface offset into transport.} For a balanced flow, $V$ and $\eta$ along the
+boundary are linked by geostrophy, $V=(gH/f)\,\eta_x$, not by $V=\pm c\eta$. A constant offset of the model's
+balanced $\eta$ from $\eta_\ext$ is not a wave, but Flather reads it as one and adds a transport $c\,C$ per unit
+length. With $c=170\text{ m s}^{-1}$, $C=3\text{ cm}$ and a 4000~km boundary this is about $20$~Sv.
+
+%=====================================================================================================
+\section{The boundary conditions compared}
+
+All conditions act on the normal barotropic transport on the open faces, at every barotropic substep. On the
+C-grid, $V$ lives on the boundary face, $\eta$ at cell centres; $\eta_b$ is the face average of the first
+interior and the halo value. Written for the south side; for a north side the sign of the $c$ term flips.
+
+\begin{description}
+  \item[M1 Flather.] $V_b = V_\ext - c\,(\eta_b - \eta_\ext)$.
+        Imposes the incoming characteristic $V+c\eta$. Transport depends on the $\eta$ mismatch.
+
+  \item[M2 Dirichlet.] $V_b = V_\ext$.
+        Transport exact; every outgoing barotropic wave reflects ($r=-1$). In a linear inviscid model reflected
+        energy stays in the basin.
+
+  \item[M3 Davies relaxation.] M2 on the face, plus $\partial_t\phi \mathrel{+}= -\gamma(y)\,(\phi-\phi_\ext)$ for
+        $\phi\in\{U,V,\eta\}$ in a rim of width $W$, with $\gamma$ decreasing smoothly from $\gamma_{\max}$ at the
+        boundary to $0$ at $y=W$. Absorbs waves whose wavelength is not much larger than $W$. For the barotropic
+        mode $\lambda\sim 2\pi c/\omega$ is thousands of kilometres, so the rim would have to be very wide; for
+        baroclinic modes $\lambda$ is tens of kilometres and a rim works. The rim also relaxes the balanced part to
+        the external state.
+
+  \item[M4 Flather with pinned net transport] (current \texttt{target\_transport}).
+        $V_b = V_\ext - c(\eta_b-\eta_\ext) - S$, with $S$ uniform along the boundary and chosen so that
+        $\int V_b\,dx = \int V_\ext\,dx$. The correction is uniform \emph{transport} per unit length, so the
+        velocity correction scales as $1/H$: largest on shelves.
+
+  \item[M5 Balanced Flather.] External data prescribe the balanced part; only the unbalanced part radiates, and
+        no unbalanced wave enters from outside:
+        \begin{equation}
+          V'_b + c\,\eta'_b = 0
+          \quad\Longrightarrow\quad
+          V_b = V_{B,b} - c\,(\eta_b - \eta_{B,b}) = V_\ext - c\,\bigl(\eta_b - \eta_\ext - C\bigr),
+          \label{eq:m5}
+        \end{equation}
+        using $V_{B,b}=V_\ext$ and \eqref{eq:etaB}. It differs from Flather only by the constant $C$.
+        \begin{description}
+          \item[M5a] $C$ from the PV inversion, \eqref{eq:inversion}--\eqref{eq:psiw}. Unbalanced waves that change
+                the basin volume can leave.
+          \item[M5b] $C$ from the net constraint $\int V_b\,dx = \int V_\ext\,dx$:
+                \begin{equation}
+                  C = \frac{\int c\,(\eta_b-\eta_\ext)\,dx}{\int c\,dx}.
+                \end{equation}
+                No inversion; equivalent to M4 with the correction weighted by $c=\sqrt{gH}$ instead of uniform,
+                so the velocity correction scales as $1/\sqrt{H}$. The net unbalanced flux is forced to zero, so the
+                volume-changing part of an outgoing wave reflects.
+        \end{description}
+\end{description}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}l>{\raggedright}p{3.6cm}>{\raggedright}p{3.4cm}>{\raggedright\arraybackslash}p{4.4cm}@{}}
+\toprule
+ & Transport set by & Outgoing waves & Expected weakness \\
+\midrule
+M1 Flather          & $\eta$ mismatch          & leave ($\omega\gg f$)   & offset $\Rightarrow$ $c\,C$ per length \\
+M2 Dirichlet        & external data            & reflect                 & trapped wave energy \\
+M3 Davies           & external data            & damped in rim           & rim width for barotropic waves; cost \\
+M4 Flather + pin    & external net             & leave, except net part  & $1/H$ correction drains shelves \\
+M5a balanced (PV)   & external (balanced)      & leave                   & inversion cost; $\beta$, topography \\
+M5b balanced (net)  & external net             & leave, except net part  & volume mode reflects \\
+\bottomrule
+\end{tabular}
+\caption{Summary of the conditions on the barotropic transport.}
+\end{table}
+
+%=====================================================================================================
+\section{Net transport and basin volume}
+\label{sec:net}
+
+If the external net transport $Q(t)=\int V_\ext\,dx$ is non-zero, the basin volume changes and $\int\eta\,dA$
+follows $Q$. In the decomposition this is a spatially uniform change in $\eta$, carried by the constant $\psi_w$
+(equivalently $C$); it has no geostrophic flow. M2, M3, M4 and M5b impose $Q$ exactly; M1 imposes it only if the
+mean edge mismatch vanishes; M5a imposes the balanced part and lets the unbalanced part carry its own net flux.
+For a long run, an error $\delta Q$ in the mapped external net transport changes the mean free surface by
+$\delta Q/A$ per unit time (about $0.5$ cm/day per Sv for the pan-Arctic domain), whichever condition is used.
+
+%=====================================================================================================
+\section{From modes to depth in the stratified model}
+
+For each open-boundary column, compute the modes $F_n(z)$ from that column's $N^2(z)$ by \eqref{eq:sturm}, once.
+Each step:
+\begin{enumerate}
+  \item project the model and external normal-velocity profiles onto the modes,
+        $v(z)=\sum_n a_n F_n(z)$ (an $N_z\times N_z$ matrix--vector product per column);
+  \item apply the chosen condition to each $a_n$ with its own $c_n$ (and, for M5, its own balanced part);
+  \item rebuild $v_b(z)=\sum_n a_n^b F_n(z)$.
+\end{enumerate}
+The cost is negligible: a few hundred boundary columns. The split-explicit model already treats the depth integral
+(close to mode 0) separately, so the first step is to change only the barotropic condition; mode-by-mode
+baroclinic conditions are a later refinement.
+
+%=====================================================================================================
+\section{Test problem}
+
+\paragraph{Model.} Oceananigans \texttt{HydrostaticFreeSurfaceModel}, $N_z=1$, \texttt{SplitExplicitFreeSurface},
+no momentum advection, no buoyancy, $f$-plane. This is \eqref{eq:sw} with the same open-boundary machinery as the
+pan-Arctic model.
+
+\paragraph{Geometry.} A square basin $0\le x\le L$, $0\le y\le L$, walls on the west, north and east, open on the
+south. Suggested values: $L=2000$~km, $\Delta x=20$~km, $H=500$~m ($c=70\text{ m s}^{-1}$),
+$f=1.4\times10^{-4}\text{ s}^{-1}$, so $L_d=500$~km. A shallower $H$ than the ocean keeps $L_d$ comparable to the
+basin and slows the waves, so the reference run below can be affordable; the results depend on $R/L_d$ and
+$L/L_d$.
+
+\paragraph{Steady balanced state.} A Gaussian vortex, as in BalancedFlows.jl,
+\begin{equation}
+  \eta_v = \eta_0\,\exp\!\left(-\frac{(x-x_0)^2+(y-y_0)^2}{R^2}\right),\qquad
+  u_v = -\frac{g}{f}\partial_y\eta_v,\quad v_v = \frac{g}{f}\partial_x\eta_v,
+\end{equation}
+centred on the open side ($x_0=L/2$, $y_0=0$), with $R=150$~km and $\eta_0=0.1$~m. The vortex flow crosses the open
+side inwards on one half and outwards on the other, with zero net transport, and has decayed at the walls
+($R\ll L/2$). It is an exact steady solution of \eqref{eq:sw}. The external data are $V_\ext=Hv_v$ and
+$\eta_\ext=\eta_v$ on $y=0$.
+
+\paragraph{Reference solution.} The same initial state in a domain extended far to the south (vortex fully inside,
+the extra boundaries far enough that waves do not return within the run). Compare the two runs in the common
+region.
+
+\paragraph{Experiments.}
+\begin{description}
+  \item[E0 Steady.] Start from the vortex. All conditions should keep it steady; checks the implementation.
+  \item[E1 Adjustment.] Vortex plus an unbalanced Gaussian bump in $\eta$ (no velocity) in the interior, e.g.
+        $0.2$~m, $200$~km. Its PV sets a balanced remainder; the rest leaves as inertia--gravity waves.
+        Tests reflection.
+  \item[E2 Datum offset.] Model starts from the vortex; external data are $\eta_\ext=\eta_v+\delta$ with
+        $\delta=3$~cm. The true solution is the steady vortex. This is the GLORYS problem in miniature.
+  \item[E3 Slow net transport.] Add a slowly varying net inflow $Q(t)$ (period of tens of days) with the matching
+        uniform rise of $\eta_\ext$. Tests whether slow transport is imposed.
+  \item[E4 Shelf.] Repeat E1--E2 with a shelf along part of the open side ($H$ from 500~m to 50~m). Tests the
+        distribution of the correction and coastal-trapped waves.
+\end{description}
+
+\paragraph{Diagnostics.}
+\begin{itemize}
+  \item Net transport through the open side and its distribution along $x$, against $V_\ext$.
+  \item Balanced and unbalanced energy in the basin over time, from the decomposition of Section~2 applied to the
+        model state: the unbalanced energy should leave; the balanced part should match the reference.
+  \item Domain-mean $\eta$ and the constant $C(t)$.
+  \item Maps of the error against the reference at chosen times.
+\end{itemize}
+
+\paragraph{Expected outcomes.}
+E2 separates M1 (spurious transport $\approx c\,\delta\,\times$ width) from the rest; E1 separates M2 (trapped
+waves) from M1, M5a and M5b; E4 separates M4 ($1/H$) from M5b ($1/\sqrt H$); M5a against M5b shows whether letting
+the volume-changing wave part leave matters.
+
+%=====================================================================================================
+\section*{References}
+\begin{itemize}
+  \item Blayo, E. and Debreu, L. (2005). Revisiting open boundary conditions from the point of view of
+        characteristic variables. \emph{Ocean Modelling} 9, 231--252.
+  \item Davies, H. C. (1976). A lateral boundary formulation for multi-level prediction models.
+        \emph{Q. J. R. Meteorol. Soc.} 102, 405--418.
+  \item Flather, R. A. (1976). A tidal model of the north-west European continental shelf.
+        \emph{Mém. Soc. R. Sci. Liège} 6(10), 141--164.
+  \item Marchesiello, P., McWilliams, J. C. and Shchepetkin, A. (2001). Open boundary conditions for long-term
+        integration of regional oceanic models. \emph{Ocean Modelling} 3, 1--20.
+  \item Oddo, P. and Pinardi, N. (2008). Lateral open boundary conditions for nested limited area models: a scale
+        selective approach. \emph{Ocean Modelling} 20, 134--156.
+\end{itemize}
+
+\end{document}
