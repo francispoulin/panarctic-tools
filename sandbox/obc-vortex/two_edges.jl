@@ -41,7 +41,7 @@ function two_edge_grid(P)
     Ly = P.L + P.strait_length
     Ny = round(Int, Ly / P.Δ)
     grid = RectilinearGrid(CPU(); size = (Nx, Ny, 1), x = (0, P.L), y = (0, Ly), z = (-P.H, 0),
-                           halo = (4, 4, 1), topology = (Bounded, TwoSided{Open, Open}, Bounded))
+                           halo = (4, 4, 2), topology = (Bounded, TwoSided{Open, Open}, Bounded))
     bottom(x, y) = (y > P.L && !in_strait(x, P)) ? 0.0 : -P.H
     return ImmersedBoundaryGrid(grid, GridFittedBottom(bottom))
 end
