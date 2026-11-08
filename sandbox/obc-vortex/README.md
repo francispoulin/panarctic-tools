@@ -38,6 +38,7 @@ environment with both Oceananigans and CairoMakie.
 | `summary.jl` | the trade-off figure and table: each condition scored on the datum error (E2b) and the wave error (E1, split into volume and shape) |
 | `run_rotating.jl` | M7 (rotating Flather) on E1 and E2b |
 | `run_slow.jl` | E2c, a slowly drifting datum (3 cm over 10 days, 20-day run): M6 with T_C = 12 h, 2 d, 5 d against M1, M5b, M7; also on E1 |
+| `two_edges.jl`, `two_edges_plot.jl` | two open edges (south side + a 300 km strait in the north wall), 1 Sv throughflow; Flather, per-edge net (M5b), total zero (NEMO/ROMS) and hybrid, against datum and parent-transport errors |
 | `compare.jl` | figures and tables from `results/` in a plotting-only environment (`compare.jl davies`, or experiment names) |
 | `../balanced-flather-block.jl` | M5b written for the pan-Arctic model (Atlantic and Bering edges) |
 
