@@ -80,6 +80,12 @@ for (s, lab, col) in (("_R200", "200 km, 2 h", :darkorange), ("_R500", "500 km, 
     labels["davies" * s] = "M3 Davies " * lab
     colours["davies" * s] = col
 end
+for (m, lab, cols) in (("flather", "M1 Flather", (:skyblue, :royalblue)), ("balanced_net", "M5b", (:lightgreen, :darkgreen)))
+    for ((s, w), col) in zip((("_R200", "200 km"), ("_R500", "500 km")), cols)
+        labels[m * "_sponge" * s] = lab * " + sponge " * w
+        colours[m * "_sponge" * s] = col
+    end
+end
 label_of(m)  = get(labels, m, m)
 colour_of(m) = get(colours, m, :gray40)
 

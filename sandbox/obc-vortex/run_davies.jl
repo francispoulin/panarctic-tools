@@ -1,5 +1,5 @@
 # Dirichlet with a sponge (M3, Davies) for different rim widths and relaxation times, against Flather, plain
-# Dirichlet and M5b, on the wave test (E1, with its reference run) and the growing datum offset (E2b).
+# Dirichlet and M5b, and Flather and M5b each with a 200 or 500 km sponge, on the wave test (E1, with its reference run) and the growing datum offset (E2b).
 #
 # On oceananigans-hpc (Oceananigans 0.117) the simulations and the plots use different environments:
 #
@@ -27,6 +27,11 @@ for experiment in (:adjustment, :offset_ramp)
     for (suffix, rim) in rims
         run_case(:davies, experiment; P = merge(P0, rim), suffix, verbose = false)
         println("done davies$suffix $experiment")
+    end
+    # The same rim on top of the radiating conditions: Flather + sponge (NEMO's usual set-up) and M5b + sponge.
+    for m in (:flather, :balanced_net), (suffix, rim) in rims[1:2]
+        run_case(m, experiment; P = merge(P0, rim), suffix = "_sponge" * suffix, sponge = true, verbose = false)
+        println("done $m sponge$suffix $experiment")
     end
 end
 

@@ -34,7 +34,7 @@ environment with both Oceananigans and CairoMakie.
 | `run_m6.jl` | M6 with T_C = 12 h, 2 d, 5 d on E0, E2, E1 |
 | `run_e2b.jl` | the growing offset (E2b) |
 | `run_trust.jl` | `shelf`: E1, E2, E2b with a shelf (E4); `net_inflow`: E3, 30 days |
-| `run_davies.jl` | M3 (Dirichlet + sponge) with rims of 200, 500, 1000 km at 2 h and 1000 km at 6 h, on E1 and E2b |
+| `run_davies.jl` | M3 (Dirichlet + sponge) with rims of 200, 500, 1000 km at 2 h and 1000 km at 6 h, and M1 and M5b each with a 200 or 500 km sponge, on E1 and E2b |
 | `compare.jl` | figures and tables from `results/` in a plotting-only environment (`compare.jl davies`, or experiment names) |
 | `../balanced-flather-block.jl` | M5b written for the pan-Arctic model (Atlantic and Bering edges) |
 

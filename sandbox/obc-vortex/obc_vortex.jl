@@ -9,6 +9,7 @@
 #   :flather         M1  V = Vᵉˣᵗ − c (ηᵇ − ηᵉˣᵗ)
 #   :dirichlet       M2  V = Vᵉˣᵗ
 #   :davies          M3  M2 plus relaxation of u, v to the external state in a rim
+#   sponge = true adds the same rim to any method (Flather + sponge is NEMO's default set-up)
 #   :flather_target  M4  M1 with target_transport = net external transport (uniform shift per unit length)
 #   :balanced_net    M5b V = Vᵉˣᵗ − c (ηᵇ − ηᵉˣᵗ − C), C from the net constraint (√(gH)-weighted)
 #   :balanced_pv     M5a same, C from the PV inversion with the volume constraint (updated every model step)
@@ -190,11 +191,11 @@ function davies_forcing(P, experiment)
             v = Relaxation(rate = P.rim_rate, mask = mask, target = v_target))
 end
 
-function build_model(method, experiment; P = default_parameters(), shelf = false, reference = false)
+function build_model(method, experiment; P = default_parameters(), shelf = false, reference = false, sponge = false)
     grid = build_grid(P; reference, shelf)
     p = external_parameters(grid, P, experiment; shelf)
     boundary_conditions_ = reference ? NamedTuple() : boundary_conditions(method, grid, p)
-    forcing = (!reference && method === :davies) ? davies_forcing(P, experiment) : NamedTuple()
+    forcing = (!reference && (method === :davies || sponge)) ? davies_forcing(P, experiment) : NamedTuple()
     free_surface = SplitExplicitFreeSurface(grid; substeps = P.substeps, gravitational_acceleration = P.g)
     model = HydrostaticFreeSurfaceModel(grid; free_surface, coriolis = FPlane(f = P.f),
                                         momentum_advection = nothing, buoyancy = nothing, tracers = (),
@@ -251,8 +252,8 @@ to `dir/<method>_<experiment>[_shelf].jls`.
 """
 function run_case(method, experiment; P = default_parameters(), shelf = false, reference = false,
                   stop_time = stop_time_for(experiment), output_interval = 1hour, dir = "results", verbose = true,
-                  suffix = "")
-    model, p = build_model(method, experiment; P, shelf, reference)
+                  suffix = "", sponge = false)
+    model, p = build_model(method, experiment; P, shelf, reference, sponge)
     set_initial_state!(model, experiment, P)
     simulation = Simulation(model; Δt = P.Δt, stop_time, verbose = false)
 

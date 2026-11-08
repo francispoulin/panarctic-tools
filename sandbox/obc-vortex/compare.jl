@@ -6,7 +6,9 @@
 include("analysis.jl")
 
 const davies_methods = ("flather", "dirichlet", "balanced_net",
-                        "davies_R200", "davies_R500", "davies_R1000", "davies_R1000_6h")
+                        "davies_R200", "davies_R500", "davies_R1000", "davies_R1000_6h",
+                        "flather_sponge_R200", "flather_sponge_R500",
+                        "balanced_net_sponge_R200", "balanced_net_sponge_R500")
 
 args = isempty(ARGS) ? ["davies"] : ARGS
 for a in args
