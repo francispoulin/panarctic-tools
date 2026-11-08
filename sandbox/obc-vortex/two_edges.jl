@@ -18,16 +18,25 @@
 #                  surface freshwater flux (zero here)
 #   :hybrid        :edge_net, then the :total_zero correction (each edge follows the parent, the total closes our
 #                  own volume budget)
+#   :hybrid_H      as :hybrid, but the per-edge correction is a uniform velocity (transport change ∝ H, as NEMO's)
+#                  rather than a uniform η shift (∝ √(gH))
 #
-#   julia -t 8 --project=$OCEAN_HPC_ROOT two_edges.jl                    # results/two_edges_*.jls, table on screen
-#   julia --project=$OCEAN_HPC_ROOT/viz two_edges_plot.jl                # figures/two_edges.png
+# Variant `shallow`: a 100 m deep strait and the 50 m shelf of E4 along the west of the south edge, so the two
+# per-edge weightings differ; methods :flather, :total_zero, :hybrid, :hybrid_H.
+#
+#   julia -t 8 --project=$OCEAN_HPC_ROOT two_edges.jl [shallow]          # results/two_edges_*.jls, table on screen
+#   julia --project=$OCEAN_HPC_ROOT/viz two_edges_plot.jl [shallow]      # figures/two_edges[_shallow].png
 
 include("obc_vortex.jl")
 
 const P2 = merge(default_parameters(), (strait_x = (1400kilometers, 1700kilometers), strait_length = 100kilometers,
-                                        Q = 1e6, Q_ramp = 2days, datum = 0.03, datum_ramp = 1day, stop = 20days))
+                                        Q = 1e6, Q_ramp = 2days, datum = 0.03, datum_ramp = 1day, stop = 20days,
+                                        strait_depth = 500.0, shelf = false))
+const P2shallow = merge(P2, (strait_depth = 100.0, shelf = true))
 
-const two_edge_methods = (:flather, :edge_net, :total_zero, :hybrid)
+const variant = isempty(ARGS) ? "flat" : ARGS[1]
+const two_edge_methods = variant == "shallow" ? (:flather, :total_zero, :hybrid, :hybrid_H) :
+                                                (:flather, :edge_net, :total_zero, :hybrid)
 const two_edge_cases   = (:base, :datum_both, :datum_south, :parent_mismatch)
 
 #####
@@ -42,8 +51,9 @@ function two_edge_grid(P)
     Ny = round(Int, Ly / P.Δ)
     grid = RectilinearGrid(CPU(); size = (Nx, Ny, 1), x = (0, P.L), y = (0, Ly), z = (-P.H, 0),
                            halo = (4, 4, 2), topology = (Bounded, TwoSided{Open, Open}, Bounded))
-    bottom(x, y) = (y > P.L && !in_strait(x, P)) ? 0.0 : -P.H
-    return ImmersedBoundaryGrid(grid, GridFittedBottom(bottom))
+    bottom(x, y) = y > P.L ? (in_strait(x, P) ? -P.strait_depth : 0.0) : -depth(x, P; shelf = P.shelf)
+    P.shelf || return ImmersedBoundaryGrid(grid, GridFittedBottom(bottom))
+    return ImmersedBoundaryGrid(grid, PartialCellBottom(bottom; minimum_fractional_cell_height = 0.05))
 end
 
 #####
@@ -53,23 +63,27 @@ end
 function two_edge_parameters(grid, P, method, case)
     x  = xnodes(grid, Center())
     W  = P.strait_x[2] - P.strait_x[1]
-    Δη = P.f * P.Q / (P.g * P.H)
+    Hb = [depth(xi, P; shelf = P.shelf) for xi in x]
+    ΔηS = P.f * P.Q * P.L / (P.g * sum(Hb) * P.Δ)          # geostrophic η drop across each edge
+    ΔηN = P.f * P.Q / (P.g * P.strait_depth)
     strait = [in_strait(xi, P) for xi in x]
     return (; Nx = length(x), Δ = P.Δ, L = P.L, W, g = P.g, strait,
-            VS₀ = P.H .* [vortex_v(xi, 0.0, P) for xi in x],
+            VS₀ = Hb .* [vortex_v(xi, 0.0, P) for xi in x],
+            qS = Hb ./ (sum(Hb) * P.Δ),                       # the throughflow spread as a uniform velocity
             ηS₀ = [vortex_η(xi, 0.0, P) for xi in x],
-            ηSᵗᶠ = Δη .* (0.5 .- x ./ P.L),
-            ηNᵗᶠ = [s ? Δη * (0.5 - (xi - P.strait_x[1]) / W) : 0.0 for (s, xi) in zip(strait, x)],
+            ηSᵗᶠ = ΔηS .* (0.5 .- x ./ P.L),
+            ηNᵗᶠ = [s ? ΔηN * (0.5 - (xi - P.strait_x[1]) / W) : 0.0 for (s, xi) in zip(strait, x)],
             QS = case === :parent_mismatch ? 1.05P.Q : P.Q, QN = P.Q,
             δS = case in (:datum_both, :datum_south) ? P.datum : 0.0,
             δN = case === :datum_both ? P.datum : 0.0,
             τQ = P.Q_ramp, τδ = P.datum_ramp,
-            edge = method in (:edge_net, :hybrid), total = method in (:total_zero, :hybrid))
+            edge = method in (:edge_net, :hybrid), edge_H = method === :hybrid_H,
+            total = method in (:total_zero, :hybrid, :hybrid_H))
 end
 
 @inline ramp(t, τ) = min(t / τ, one(t))
 # V is positive northward: out of the basin through the strait, into it through the south side
-@inline Vext_south(i, t, p) = @inbounds p.VS₀[i] - ramp(t, p.τQ) * p.QS / p.L
+@inline Vext_south(i, t, p) = @inbounds p.VS₀[i] - ramp(t, p.τQ) * p.QS * p.qS[i]
 @inline ηext_south(i, t, p) = @inbounds p.ηS₀[i] + ramp(t, p.τQ) * p.ηSᵗᶠ[i] + p.δS * ramp(t, p.τδ)
 @inline Vext_north(i, t, p) = @inbounds ifelse(p.strait[i], -ramp(t, p.τQ) * p.QN / p.W, zero(t))
 @inline ηext_north(i, t, p) = @inbounds ifelse(p.strait[i], ramp(t, p.τQ) * p.ηNᵗᶠ[i] + p.δN * ramp(t, p.τδ), zero(t))
@@ -95,26 +109,29 @@ end
     return (; nS, dS, nN, dN, AS, AN, FS, FN)
 end
 
-# (C_south, C_north, w): the per-edge constants and the uniform velocity removed from the inflow
+# Per-edge corrections, either η shifts (CS, CN) or uniform velocities (uS, uN), then the uniform velocity w removed
+# from the total inflow
 @inline function corrections(grid, η, t, p)
     s  = edge_sums(grid, η, t, p)
     CS = ifelse(p.edge, s.nS / s.dS, zero(grid))
     CN = ifelse(p.edge, s.nN / s.dN, zero(grid))
-    inflow = (s.FS + CS * s.dS) - (s.FN - CN * s.dN)
+    uS = ifelse(p.edge_H, -s.nS / s.AS, zero(grid))
+    uN = ifelse(p.edge_H, s.nN / s.AN, zero(grid))
+    inflow = (s.FS + CS * s.dS - uS * s.AS) - (s.FN - CN * s.dN - uN * s.AN)
     w  = ifelse(p.total, inflow / (s.AS + s.AN), zero(grid))
-    return CS, CN, w
+    return CS, CN, uS, uN, w
 end
 
 @inline function south_value(i, k, grid, clock, fields, p)
-    CS, CN, w = corrections(grid, fields.η, clock.time, p)
+    CS, CN, uS, uN, w = corrections(grid, fields.η, clock.time, p)
     H = max(static_column_depthᶜᶠᵃ(i, 1, grid), zero(grid))
-    return (Vext_south(i, clock.time, p) - H * w, ηext_south(i, clock.time, p) + CS)
+    return (Vext_south(i, clock.time, p) - H * (uS + w), ηext_south(i, clock.time, p) + CS)
 end
 
 @inline function north_value(i, k, grid, clock, fields, p)
-    CS, CN, w = corrections(grid, fields.η, clock.time, p)
+    CS, CN, uS, uN, w = corrections(grid, fields.η, clock.time, p)
     H = max(static_column_depthᶜᶠᵃ(i, grid.Ny + 1, grid), zero(grid))
-    return (Vext_north(i, clock.time, p) + H * w, ηext_north(i, clock.time, p) + CN)
+    return (Vext_north(i, clock.time, p) - H * (uN - w), ηext_north(i, clock.time, p) + CN)
 end
 
 #####
@@ -153,14 +170,15 @@ function run_two_edges(method, case; P = P2)
     run!(simulation)
     result = (; method, case, times, south, north, mean_η, η_end = Array(interior(η))[:, :, 1], wet)
     mkpath("results")
-    serialize("results/two_edges_$(method)_$(case).jls", result)
+    serialize("results/two_edges_$(variant == "flat" ? "" : variant * "_")$(method)_$(case).jls", result)
     return result
 end
 
-R = Dict((m, c) => run_two_edges(m, c) for c in two_edge_cases for m in two_edge_methods)
+const Pvariant = variant == "shallow" ? P2shallow : P2
+R = Dict((m, c) => run_two_edges(m, c; P = Pvariant) for c in two_edge_cases for m in two_edge_methods)
 
 last_day(r, a) = (n = findall(t -> t ≥ r.times[end] - 1day, r.times); sum(a[n]) / length(n))
-println("\nTwo open edges, day 20 (last-day means). Parent: 1 Sv in at the strait, 1 Sv out at the south",
+println("\nTwo open edges ($variant), day 20 (last-day means). Parent: 1 Sv in at the strait, 1 Sv out at the south",
         " (1.05 Sv for parent_mismatch). The truth for every case is the base run.")
 @printf("  %-16s %-11s %10s %10s %12s %14s\n", "case", "method", "south [Sv]", "strait [Sv]", "Δ⟨η⟩ [cm]",
         "rms vs base [cm]")
@@ -171,4 +189,4 @@ for c in two_edge_cases, m in two_edge_methods
             last_day(r, r.north) / 1e6 * -1, 100 * (r.mean_η[end] - r.mean_η[1]), 100 * sqrt(sum(abs2, Δ) / length(Δ)))
 end
 println("  (south: net outflow, positive out of the basin; strait: net inflow, positive into the basin)")
-println("\nPlot with:  julia --project=\$OCEAN_HPC_ROOT/viz two_edges_plot.jl")
+println("\nPlot with:  julia --project=\$OCEAN_HPC_ROOT/viz two_edges_plot.jl $(variant == "flat" ? "" : variant)")

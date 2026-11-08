@@ -14,6 +14,7 @@
 #   :balanced_net    M5b V = Vᵉˣᵗ − c (ηᵇ − ηᵉˣᵗ − C), C from the net constraint (√(gH)-weighted)
 #   :balanced_pv     M5a same, C from the PV inversion with the volume constraint (updated every model step)
 #   :balanced_filtered M6 same, C a slow average (timescale T_C) of the √(gH)-weighted mean edge mismatch
+#   :balanced_rotating M5b + M7: the net constraint with the rotational term
 #   :rotating_flather M7 V = Vᵉˣᵗ − c (ηᵇ − ηᵉˣᵗ) + S/2,  dS/dt = −f H (uᵇ − uᵉˣᵗ) at each edge point: Flather with
 #                        the rotational correction to the wave admittance (sandbox/obc-waves); S also absorbs a datum
 #
@@ -136,6 +137,24 @@ end
 @inline rotating_flather_value(i, k, grid, clock, fields, p) =
     (@inbounds(external_V(i, clock.time, p) + p.S[i] / 2), external_η(i, clock.time, p))
 
+# M5b + M7: the rotational term S/2 on top of the net constraint; C also absorbs the net of S/2
+@inline function balanced_rotating_value(i, k, grid, clock, fields, p)
+    t  = clock.time
+    η  = fields.η
+    kη = grid.Nz + 1
+    num = zero(grid)
+    den = zero(grid)
+    for i′ in 1:grid.Nx
+        c  = sqrt(p.g * max(static_column_depthᶜᶠᵃ(i′, 1, grid), zero(grid)))
+        Δx = Δxᶜᶠᶜ(i′, 1, 1, grid)
+        ηᵇ = (η[i′, 0, kη] + η[i′, 1, kη]) / 2
+        num += (c * (ηᵇ - external_η(i′, t, p)) - @inbounds(p.S[i′]) / 2) * Δx
+        den += c * Δx
+    end
+    C = num / den
+    return (@inbounds(external_V(i, t, p) + p.S[i] / 2), external_η(i, t, p) + C)
+end
+
 # M2, M3: Vᵉˣᵗ. A plain normal-flow condition is also filled without a clock (at initialisation), which a
 # DiscreteBoundaryFunction does not accept, so use a small callable that handles both forms.
 struct DirichletTransport{P}
@@ -181,6 +200,8 @@ function boundary_conditions(method, grid, p)
         GravityWaveRadiationBoundaryCondition(balanced_net_value; discrete_form = true, parameters = p)
     elseif method === :rotating_flather
         GravityWaveRadiationBoundaryCondition(rotating_flather_value; discrete_form = true, parameters = p)
+    elseif method === :balanced_rotating
+        GravityWaveRadiationBoundaryCondition(balanced_rotating_value; discrete_form = true, parameters = p)
     elseif method in (:balanced_pv, :balanced_filtered)
         GravityWaveRadiationBoundaryCondition(balanced_pv_value; discrete_form = true, parameters = p)
     elseif method in (:dirichlet, :davies)
@@ -302,7 +323,7 @@ function run_case(method, experiment; P = default_parameters(), shelf = false, r
     end
 
     # M7: dS/dt = −f H (uᵇ − uᵉˣᵗ), uᵇ the along-edge velocity at the centres of the first row of cells
-    if method === :rotating_flather && !reference
+    if method in (:rotating_flather, :balanced_rotating) && !reference
         function step_S!(sim)
             u = sim.model.velocities.u
             for i in 1:length(p.S)

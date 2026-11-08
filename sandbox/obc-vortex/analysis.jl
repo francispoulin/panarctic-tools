@@ -69,11 +69,12 @@ const labels = Dict("flather" => "M1 Flather", "dirichlet" => "M2 Dirichlet", "d
                     "flather_target" => "M4 Flather + target", "balanced_net" => "M5b balanced (net)",
                     "balanced_pv" => "M5a balanced (PV)", "balanced_filtered" => "M6 filtered C (2 d)",
                     "balanced_filtered_T12h" => "M6 filtered C (12 h)", "balanced_filtered_T5d" => "M6 filtered C (5 d)",
-                    "rotating_flather" => "M7 rotating Flather")
+                    "rotating_flather" => "M7 rotating Flather",
+                    "balanced_rotating" => "M5b + M7")
 const colours = Dict("flather" => :steelblue, "dirichlet" => :firebrick, "davies" => :darkorange,
                      "flather_target" => :purple, "balanced_net" => :seagreen, "balanced_pv" => :black,
                      "balanced_filtered" => :deeppink, "balanced_filtered_T12h" => :hotpink,
-                     "balanced_filtered_T5d" => :mediumvioletred, "rotating_flather" => :black)
+                     "balanced_filtered_T5d" => :mediumvioletred, "rotating_flather" => :black, "balanced_rotating" => :purple)
 
 # Davies rim variants (run_davies.jl), and a fallback for any other suffixed run
 for (s, lab, col) in (("_R200", "200 km, 2 h", :darkorange), ("_R500", "500 km, 2 h", :orangered),

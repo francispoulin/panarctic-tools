@@ -23,8 +23,8 @@ for a in args
         compare(:offset_slow; methods = slow_methods, tag_suffix = "_slow")
         compare(:adjustment; methods = slow_methods, tag_suffix = "_slow")
     elseif a == "rotating"
-        for experiment in (:adjustment, :offset_ramp)
-            compare(experiment; methods = ("flather", "dirichlet", "balanced_net", "rotating_flather"),
+        for experiment in (:adjustment, :offset_ramp, :offset_slow)
+            compare(experiment; methods = ("flather", "balanced_net", "rotating_flather", "balanced_rotating"),
                     tag_suffix = "_rotating")
         end
     else
