@@ -9,7 +9,19 @@ basin with walls on the west, north and east and an open south side. A geostroph
 side crosses it inwards on one half and outwards on the other, with zero net transport: an exact steady solution, so
 the right answer is known. Theory, notation and the derivation of each condition: `balanced_obc_notes.tex`.
 
-Written and run with Oceananigans 0.113.6 on CPU (about 3 minutes for E0–E2 with every method).
+Written and run with Oceananigans 0.113.6 on CPU (about 3 minutes for E0–E2 with every method); updated for
+Oceananigans 0.117 (oceananigans-hpc v1.4): the open south side is declared `Open` in the grid topology
+(`TwoSided{Open, Closed}` in y), as open-boundary schemes now require.
+
+On oceananigans-hpc, run the simulations in the platform environment and the plots in `viz/`:
+
+```bash
+julia -t 8 --project=$OCEAN_HPC_ROOT run_davies.jl
+julia --project=$OCEAN_HPC_ROOT/viz compare.jl davies
+```
+
+The older drivers (`run_all.jl`, `run_m6.jl`, `run_e2b.jl`, `run_trust.jl`) run and plot in one go, so they need an
+environment with both Oceananigans and CairoMakie.
 
 ## Files
 
@@ -22,6 +34,8 @@ Written and run with Oceananigans 0.113.6 on CPU (about 3 minutes for E0–E2 wi
 | `run_m6.jl` | M6 with T_C = 12 h, 2 d, 5 d on E0, E2, E1 |
 | `run_e2b.jl` | the growing offset (E2b) |
 | `run_trust.jl` | `shelf`: E1, E2, E2b with a shelf (E4); `net_inflow`: E3, 30 days |
+| `run_davies.jl` | M3 (Dirichlet + sponge) with rims of 200, 500, 1000 km at 2 h and 1000 km at 6 h, on E1 and E2b |
+| `compare.jl` | figures and tables from `results/` in a plotting-only environment (`compare.jl davies`, or experiment names) |
 | `../balanced-flather-block.jl` | M5b written for the pan-Arctic model (Atlantic and Bering edges) |
 
 ```bash
@@ -82,5 +96,4 @@ Defaults: L = 2000 km, Δ = 20 km, H = 500 m (c = 70 m/s, L_d = 500 km), f = 1.4
 - M5b computes C inside the boundary function at every barotropic substep; in Oceananigans it would be a
   time-dependent, √(gH)-weighted `target_transport`.
 - The energy split has a floor of about 6e7 J m³/kg from discretisation.
-- Oceananigans ≥ 0.117 requires open sides to be declared `Open` in the grid topology; this code uses
-  `(Bounded, Bounded, Bounded)`; to run there, use `TwoSided{Open, Closed}` in y (south open, north closed).
+- Oceananigans ≥ 0.117: the basin's y topology is `TwoSided{Open, Closed}`; the reference basin stays `Bounded`.

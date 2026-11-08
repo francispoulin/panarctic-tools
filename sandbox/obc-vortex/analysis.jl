@@ -74,6 +74,15 @@ const colours = Dict("flather" => :steelblue, "dirichlet" => :firebrick, "davies
                      "balanced_filtered" => :deeppink, "balanced_filtered_T12h" => :hotpink,
                      "balanced_filtered_T5d" => :mediumvioletred)
 
+# Davies rim variants (run_davies.jl), and a fallback for any other suffixed run
+for (s, lab, col) in (("_R200", "200 km, 2 h", :darkorange), ("_R500", "500 km, 2 h", :orangered),
+                      ("_R1000", "1000 km, 2 h", :brown), ("_R1000_6h", "1000 km, 6 h", :goldenrod))
+    labels["davies" * s] = "M3 Davies " * lab
+    colours["davies" * s] = col
+end
+label_of(m)  = get(labels, m, m)
+colour_of(m) = get(colours, m, :gray40)
+
 const default_methods = ("flather", "dirichlet", "davies", "flather_target", "balanced_net", "balanced_pv", "balanced_filtered")
 
 function compare(experiment; methods = default_methods, tag_suffix = "",
@@ -96,7 +105,7 @@ function compare(experiment; methods = default_methods, tag_suffix = "",
     for r in results
         t = r.times ./ 86400
         d = diagnostics(r, refs, inv, P)
-        lab, col = labels[r.method], colours[r.method]
+        lab, col = label_of(r.method), colour_of(r.method)
         lines!(ax1, t, r.net ./ 1e6; color = col, label = lab)
         lines!(ax2, t, max.(d.E′, 1e-6); color = col, label = lab)
         lines!(ax3, t, d.errη; color = col, label = lab)
@@ -124,7 +133,7 @@ function compare(experiment; methods = default_methods, tag_suffix = "",
     lim = 0.02
     for (row, k) in enumerate(times_k), (col, r) in enumerate(results)
         Δη = r.snapshots[k].η .- refs[min(k, length(refs))].η
-        ax = Axis(fig2[row, col], title = @sprintf("%s, day %.1f", labels[r.method], r.times[k] / 86400),
+        ax = Axis(fig2[row, col], title = @sprintf("%s, day %.1f", label_of(r.method), r.times[k] / 86400),
                   aspect = DataAspect(), xlabel = row == 2 ? "x (km)" : "", ylabel = col == 1 ? "y (km)" : "")
         hm = heatmap!(ax, x, x, Δη; colormap = :balance, colorrange = (-lim, lim))
         col == length(results) && Colorbar(fig2[row, col+1], hm, label = "η − η_ref (m)")

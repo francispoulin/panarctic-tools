@@ -25,7 +25,7 @@
 using Oceananigans
 using Oceananigans.Units
 using Oceananigans.BoundaryConditions: GravityWaveRadiationBoundaryCondition, NormalRadiation
-using Oceananigans.Grids: static_column_depthᶜᶠᵃ
+using Oceananigans.Grids: static_column_depthᶜᶠᵃ, TwoSided, Open, Closed
 using Oceananigans.Operators: Δxᶜᶠᶜ
 using Printf, Serialization
 
@@ -83,12 +83,15 @@ inflow_volume(t, P, experiment) = experiment === :net_inflow ? P.Q₀ * P.T_Q / 
 ##### Grid
 #####
 
+# Oceananigans ≥ 0.117: open-boundary schemes need an `Open` side, so the basin is open to the south and closed to
+# the north (`TwoSided{Open, Closed}` in y). The reference basin is closed on all sides.
 function build_grid(P; reference = false, shelf = false)
     Nx = round(Int, P.L / P.Δ)
     y₁ = reference ? -P.south_extension : 0.0
     Ny = round(Int, (P.L - y₁) / P.Δ)
+    TY = reference ? Bounded : TwoSided{Open, Closed}
     grid = RectilinearGrid(CPU(); size = (Nx, Ny, 1), x = (0, P.L), y = (y₁, P.L), z = (-P.H, 0),
-                           halo = (4, 4, shelf ? 2 : 1), topology = (Bounded, Bounded, Bounded))
+                           halo = (4, 4, shelf ? 2 : 1), topology = (Bounded, TY, Bounded))
     shelf || return grid
     bottom(x, y) = -depth(x, P; shelf = true)
     return ImmersedBoundaryGrid(grid, PartialCellBottom(bottom; minimum_fractional_cell_height = 0.05))
