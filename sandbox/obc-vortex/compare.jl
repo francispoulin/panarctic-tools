@@ -16,6 +16,11 @@ for a in args
         for experiment in (:adjustment, :offset_ramp)
             compare(experiment; methods = davies_methods, tag_suffix = "_davies")
         end
+    elseif a == "rotating"
+        for experiment in (:adjustment, :offset_ramp)
+            compare(experiment; methods = ("flather", "dirichlet", "balanced_net", "rotating_flather"),
+                    tag_suffix = "_rotating")
+        end
     else
         compare(Symbol(a))
     end

@@ -14,7 +14,7 @@ include("analysis.jl")
 
 const summary_methods = ["flather", "flather_sponge_R200", "flather_sponge_R500",
                          "dirichlet", "davies_R200", "davies_R500", "davies_R1000", "davies_R1000_6h",
-                         "balanced_net", "balanced_net_sponge_R200", "balanced_net_sponge_R500"]
+                         "balanced_net", "balanced_net_sponge_R200", "balanced_net_sponge_R500", "rotating_flather"]
 
 function scores(name, experiment)
     r = load(name, experiment)

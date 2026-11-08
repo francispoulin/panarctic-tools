@@ -14,6 +14,8 @@
 #   :balanced_net    M5b V = Vᵉˣᵗ − c (ηᵇ − ηᵉˣᵗ − C), C from the net constraint (√(gH)-weighted)
 #   :balanced_pv     M5a same, C from the PV inversion with the volume constraint (updated every model step)
 #   :balanced_filtered M6 same, C a slow average (timescale T_C) of the √(gH)-weighted mean edge mismatch
+#   :rotating_flather M7 V = Vᵉˣᵗ − c (ηᵇ − ηᵉˣᵗ) + S/2,  dS/dt = −f H (uᵇ − uᵉˣᵗ) at each edge point: Flather with
+#                        the rotational correction to the wave admittance (sandbox/obc-waves); S also absorbs a datum
 #
 # Experiments: :steady (E0), :adjustment (E1), :offset (E2), :offset_ramp (E2b: the offset grows over δ_ramp),
 # :net_inflow (E3); keyword shelf = true for E4.
@@ -114,7 +116,9 @@ function external_parameters(grid, P, experiment; shelf = false)
     δ  = experiment in (:offset, :offset_ramp) ? P.δ : 0.0
     τδ = experiment === :offset_ramp ? P.δ_ramp : 0.0
     E3 = experiment === :net_inflow
-    return (; V₀, η₀, δ, τδ, E3, Q₀ = P.Q₀, ω_Q = 2π / P.T_Q, Lx = P.L, A = P.L^2, g = P.g, C = [0.0])
+    uᵉˣᵗ = [vortex_u(xi, P.Δ / 2, P) for xi in x]          # along-edge velocity at the first row of cells (M7)
+    return (; V₀, η₀, δ, τδ, E3, Q₀ = P.Q₀, ω_Q = 2π / P.T_Q, Lx = P.L, A = P.L^2, g = P.g, C = [0.0],
+            uᵉˣᵗ, S = zeros(Nx), Hb)
 end
 
 @inline external_Q(t, p)   = ifelse(p.E3, p.Q₀ * sin(p.ω_Q * t), zero(t))
@@ -125,6 +129,10 @@ end
 
 # M1, M4: (Vᵉˣᵗ, ηᵉˣᵗ)
 @inline flather_value(i, k, grid, clock, fields, p) = (external_V(i, clock.time, p), external_η(i, clock.time, p))
+
+# M7: Flather with Vᵉˣᵗ + S/2; S is stepped in a callback (see run_case)
+@inline rotating_flather_value(i, k, grid, clock, fields, p) =
+    (@inbounds(external_V(i, clock.time, p) + p.S[i] / 2), external_η(i, clock.time, p))
 
 # M2, M3: Vᵉˣᵗ. A plain normal-flow condition is also filled without a clock (at initialisation), which a
 # DiscreteBoundaryFunction does not accept, so use a small callable that handles both forms.
@@ -169,6 +177,8 @@ function boundary_conditions(method, grid, p)
         GravityWaveRadiationBoundaryCondition(flather_value; discrete_form = true, parameters = p, target_transport = Q)
     elseif method === :balanced_net
         GravityWaveRadiationBoundaryCondition(balanced_net_value; discrete_form = true, parameters = p)
+    elseif method === :rotating_flather
+        GravityWaveRadiationBoundaryCondition(rotating_flather_value; discrete_form = true, parameters = p)
     elseif method in (:balanced_pv, :balanced_filtered)
         GravityWaveRadiationBoundaryCondition(balanced_pv_value; discrete_form = true, parameters = p)
     elseif method in (:dirichlet, :davies)
@@ -289,6 +299,19 @@ function run_case(method, experiment; P = default_parameters(), shelf = false, r
         add_callback!(simulation, filter_C!, IterationInterval(1))
     end
 
+    # M7: dS/dt = −f H (uᵇ − uᵉˣᵗ), uᵇ the along-edge velocity at the centres of the first row of cells
+    if method === :rotating_flather && !reference
+        function step_S!(sim)
+            u = sim.model.velocities.u
+            for i in 1:length(p.S)
+                uᵇ = (u[i, 1, 1] + u[i+1, 1, 1]) / 2
+                p.S[i] -= sim.Δt * P.f * p.Hb[i] * (uᵇ - p.uᵉˣᵗ[i])
+            end
+            return nothing
+        end
+        add_callback!(simulation, step_S!, IterationInterval(1))
+    end
+
     times = Float64[]; net = Float64[]; net_ext = Float64[]; mean_η = Float64[]; Cs = Float64[]
     snapshots = NamedTuple[]
     function record!(sim)
@@ -320,4 +343,5 @@ end
 
 run_reference(experiment; kw...) = run_case(:none, experiment; reference = true, kw...)
 
-const all_methods = (:flather, :dirichlet, :davies, :flather_target, :balanced_net, :balanced_pv, :balanced_filtered)
+const all_methods = (:flather, :dirichlet, :davies, :flather_target, :balanced_net, :balanced_pv, :balanced_filtered,
+                     :rotating_flather)
