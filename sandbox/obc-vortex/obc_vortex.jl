@@ -28,7 +28,7 @@
 
 using Oceananigans
 using Oceananigans.Units
-using Oceananigans.BoundaryConditions: GravityWaveRadiationBoundaryCondition, NormalRadiation, fill_halo_regions!
+using Oceananigans.BoundaryConditions: GravityWaveRadiationBoundaryCondition, NormalRadiation
 using Oceananigans.Grids: static_column_depthᶜᶠᵃ, TwoSided, Open, Closed
 using Oceananigans.Operators: Δxᶜᶠᶜ
 using Printf, Serialization
@@ -242,13 +242,12 @@ end
 function net_constraint_C(model, p)
     grid = model.grid
     η  = model.free_surface.displacement
-    fill_halo_regions!(η)          # ηᵇ uses the halo: at t = 0 (before the first step) it has not been filled yet
     kη = grid.Nz + 1
     t  = model.clock.time
     num = 0.0; den = 0.0
     for i in 1:grid.Nx
         c  = sqrt(p.g * max(static_column_depthᶜᶠᵃ(i, 1, grid), 0.0))
-        ηᵇ = (η[i, 0, kη] + η[i, 1, kη]) / 2
+        ηᵇ = η[i, 1, kη]       # the first interior row: the halo row is still empty before the first time step
         num += c * (ηᵇ - external_η(i, t, p)); den += c
     end
     return num / den
