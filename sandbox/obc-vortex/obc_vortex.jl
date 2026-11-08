@@ -18,6 +18,7 @@
 #                        the rotational correction to the wave admittance (sandbox/obc-waves); S also absorbs a datum
 #
 # Experiments: :steady (E0), :adjustment (E1), :offset (E2), :offset_ramp (E2b: the offset grows over δ_ramp),
+# :offset_slow (E2c: the offset grows over δ_ramp_slow, run for 20 days),
 # :net_inflow (E3); keyword shelf = true for E4.
 #
 # Usage:
@@ -55,6 +56,7 @@ default_parameters() = (
     # E2: datum offset of the external free surface
     δ   = 0.03,
     δ_ramp = 1day,              # :offset_ramp: the offset grows linearly over this time
+    δ_ramp_slow = 10days,       # :offset_slow: the same, slowly (a realistic drift of the datum)
     # E3: slowly varying net inflow Q(t) = Q₀ sin(2πt/T_Q), spread uniformly along the open side
     Q₀  = 1e6, T_Q = 10days,
     # M3: Davies rim
@@ -113,8 +115,8 @@ function external_parameters(grid, P, experiment; shelf = false)
     Hb = [depth(xi, P; shelf) for xi in x]
     V₀ = Hb .* [vortex_v(xi, 0.0, P) for xi in x]
     η₀ = [vortex_η(xi, 0.0, P) for xi in x]
-    δ  = experiment in (:offset, :offset_ramp) ? P.δ : 0.0
-    τδ = experiment === :offset_ramp ? P.δ_ramp : 0.0
+    δ  = experiment in (:offset, :offset_ramp, :offset_slow) ? P.δ : 0.0
+    τδ = experiment === :offset_ramp ? P.δ_ramp : experiment === :offset_slow ? P.δ_ramp_slow : 0.0
     E3 = experiment === :net_inflow
     uᵉˣᵗ = [vortex_u(xi, P.Δ / 2, P) for xi in x]          # along-edge velocity at the first row of cells (M7)
     return (; V₀, η₀, δ, τδ, E3, Q₀ = P.Q₀, ω_Q = 2π / P.T_Q, Lx = P.L, A = P.L^2, g = P.g, C = [0.0],
@@ -251,7 +253,7 @@ function net_constraint_C(model, p)
     return num / den
 end
 
-stop_time_for(experiment) = experiment === :net_inflow ? 30days : 2days
+stop_time_for(experiment) = experiment === :net_inflow ? 30days : experiment === :offset_slow ? 20days : 2days
 
 """
     run_case(method, experiment; P, shelf = false, stop_time, output_interval = 1hour, dir = "results")

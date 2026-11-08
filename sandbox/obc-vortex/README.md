@@ -36,6 +36,8 @@ environment with both Oceananigans and CairoMakie.
 | `run_trust.jl` | `shelf`: E1, E2, E2b with a shelf (E4); `net_inflow`: E3, 30 days |
 | `run_davies.jl` | M3 (Dirichlet + sponge) with rims of 200, 500, 1000 km at 2 h and 1000 km at 6 h, and M1 and M5b each with a 200 or 500 km sponge, on E1 and E2b |
 | `summary.jl` | the trade-off figure and table: each condition scored on the datum error (E2b) and the wave error (E1, split into volume and shape) |
+| `run_rotating.jl` | M7 (rotating Flather) on E1 and E2b |
+| `run_slow.jl` | E2c, a slowly drifting datum (3 cm over 10 days, 20-day run): M6 with T_C = 12 h, 2 d, 5 d against M1, M5b, M7; also on E1 |
 | `compare.jl` | figures and tables from `results/` in a plotting-only environment (`compare.jl davies`, or experiment names) |
 | `../balanced-flather-block.jl` | M5b written for the pan-Arctic model (Atlantic and Bering edges) |
 
@@ -64,6 +66,7 @@ julia --project=... run_trust.jl net_inflow
 
 E0 `:steady`; E1 `:adjustment` (unbalanced bump, waves must leave; reference: basin extended 8000 km south);
 E2 `:offset` (external η 3 cm higher from t = 0); E2b `:offset_ramp` (offset grows over 1 day);
+E2c `:offset_slow` (offset grows over 10 days, 20-day run);
 E3 `:net_inflow` (1 Sv, 10-day period, 30 days); E4 `shelf = true` (50 m shelf along the west of the open side).
 
 Defaults: L = 2000 km, Δ = 20 km, H = 500 m (c = 70 m/s, L_d = 500 km), f = 1.4e-4 s⁻¹, vortex R = 150 km,

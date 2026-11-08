@@ -42,7 +42,7 @@ function reference_states(experiment, P, times; shelf = false, dir = "results")
         return [restrict(s, P) for s in ref.snapshots]
     elseif experiment === :net_inflow
         return [analytic_state(P; rise = P.Q₀ * P.T_Q / 2π * (1 - cos(2π * t / P.T_Q)) / P.L^2) for t in times]
-    else   # :steady, :offset, :offset_ramp: the steady vortex
+    else   # :steady, :offset, :offset_ramp, :offset_slow: the steady vortex
         s = analytic_state(P)
         return [s for _ in times]
     end
