@@ -30,7 +30,7 @@ sponge = false
 barotropic = "flather"
 total_net_inflow_Sv = "glorys_transport"   # ignored by "flather"
 per_edge_target = "native"
-volume_nudging_days = 14
+volume_nudging_days = 0
 
 [diagnostics]
 sections = true
