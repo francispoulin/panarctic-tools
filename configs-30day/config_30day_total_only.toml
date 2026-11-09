@@ -1,0 +1,37 @@
+# 30-day run for the open-boundary comparison: barotropic = "total_only". Needs fjp/hybrid-obc with section_monitor.jl.
+#   julia +1.13 --project=. panarctic.jl ../panarctic-tools/configs-30day/config_30day_total_only.toml
+# Compare with plotting/obc_comparison.jl (edges), plotting/section_comparison.jl (gateways) and
+# plotting/atlantic_edge_section.jl (temperature near the Atlantic edge), passing the output directories.
+
+architecture = "GPU"
+
+[grid]
+spacing_km = 15
+Nz         = 20
+depth      = 5000
+
+[time]
+start_date = 1993-01-01
+dt_minutes = 10
+stop_hours = 720          # 30 days
+
+[atmosphere]
+jra55 = "multi_year"
+
+[paths]
+data_dir   = ""
+output_dir = "/mnt/autofs/bow.math/scratch/fpoulin/results/PanArcticShenanigans/30day-total_only"
+
+[boundaries]
+velocity_inflow_days      = 1
+tracer_inflow_km_atlantic = 20
+tracer_inflow_km_pacific  = 20
+sponge = false
+barotropic = "total_only"
+total_net_inflow_Sv = "glorys_transport"   # ignored by "flather"
+per_edge_target = "native"
+volume_nudging_days = 14
+
+[diagnostics]
+sections = true
+edge_section_rows = 8
