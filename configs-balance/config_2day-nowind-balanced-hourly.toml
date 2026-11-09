@@ -1,0 +1,40 @@
+# 2-day hybrid run, zero winds, balanced initial state, with hourly η (free_surface_hourly.jld2) for plotting/eta_hourly.jl. Needs fjp/hybrid-obc with step 21.
+#   julia +1.13 --project=. panarctic.jl <this file>   (or include("panarctic.jl") in a REPL with this file in ARGS)
+
+architecture = "GPU"
+
+[grid]
+spacing_km = 15
+Nz         = 20
+depth      = 5000
+
+[time]
+start_date = 1993-01-01
+dt_minutes = 10
+stop_hours = 48
+
+[atmosphere]
+jra55 = "multi_year"
+winds = false
+
+[paths]
+data_dir   = ""
+output_dir = "/mnt/autofs/bow.math/scratch/fpoulin/results/PanArcticShenanigans/2day-nowind-balanced-hourly"
+
+[boundaries]
+velocity_inflow_days      = 1
+tracer_inflow_km_atlantic = 20
+tracer_inflow_km_pacific  = 20
+sponge = false
+barotropic = "hybrid"
+total_net_inflow_Sv = "glorys_transport"   # ignored by "flather"
+per_edge_target = "native"
+volume_nudging_days = 0
+
+[diagnostics]
+sections = true
+edge_section_rows = 8
+initial_vorticity = false
+
+[initialization]
+balance = "full"   # "projection": remove the divergent barotropic transport; "full": also a balanced η
