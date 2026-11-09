@@ -1,0 +1,41 @@
+# Rest-state test (glorys): u = v = η = 0, closed edges, ocean only (no atmosphere or sea ice), 24 hours with hourly η.
+# "uniform": T and S uniform on each level, so nothing should move; "glorys": GLORYS's T and S.
+# Needs fjp/hybrid-obc with step 26. Plot with plotting/eta_hourly.jl.
+#   julia +1.13 --project=. panarctic.jl <this file>   (or include("panarctic.jl") in a REPL with this file in ARGS)
+
+architecture = "GPU"
+
+[grid]
+spacing_km = 15
+Nz         = 20
+depth      = 5000
+
+[time]
+start_date = 1993-01-01
+dt_minutes = 10
+stop_hours = 24
+
+[atmosphere]
+jra55 = "multi_year"   # not used: the run is ocean only
+
+[paths]
+data_dir   = ""
+output_dir = "/mnt/autofs/bow.math/scratch/fpoulin/results/PanArcticShenanigans/rest-glorys-24h"
+
+[boundaries]
+velocity_inflow_days      = 1
+tracer_inflow_km_atlantic = 20
+tracer_inflow_km_pacific  = 20
+sponge = false
+barotropic = "clamped"            # with the GLORYS boundary data zeroed: V = 0 on both edges
+total_net_inflow_Sv = 0.0
+per_edge_target = "interpolated"  # from the zeroed boundary data
+volume_nudging_days = 0
+
+[diagnostics]
+sections = true
+edge_section_rows = 8
+initial_vorticity = false
+
+[initialization]
+rest = "glorys"
