@@ -1,0 +1,39 @@
+# Initial barotropic vorticity tendency only (stops before the run): GLORYS bathymetry, 20 levels. Needs fjp/hybrid-obc with step 16.
+#   julia +1.13 --project=. panarctic.jl <this file>   (or include("panarctic.jl") in a REPL with this file in ARGS)
+# plotting/atlantic_edge_section.jl (temperature near the Atlantic edge), passing the output directories.
+
+architecture = "GPU"
+
+[grid]
+spacing_km = 15
+bathymetry = "glorys"
+Nz         = 20
+depth      = 5000
+
+[time]
+start_date = 1993-01-01
+dt_minutes = 10
+stop_hours = 120
+
+[atmosphere]
+jra55 = "multi_year"
+winds = false
+
+[paths]
+data_dir   = ""
+output_dir = "/mnt/autofs/bow.math/scratch/fpoulin/results/PanArcticShenanigans/vorticity-glorys20"
+
+[boundaries]
+velocity_inflow_days      = 1
+tracer_inflow_km_atlantic = 20
+tracer_inflow_km_pacific  = 20
+sponge = false
+barotropic = "hybrid"
+total_net_inflow_Sv = "glorys_transport"   # ignored by "flather"
+per_edge_target = "native"
+volume_nudging_days = 0
+
+[diagnostics]
+sections = false
+edge_section_rows = 8
+initial_vorticity = "only"
