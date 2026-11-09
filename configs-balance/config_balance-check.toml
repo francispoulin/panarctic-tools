@@ -1,0 +1,40 @@
+# Balanced initialization (full), checked by the initial vorticity diagnostic; stops before the run. Needs fjp/hybrid-obc with step 18.
+#   julia +1.13 --project=. panarctic.jl <this file>   (or include("panarctic.jl") in a REPL with this file in ARGS)
+
+architecture = "GPU"
+
+[grid]
+spacing_km = 15
+Nz         = 20
+depth      = 5000
+
+[time]
+start_date = 1993-01-01
+dt_minutes = 10
+stop_hours = 120
+
+[atmosphere]
+jra55 = "multi_year"
+winds = false
+
+[paths]
+data_dir   = ""
+output_dir = "/mnt/autofs/bow.math/scratch/fpoulin/results/PanArcticShenanigans/balance-check"
+
+[boundaries]
+velocity_inflow_days      = 1
+tracer_inflow_km_atlantic = 20
+tracer_inflow_km_pacific  = 20
+sponge = false
+barotropic = "hybrid"
+total_net_inflow_Sv = "glorys_transport"   # ignored by "flather"
+per_edge_target = "native"
+volume_nudging_days = 0
+
+[diagnostics]
+sections = false
+edge_section_rows = 8
+initial_vorticity = "only"
+
+[initialization]
+balance = "full"   # "projection": remove the divergent barotropic transport; "full": also a balanced η
