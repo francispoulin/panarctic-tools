@@ -1,0 +1,45 @@
+# As config_coupled-wind-nopressure-48h.toml, with the total inflow set so that the model's volume changes at GLORYS's
+# rate every step (A d<eta_GLORYS>/dt minus the surface freshwater flux, ice growth included) instead of following
+# GLORYS's edge transports. In the first run the domain mean fell 0.9 cm in 24 h while GLORYS's rose 0.53 cm, about
+# half the shelf mismatch. Coupled: fresh REPL.
+#   empty!(ARGS); push!(ARGS, "<this file>"); include("panarctic.jl")
+
+architecture = "GPU"
+
+[grid]
+spacing_km = 15
+Nz         = 20
+depth      = 5000
+
+[time]
+start_date = 1993-01-01
+dt_minutes = 10
+stop_hours = 48
+
+[atmosphere]
+jra55 = "multi_year"
+winds = true
+pressure = false
+
+[paths]
+data_dir   = ""
+output_dir = "/mnt/autofs/bow.math/scratch/fpoulin/results/PanArcticShenanigans/coupled-wind-nopressure-glorysvolume-48h"
+
+[boundaries]
+velocity_inflow_days      = 1
+tracer_inflow_km_atlantic = 20
+tracer_inflow_km_pacific  = 20
+sponge = false
+barotropic = "hybrid"
+total_net_inflow_Sv = "glorys_volume"   # ignored by "flather"
+per_edge_target = "native"
+volume_nudging_days = 0
+
+[diagnostics]
+sections = true
+edge_section_rows = 8
+initial_vorticity = false
+tendencies = false
+
+[initialization]
+balance = "full"
