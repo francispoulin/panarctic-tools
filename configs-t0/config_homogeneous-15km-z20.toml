@@ -1,0 +1,46 @@
+# t = 0 pressure-gradient test: as above at 15 km, 20 levels, GLORYS bathymetry
+# Read the hour-0 tables (budget and baroclinic split), printed during initialization; the run can be stopped then
+# (Ctrl-C) before the first time step compiles. Needs fjp/hybrid-obc with step 30.
+#   julia +1.13 --project=. panarctic.jl <this file>   (or include("panarctic.jl") in a REPL with this file in ARGS)
+
+architecture = "GPU"
+
+[grid]
+spacing_km = 15
+Nz         = 20
+depth      = 5000
+vertical   = "exponential"
+bathymetry = "glorys"
+
+[time]
+start_date = 1993-01-01
+dt_minutes = 10
+stop_hours = 1
+
+[atmosphere]
+jra55 = "multi_year"   # not used: the run is ocean only
+
+[paths]
+data_dir   = ""
+output_dir = "/mnt/autofs/bow.math/scratch/fpoulin/results/PanArcticShenanigans/t0/homogeneous-15km-z20"
+
+[boundaries]
+velocity_inflow_days      = 1
+tracer_inflow_km_atlantic = 20
+tracer_inflow_km_pacific  = 20
+sponge = false
+barotropic = "clamped"
+total_net_inflow_Sv = 0.0
+per_edge_target = "interpolated"
+volume_nudging_days = 0
+
+[diagnostics]
+sections = false
+edge_section_rows = 8
+initial_vorticity = false
+tendencies = true
+tendency_hours = [0]
+
+[initialization]
+rest = "homogeneous"
+rest_eta = -0.5
