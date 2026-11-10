@@ -1,0 +1,43 @@
+# As config_1day-nowind-balanced-ocean-only.toml, with the circulation budget (step 33): which force along the isobaths drives the steady flow off the shelf. Needs fjp/hybrid-obc with step 33.
+#   julia +1.13 --project=. panarctic.jl <this file>   (or include("panarctic.jl") in a REPL with this file in ARGS)
+
+architecture = "GPU"
+
+[grid]
+spacing_km = 15
+Nz         = 20
+depth      = 5000
+
+[time]
+start_date = 1993-01-01
+dt_minutes = 10
+stop_hours = 24
+
+[atmosphere]
+jra55 = "multi_year"
+winds = false
+
+[paths]
+data_dir   = ""
+output_dir = "/mnt/autofs/bow.math/scratch/fpoulin/results/PanArcticShenanigans/1day-nowind-balanced-ocean-only-circulation"
+
+[boundaries]
+velocity_inflow_days      = 1
+tracer_inflow_km_atlantic = 20
+tracer_inflow_km_pacific  = 20
+sponge = false
+barotropic = "hybrid"
+total_net_inflow_Sv = "glorys_transport"   # ignored by "flather"
+per_edge_target = "native"
+volume_nudging_days = 0
+
+[diagnostics]
+sections = true
+edge_section_rows = 8
+initial_vorticity = false
+tendencies = true
+tendency_hours = [0, 0.1667, 0.3333, 0.5, 1, 2, 3, 6, 12, 24]
+
+[initialization]
+balance = "full"
+ocean_only = true
