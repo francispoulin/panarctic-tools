@@ -1,0 +1,44 @@
+# Rest-state test (homogeneous): one T and one S everywhere, u = v = 0, uniform η = +0.5 m (the sign of any motion should flip), closed edges,
+# ocean only, 24 hours with hourly η and the momentum budget (tendencies with the baroclinic split).
+# The exact solution is rest. Needs fjp/hybrid-obc with step 28.
+#   julia +1.13 --project=. panarctic.jl <this file>   (or include("panarctic.jl") in a REPL with this file in ARGS)
+
+architecture = "GPU"
+
+[grid]
+spacing_km = 15
+Nz         = 20
+depth      = 5000
+
+[time]
+start_date = 1993-01-01
+dt_minutes = 10
+stop_hours = 24
+
+[atmosphere]
+jra55 = "multi_year"   # not used: the run is ocean only
+
+[paths]
+data_dir   = ""
+output_dir = "/mnt/autofs/bow.math/scratch/fpoulin/results/PanArcticShenanigans/rest-homogeneous-eta-plus-24h"
+
+[boundaries]
+velocity_inflow_days      = 1
+tracer_inflow_km_atlantic = 20
+tracer_inflow_km_pacific  = 20
+sponge = false
+barotropic = "clamped"            # with the GLORYS boundary velocities zeroed: V = 0 on both edges
+total_net_inflow_Sv = 0.0
+per_edge_target = "interpolated"  # from the zeroed boundary data
+volume_nudging_days = 0
+
+[diagnostics]
+sections = true
+edge_section_rows = 8
+initial_vorticity = false
+tendencies = true
+tendency_hours = [0, 0.1667, 0.3333, 0.5, 1, 2, 3, 6, 12, 24]
+
+[initialization]
+rest = "homogeneous"
+rest_eta = 0.5

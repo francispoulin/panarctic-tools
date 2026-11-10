@@ -1,0 +1,42 @@
+# Datum test: as config_2day-nowind-balanced-hourly.toml, with GLORYS η shifted by a constant (initial state and boundary data). The physics is unchanged; compare the depth-class table and the tendencies with the unshifted run. Needs fjp/hybrid-obc with step 28.
+#   julia +1.13 --project=. panarctic.jl <this file>   (or include("panarctic.jl") in a REPL with this file in ARGS)
+
+architecture = "GPU"
+
+[grid]
+spacing_km = 15
+Nz         = 20
+depth      = 5000
+
+[time]
+start_date = 1993-01-01
+dt_minutes = 10
+stop_hours = 48
+
+[atmosphere]
+jra55 = "multi_year"
+winds = false
+
+[paths]
+data_dir   = ""
+output_dir = "/mnt/autofs/bow.math/scratch/fpoulin/results/PanArcticShenanigans/2day-nowind-balanced-datum-low"
+
+[boundaries]
+velocity_inflow_days      = 1
+tracer_inflow_km_atlantic = 20
+tracer_inflow_km_pacific  = 20
+sponge = false
+barotropic = "hybrid"
+total_net_inflow_Sv = "glorys_transport"   # ignored by "flather"
+per_edge_target = "native"
+volume_nudging_days = 0
+
+[diagnostics]
+sections = true
+edge_section_rows = 8
+initial_vorticity = false
+tendencies = true
+
+[initialization]
+balance = "full"   # "projection": remove the divergent barotropic transport; "full": also a balanced η
+eta_offset = 0.5      # GLORYS η minus 0.5 m: mean η about −1 m
