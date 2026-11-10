@@ -1,0 +1,47 @@
+# GLORYS-consistent baseline (roadmap part 2, phase 0, used here to test the shelf drain): coupled ocean and sea ice
+# with JRA55 winds, heat and freshwater, but uniform sea-level pressure (GLORYS's η has no inverse-barometer response);
+# hybrid edges, balanced start, 48 hours, hourly free surface. Compare the North Sea and Siberian shelves with the
+# ocean-only run rerun-c-24h: if the drain is the release of a wind set-up held in GLORYS's initial η, winds should
+# hold it. Coupled model: builds and compiles in a fresh REPL; no rerun.jl. Needs fjp/hybrid-obc with step 37.
+#   empty!(ARGS); push!(ARGS, "<this file>"); include("panarctic.jl")
+# Then, in a shell: julia --project=. plotting/eta_hourly.jl <this file> window=all
+
+architecture = "GPU"
+
+[grid]
+spacing_km = 15
+Nz         = 20
+depth      = 5000
+
+[time]
+start_date = 1993-01-01
+dt_minutes = 10
+stop_hours = 48
+
+[atmosphere]
+jra55 = "multi_year"
+winds = true
+pressure = false
+
+[paths]
+data_dir   = ""
+output_dir = "/mnt/autofs/bow.math/scratch/fpoulin/results/PanArcticShenanigans/coupled-wind-nopressure-48h"
+
+[boundaries]
+velocity_inflow_days      = 1
+tracer_inflow_km_atlantic = 20
+tracer_inflow_km_pacific  = 20
+sponge = false
+barotropic = "hybrid"
+total_net_inflow_Sv = "glorys_transport"   # ignored by "flather"
+per_edge_target = "native"
+volume_nudging_days = 0
+
+[diagnostics]
+sections = true
+edge_section_rows = 8
+initial_vorticity = false
+tendencies = false
+
+[initialization]
+balance = "full"
