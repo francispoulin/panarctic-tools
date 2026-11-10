@@ -38,7 +38,7 @@ end
 # Written to <output_dir>/nested_monitor.csv.
 function add_nested_monitor!(simulation, child, output_dir; schedule = TimeInterval(1hour))
     Nx, Ny, Nz = size(child.grid)
-    bottom = Array(interior(on_architecture(CPU(), child.grid.immersed_boundary.bottom_height)))[:, :, 1]
+    bottom = Array(interior(bottom_height_field(child.grid)))[:, :, 1]   # in 0.117 the immersed boundary holds a bare array
     wet    = bottom .< 0
     shelf  = wet .& (bottom .> -200)
     deep   = wet .& (bottom .< -1000)
