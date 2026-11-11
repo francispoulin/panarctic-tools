@@ -2,15 +2,15 @@
 # branch ss/nested-ocean-model). Ocean only: no atmosphere, no sea ice. The PanArcticShenanigans grid (common.jl), the
 # same dates as our runs.
 #
-# Set up once, in its own environment (the branch needs Oceananigans 0.117, so it must not touch panarctic-port):
+# Set up once, in its own environment (the branch needs Oceananigans 0.117, so it must not touch panarctic-port). The
+# environment uses a local clone of NumericalEarth on branch nl+fjp/nested-panarctic (started from the PR branch
+# ss/nested-ocean-model), so library changes take effect without a Pkg operation:
 #
 #   cd panarctic-tools/nested
-#   julia --project=. -e 'using Pkg; Pkg.Registry.update();
-#       Pkg.add(url = "https://github.com/NumericalEarth/NumericalEarth.jl", rev = "768ed1d34d1804bc26a927de5b5fa56e258a7e57");
-#       Pkg.add(["Oceananigans", "CUDA", "CopernicusMarine", "JLD2"]); Pkg.precompile()'
+#   julia --project=. -e 'using Pkg; Pkg.develop(path = "../../NumericalEarth.jl");
+#       Pkg.add(["Oceananigans", "CUDA", "CopernicusMarine", "JLD2", "Revise"]); Pkg.precompile()'
 #
-# (768ed1d3 is the head of the PR on 2026-11-10 and includes 2876238c, the fix for the bathymetry blend on curvilinear
-# grids that 5975f67f lacks: "objects of type Nothing are not callable" in interpolate_bottom_height!.)
+# Our scripts live here, not in NumericalEarth: the branch holds only library changes.
 #
 # Run:  julia --project=. panarctic_nested_1deg.jl  [output_dir]
 #
