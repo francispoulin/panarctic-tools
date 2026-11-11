@@ -7,6 +7,7 @@
 
 using NumericalEarth
 using Oceananigans
+using Oceananigans.Architectures: on_architecture
 using Oceananigans.BoundaryConditions: getbc
 using Oceananigans.Operators: Δxᶜᶠᶜ, Δyᶠᶜᶜ
 using Oceananigans.Units: days
