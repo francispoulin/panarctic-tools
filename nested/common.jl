@@ -33,6 +33,16 @@ function panarctic_grid(arch; spacing, Nz = 20, depth = 5000meters)
     return ImmersedBoundaryGrid(underlying_grid, PartialCellBottom(bottom_height); active_cells_map = true)
 end
 
+# Net transport through the Atlantic (south, j = 1) and Pacific (north, j = Ny + 1) edges, positive into the domain (Sv).
+# PanArcticShenanigans prints "GLORYS at the start, model grid: Atlantic a Sv in, Pacific p Sv out": in this convention
+# those are (a, −p).
+function edge_transports(child)
+    Nx, Ny, Nz = size(child.grid)
+    v = on_architecture(CPU(), child.velocities.v)       # with a CPU copy of the grid in its current z★ state
+    Q(j) = sum(v[i, j, k] * Δxᶜᶠᶜ(i, j, k, v.grid) * Δzᶜᶠᶜ(i, j, k, v.grid) for i in 1:Nx, k in 1:Nz)
+    return (atlantic = Q(1) / 1e6, pacific = -Q(Ny + 1) / 1e6)
+end
+
 # Hourly: net transport through the Atlantic (south) and Pacific (north) edges, positive into the domain; domain-mean
 # η; the change in η since the first call averaged over the shelf (H < 200 m) and the deep ocean (H > 1000 m).
 # Written to <output_dir>/nested_monitor.csv.
@@ -42,8 +52,6 @@ function add_nested_monitor!(simulation, child, output_dir; schedule = TimeInter
     wet    = bottom .< 0
     shelf  = wet .& (bottom .> -200)
     deep   = wet .& (bottom .< -1000)
-
-    edge_transport(v, j) = sum(v[i, j, k] * Δxᶜᶠᶜ(i, j, k, v.grid) * Δzᶜᶠᶜ(i, j, k, v.grid) for i in 1:Nx, k in 1:Nz)
 
     function area_mean(a, mask, g)
         A = [Azᶜᶜᶜ(i, j, 1, g) for i in 1:Nx, j in 1:Ny]
@@ -58,13 +66,12 @@ function add_nested_monitor!(simulation, child, output_dir; schedule = TimeInter
     wall = Ref(time_ns())
 
     function nested_monitor(sim)
-        v = on_architecture(CPU(), child.velocities.v)     # with a CPU copy of the grid in its current z★ state
+        v = on_architecture(CPU(), child.velocities.v)     # for the grid metrics in the current z★ state
         η = Array(interior(on_architecture(CPU(), child.free_surface.displacement)))[:, :, 1]
         isassigned(η₀) || (η₀[] = copy(η))
         δη = η .- η₀[]
 
-        atlantic = edge_transport(v, 1) / 1e6
-        pacific  = -edge_transport(v, Ny + 1) / 1e6
+        atlantic, pacific = edge_transports(child)
         η̄        = 100 * area_mean(η, wet, v.grid)
         shelf_δη = 100 * area_mean(δη, shelf, v.grid)
         deep_δη  = 100 * area_mean(δη, deep, v.grid)
