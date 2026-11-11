@@ -41,7 +41,7 @@ ocean = nested_ocean_simulation(grid, GLORYSDaily(); dates, open_sides = (:south
                                 Δt = 20minutes, stop_time = 4days)
 
 child = ocean.model.child
-@info "Child grid topology: $(topology(child.grid)); open sides: $(keys(ocean.model.exchanger.bands))"
+@info "Child grid topology: $(Oceananigans.Grids.topology(child.grid))"
 
 add_nested_monitor!(ocean, child, output_dir)
 add_nested_output!(ocean, child, output_dir)

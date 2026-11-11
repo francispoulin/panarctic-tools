@@ -36,7 +36,7 @@ end
 # Hourly: net transport through the Atlantic (south) and Pacific (north) edges, positive into the domain; domain-mean
 # η; the change in η since the first call averaged over the shelf (H < 200 m) and the deep ocean (H > 1000 m).
 # Written to <output_dir>/nested_monitor.csv.
-function add_nested_monitor!(simulation, child, output_dir; schedule = TimeInterval(1hour))
+function add_nested_monitor!(simulation, child, output_dir; schedule = TimeInterval(1hours))
     Nx, Ny, Nz = size(child.grid)
     bottom = Array(interior(bottom_height_field(child.grid)))[:, :, 1]   # in 0.117 the immersed boundary holds a bare array
     wet    = bottom .< 0
@@ -69,12 +69,12 @@ function add_nested_monitor!(simulation, child, output_dir; schedule = TimeInter
         shelf_δη = 100 * area_mean(δη, shelf, v.grid)
         deep_δη  = 100 * area_mean(δη, deep, v.grid)
         umax, vmax = maximum(abs, child.velocities.u), maximum(abs, child.velocities.v)
-        hour = time(sim) / hours
+        model_hour = time(sim) / hours
 
         @info @sprintf("%6.1f h  Atlantic in %+6.2f Sv, Pacific in %+6.2f Sv, net %+6.2f Sv; mean η %+7.2f cm; Δη shelf %+6.2f, deep %+6.2f cm; max|u|, |v| %.2f, %.2f m/s; wall %s",
-                       hour, atlantic, pacific, atlantic + pacific, η̄, shelf_δη, deep_δη, umax, vmax,
+                       model_hour, atlantic, pacific, atlantic + pacific, η̄, shelf_δη, deep_δη, umax, vmax,
                        prettytime(1e-9 * (time_ns() - wall[])))
-        open(io -> @printf(io, "%.2f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\n", hour, atlantic, pacific,
+        open(io -> @printf(io, "%.2f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\n", model_hour, atlantic, pacific,
                            atlantic + pacific, η̄, shelf_δη, deep_δη, umax, vmax), file, "a")
         wall[] = time_ns()
         return nothing
@@ -91,7 +91,7 @@ function add_nested_output!(simulation_or_ocean, child, output_dir)
     surface = (; u = child.velocities.u, v = child.velocities.v, T = child.tracers.T, S = child.tracers.S)
     writers[:surface] = JLD2Writer(child, surface; indices = (:, :, Nz), schedule = TimeInterval(3hours),
                                    filename = joinpath(output_dir, "nested_surface"), overwrite_files = true)
-    writers[:free_surface] = JLD2Writer(child, (; η = child.free_surface.displacement), schedule = TimeInterval(1hour),
+    writers[:free_surface] = JLD2Writer(child, (; η = child.free_surface.displacement), schedule = TimeInterval(1hours),
                                         filename = joinpath(output_dir, "nested_free_surface"), overwrite_files = true)
     return nothing
 end
