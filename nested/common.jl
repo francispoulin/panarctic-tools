@@ -102,3 +102,24 @@ function add_nested_output!(simulation_or_ocean, child, output_dir)
                                         filename = joinpath(output_dir, "nested_free_surface"), overwrite_files = true)
     return nothing
 end
+
+# Per-column transport through each edge (m³/s, positive into the domain) and the column depth there, with the
+# column's longitude and latitude, written to <file> as CSV. Compare with port_edge_columns.jl (the same columns from
+# PanArcticShenanigans) using compare_edge_columns.jl.
+function write_edge_columns(child, file)
+    Nx, Ny, Nz = size(child.grid)
+    v = on_architecture(CPU(), child.velocities.v)
+    g = v.grid
+    open(file, "w") do io
+        println(io, "edge,i,lon,lat,depth_m,transport_m3s")
+        for (edge, j, sign) in (("atlantic", 1, 1), ("pacific", Ny + 1, -1)), i in 1:Nx
+            U = sign * sum(v[i, j, k] * Δxᶜᶠᶜ(i, j, k, g) * Δzᶜᶠᶜ(i, j, k, g) for k in 1:Nz)
+            H = max(Oceananigans.Grids.static_column_depthᶜᶠᵃ(i, j, g), 0.0)
+            λ = Oceananigans.Grids.λnode(i, j, 1, g, Center(), Face(), Center())
+            φ = Oceananigans.Grids.φnode(i, j, 1, g, Center(), Face(), Center())
+            @printf(io, "%s,%d,%.4f,%.4f,%.2f,%.6e\n", edge, i, λ, φ, H, U)
+        end
+    end
+    @info "Wrote $file"
+    return file
+end
