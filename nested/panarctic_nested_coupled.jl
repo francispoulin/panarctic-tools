@@ -58,7 +58,8 @@ land      = JRA55PrescribedLand(child.grid; jra55...)
 coupled_model = EarthSystemModel(; ocean, sea_ice, land, atmosphere, radiation)
 simulation    = Simulation(coupled_model; Δt, stop_time = days * 24hours)
 
-add_nested_monitor!(simulation, child, output_dir)
+add_nested_monitor!(simulation, child, output_dir; exchanger = ocean.model.exchanger,
+                    parent_η = parent_free_surface(grid, parent_dataset, dates))
 add_nested_output!(simulation, child, output_dir)
 
 function ice_progress(sim)

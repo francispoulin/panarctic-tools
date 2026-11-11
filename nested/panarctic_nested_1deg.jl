@@ -14,6 +14,7 @@
 #
 # Run:  julia --project=. panarctic_nested_1deg.jl  [output_dir]
 #       ZERO_NET_INFLOW=true julia --project=. panarctic_nested_1deg.jl output-1deg-zero
+#       DAYS=1 ... (default 4)
 # (ZERO_NET_INFLOW=true: the Flather exterior has no net inflow through the two edges together; needs the branch.)
 #
 # What to check (printed hourly and written to nested_monitor.csv):
@@ -42,12 +43,13 @@ dates = (DateTime(1993, 1, 1), DateTime(1993, 1, 6))
 zero_net_inflow = get(ENV, "ZERO_NET_INFLOW", "false") == "true"
 @info "zero_net_inflow = $zero_net_inflow"
 ocean = nested_ocean_simulation(grid, GLORYSDaily(); dates, open_sides = (:south, :north), zero_net_inflow,
-                                Δt = 20minutes, stop_time = 4days)
+                                Δt = 20minutes, stop_time = parse(Float64, get(ENV, "DAYS", "4")) * days)
 
 child = ocean.model.child
 @info "Child grid topology: $(Oceananigans.Grids.topology(child.grid))"
 
-add_nested_monitor!(ocean, child, output_dir)
+parent_η = parent_free_surface(grid, GLORYSDaily(), dates)
+add_nested_monitor!(ocean, child, output_dir; exchanger = ocean.model.exchanger, parent_η)
 add_nested_output!(ocean, child, output_dir)
 
 run!(ocean)
