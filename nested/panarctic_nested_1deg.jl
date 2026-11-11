@@ -13,6 +13,8 @@
 # Our scripts live here, not in NumericalEarth: the branch holds only library changes.
 #
 # Run:  julia --project=. panarctic_nested_1deg.jl  [output_dir]
+#       ZERO_NET_INFLOW=true julia --project=. panarctic_nested_1deg.jl output-1deg-zero
+# (ZERO_NET_INFLOW=true: the Flather exterior has no net inflow through the two edges together; needs the branch.)
 #
 # What to check (printed hourly and written to nested_monitor.csv):
 #   - the transport through the Pacific (north) edge should be about +0.7 to +0.9 Sv into the domain (Bering
@@ -37,7 +39,9 @@ grid = panarctic_grid(GPU(); spacing = 100kilometers)
 # T, S and the baroclinic velocity, the seafloor blended to GLORYS's over 1/3°, and GLORYS interpolated as the initial
 # state (not balanced).
 dates = (DateTime(1993, 1, 1), DateTime(1993, 1, 6))
-ocean = nested_ocean_simulation(grid, GLORYSDaily(); dates, open_sides = (:south, :north),
+zero_net_inflow = get(ENV, "ZERO_NET_INFLOW", "false") == "true"
+@info "zero_net_inflow = $zero_net_inflow"
+ocean = nested_ocean_simulation(grid, GLORYSDaily(); dates, open_sides = (:south, :north), zero_net_inflow,
                                 Δt = 20minutes, stop_time = 4days)
 
 child = ocean.model.child
