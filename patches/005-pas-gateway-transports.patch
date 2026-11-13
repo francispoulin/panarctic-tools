@@ -1,0 +1,232 @@
+From afbd5b67f9f626cfdf1be0a0a6ec8d1a0f10689e Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 13 Nov 2026 18:58:47 -0500
+Subject: [PATCH 4/5] nested: hourly volume, heat and freshwater transport
+ through Fram, BSO, Bering and Davis (gateways.jl)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Sections as (longitude, latitude) polylines mapped to staircases of model faces (from fjp/hybrid-obc's
+section_monitor.jl), positive into the Arctic; heat relative to 0 °C (−1.9 °C at Bering), freshwater relative to
+34.8, as Shu et al. (2023). plot_gateways.jl: daily means against the mooring ranges of their Table 3.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AbhhvpGsnzaJJu3V9mqrum
+---
+ nested/gateways.jl         | 124 +++++++++++++++++++++++++++++++++++++
+ nested/panarctic_nested.jl |   2 +
+ nested/plot_gateways.jl    |  50 +++++++++++++++
+ 3 files changed, 176 insertions(+)
+ create mode 100644 nested/gateways.jl
+ create mode 100644 nested/plot_gateways.jl
+
+diff --git a/nested/gateways.jl b/nested/gateways.jl
+new file mode 100644
+index 0000000..e1a70b0
+--- /dev/null
++++ b/nested/gateways.jl
+@@ -0,0 +1,124 @@
++# Volume, heat and freshwater transport through the Arctic gateways of Shu et al. (2023, GMD 16, 2539): Fram Strait,
++# the Barents Sea Opening, Bering Strait and Davis Strait. Positive into the Arctic. Heat relative to 0 °C (−1.9 °C at
++# Bering Strait), freshwater relative to 34.8, as in their Table 3. Included by panarctic_nested.jl.
++#
++# Each section is a polyline of (longitude, latitude) points, mapped to a staircase of model faces through the cell
++# corners nearest the line, so it stays in place when the resolution changes. The setup log lists each section's faces
++# and warns when an end is in water. Hourly snapshots go to <output_dir>/gateways.csv; plot_gateways.jl takes daily
++# means and compares them with the mooring estimates.
++
++using Oceananigans.Grids: inactive_node
++using Oceananigans.Operators: Δxᶜᶠᶜ, Δyᶠᶜᶜ, Δzᶜᶠᶜ, Δzᶠᶜᶜ
++
++const ρ₀cₚ = 1026 * 3991.9   # J m⁻³ K⁻¹
++const Sʳᵉᶠ = 34.8
++
++# (name, points, reference temperature in °C); each line runs so that the Arctic is on its left
++const gateway_lines = [
++    ("fram",   [(-22.0, 78.83), (13.0, 78.83)],              0.0),   # 78°50′N mooring line, Greenland to Spitsbergen
++    ("bso",    [(16.5, 76.6), (19.0, 74.45), (20.6, 70.1)],  0.0),   # Sørkapp, Bjørnøya, Norway
++    ("bering", [(-170.3, 66.2), (-167.6, 65.55)],            -1.9),  # Cape Dezhnev to Cape Prince of Wales
++    ("davis",  [(-63.0, 66.6), (-52.5, 66.6)],               0.0),   # Baffin Island to Greenland
++]
++
++great_circle(λ₁, φ₁, λ₂, φ₂) = 2asind(sqrt(sind((φ₂ - φ₁) / 2)^2 + cosd(φ₁) * cosd(φ₂) * sind((λ₂ - λ₁) / 2)^2))
++
++# Corners visited by the line through `points`, joined by unit steps of i or j
++function corner_path(points, corner_λ, corner_φ)
++    Nx, Ny = size(corner_λ) .- 1
++    function nearest_corner(λ, φ, near)
++        candidates = isnothing(near) ? CartesianIndices(corner_λ) :
++                     CartesianIndices((max(1, near[1] - 4):min(Nx + 1, near[1] + 4), max(1, near[2] - 4):min(Ny + 1, near[2] + 4)))
++        best = argmin(c -> great_circle(λ, φ, corner_λ[c], corner_φ[c]), candidates)
++        return (best[1], best[2])
++    end
++    spacing = minimum(great_circle(corner_λ[i, j], corner_φ[i, j], corner_λ[i+1, j], corner_φ[i+1, j]) for i in 1:Nx, j in (1, Ny ÷ 2, Ny + 1))
++    path = [nearest_corner(points[1]..., nothing)]
++    for p in 1:length(points) - 1
++        (λa, φa), (λb, φb) = points[p], points[p + 1]
++        n = ceil(Int, 8 * great_circle(λa, φa, λb, φb) / spacing)
++        for s in 1:n
++            α = s / n
++            c = nearest_corner((1 - α) * λa + α * λb, (1 - α) * φa + α * φb, path[end])
++            while c != path[end]
++                i, j = path[end]
++                push!(path, i != c[1] ? (i + sign(c[1] - i), j) : (i, j + sign(c[2] - j)))
++            end
++        end
++    end
++    return path
++end
++
++# Faces crossed by the path, each once, as (:u or :v, i, j, sign) with sign × velocity the transport to the left.
++#   corner (i, j) → (i + 1, j): v-face (i, j), +1      corner (i, j) → (i, j + 1): u-face (i, j), −1
++function path_faces(path)
++    signs = Dict{Tuple{Symbol, Int, Int}, Int}()
++    for (a, b) in zip(path[1:end-1], path[2:end])
++        face = b[2] == a[2] ? (:v, min(a[1], b[1]), a[2]) : (:u, a[1], min(a[2], b[2]))
++        signs[face] = get(signs, face, 0) + (b[2] == a[2] ? b[1] - a[1] : a[2] - b[2])
++    end
++    return [(f..., s) for (f, s) in signs if s != 0]
++end
++
++wet_face(kind, i, j, k, g) = kind === :v ? !inactive_node(i, j, k, g, Center(), Face(), Center()) :
++                                           !inactive_node(i, j, k, g, Face(), Center(), Center())
++
++# Volume (m³ s⁻¹), heat (W) and freshwater (m³ s⁻¹) through a section, from CPU copies of u, v, T, S
++function section_transport(faces, Tʳᵉᶠ, u, v, T, S)
++    g  = v.grid
++    Nz = size(g, 3)
++    volume = heat = freshwater = 0.0
++    for (kind, i, j, sgn) in faces, k in 1:Nz
++        wet_face(kind, i, j, k, g) || continue
++        q = kind === :v ? sgn * v[i, j, k] * Δxᶜᶠᶜ(i, j, k, g) * Δzᶜᶠᶜ(i, j, k, g) :
++                          sgn * u[i, j, k] * Δyᶠᶜᶜ(i, j, k, g) * Δzᶠᶜᶜ(i, j, k, g)
++        i₀, j₀ = kind === :v ? (i, j - 1) : (i - 1, j)            # the cell on the other side of the face
++        wet₀ = !inactive_node(i₀, j₀, k, g, Center(), Center(), Center())
++        wet₁ = !inactive_node(i, j, k, g, Center(), Center(), Center())
++        Tᶠ = (wet₀ * T[i₀, j₀, k] + wet₁ * T[i, j, k]) / (wet₀ + wet₁)
++        Sᶠ = (wet₀ * S[i₀, j₀, k] + wet₁ * S[i, j, k]) / (wet₀ + wet₁)
++        volume     += q
++        heat       += ρ₀cₚ * q * (Tᶠ - Tʳᵉᶠ)
++        freshwater += q * (1 - Sᶠ / Sʳᵉᶠ)
++    end
++    return volume, heat, freshwater
++end
++
++function add_gateway_monitor!(simulation, child, output_dir; schedule = TimeInterval(1hours))
++    grid = on_architecture(CPU(), child.grid)
++    Nx, Ny, Nz = size(grid)
++    corner_λ = [λnode(i, j, 1, grid, Face(), Face(), Center()) for i in 1:Nx+1, j in 1:Ny+1]
++    corner_φ = [φnode(i, j, 1, grid, Face(), Face(), Center()) for i in 1:Nx+1, j in 1:Ny+1]
++
++    sections = map(gateway_lines) do (name, points, Tʳᵉᶠ)
++        path  = corner_path(points, corner_λ, corner_φ)
++        faces = path_faces(path)
++        wet   = count(f -> any(k -> wet_face(f[1], f[2], f[3], k, grid), 1:Nz), faces)
++        @info @sprintf("Gateway %-6s %3d faces (%d wet), %.2f°E %.2f°N to %.2f°E %.2f°N", name, length(faces), wet,
++                       corner_λ[path[1]...], corner_φ[path[1]...], corner_λ[path[end]...], corner_φ[path[end]...])
++        ends = [path_faces(path[1:2]); path_faces(path[end-1:end])]
++        any(f -> any(k -> wet_face(f[1], f[2], f[3], k, grid), 1:Nz), ends) &&
++            @warn "Gateway $name: an end of the line is in water at this resolution, so water can pass round it"
++        (; name, faces, Tʳᵉᶠ)
++    end
++
++    file = joinpath(output_dir, "gateways.csv")
++    header = join(["hour"; [s.name .* ("_volume_Sv", "_heat_TW", "_freshwater_mSv") for s in sections]...], ',')
++    open(io -> println(io, header), file, "w")
++
++    function gateway_monitor(sim)
++        u, v = on_architecture(CPU(), child.velocities.u), on_architecture(CPU(), child.velocities.v)
++        T, S = on_architecture(CPU(), child.tracers.T), on_architecture(CPU(), child.tracers.S)
++        values = Float64[time(sim) / hours]
++        for s in sections
++            Q, H, F = section_transport(s.faces, s.Tʳᵉᶠ, u, v, T, S)
++            append!(values, (Q / 1e6, H / 1e12, F / 1e3))
++        end
++        open(io -> println(io, join((@sprintf("%.4f", x) for x in values), ',')), file, "a")
++        @info "         gateways (Sv): " * join((@sprintf("%s %+.2f", s.name, values[3n - 1]) for (n, s) in enumerate(sections)), ", ")
++        return nothing
++    end
++
++    add_callback!(simulation, gateway_monitor, schedule; name = :gateway_monitor)
++    return file
++end
+diff --git a/nested/panarctic_nested.jl b/nested/panarctic_nested.jl
+index 1a1f9b6..2c9e1d0 100644
+--- a/nested/panarctic_nested.jl
++++ b/nested/panarctic_nested.jl
+@@ -26,6 +26,7 @@ using CopernicusMarine   # enables the GLORYS download extension
+ using CUDA, Dates, Printf
+ 
+ include("monitor.jl")
++include("gateways.jl")
+ include("net_inflow_control.jl")
+ include("glorys_volume_target.jl")
+ 
+@@ -121,6 +122,7 @@ end
+ parent_η = parent_free_surface(grid, parent_dataset, dates; dir_kw...)
+ add_nested_monitor!(simulation, child, output_dir; exchanger = ocean.model.exchanger, parent_η,
+                     depth_exponent = net_inflow_depth_exponent)
++add_gateway_monitor!(simulation, child, output_dir)
+ net_inflow_control && add_net_inflow_control!(simulation, child, ocean.model.exchanger, output_dir)
+ follow_glorys && add_glorys_volume_target!(simulation, net_inflow, child, parent_η,
+                                            config["boundaries"]["volume_relaxation_days"] * Oceananigans.Units.day;
+diff --git a/nested/plot_gateways.jl b/nested/plot_gateways.jl
+new file mode 100644
+index 0000000..50d6997
+--- /dev/null
++++ b/nested/plot_gateways.jl
+@@ -0,0 +1,50 @@
++# Daily-mean volume, heat and freshwater transport through Fram Strait, the Barents Sea Opening, Bering Strait and
++# Davis Strait (gateways.csv), positive into the Arctic, against the mooring-based ranges compiled by Shu et al. (2023,
++# GMD 16, 2539, Table 3). The observed ranges are multi-year annual means; the run covers days to weeks of one winter.
++#
++#   julia --project=.. plot_gateways.jl output-glorys-sqrtH-4d      # writes <folder>/gateways.png
++
++using CairoMakie, Printf
++
++folder = isempty(ARGS) ? "output-nested" : ARGS[1]
++text   = readlines(joinpath(folder, "gateways.csv"))
++header = split(text[1], ',')
++rows   = [parse.(Float64, split(line, ',')) for line in text[2:end] if !isempty(line)]
++column(name) = [row[findfirst(==(name), header)] for row in rows]
++
++hour = column("hour")
++day  = floor.(Int, hour ./ 24)
++days = unique(day)
++daily(x) = [sum(x[day .== d]) / count(==(d), day) for d in days]
++
++# (low, high) of the observed annual means; freshwater converted from 10³ km³ yr⁻¹ (1 mSv = 31.56 km³ yr⁻¹)
++observed = Dict(
++    "fram"   => (volume = (-4.7, 0.7),  heat = (26, 50),    freshwater = (-102.4, -68.8)),  # Schauer et al. 2008; Serreze et al. 2006 (heat: Atlantic Water > 1 °C only)
++    "bso"    => (volume = (1.5, 2.5),   heat = (48, 74),    freshwater = (-5.0, -1.0)),     # Smedsrud et al. 2010 (about 2 Sv; ±0.5 assumed); Skagseth et al. 2008; Serreze et al. 2006 (−2.9 mSv)
++    "bering" => (volume = (0.6, 1.05),  heat = (9.5, 19.0), freshwater = (66.5, 110.9)),    # Woodgate 2018 (heat relative to −1.9 °C)
++    "davis"  => (volume = (-2.1, -1.1), heat = (1, 35),     freshwater = (-98.9, -86.8)),   # Curry et al. 2014; Cuny et al. 2005
++)
++
++quantities = (("volume", "_volume_Sv", "Sv"), ("heat", "_heat_TW", "TW"), ("freshwater", "_freshwater_mSv", "mSv"))
++gateways   = ("fram", "bso", "bering", "davis")
++
++fig = Figure(size = (1200, 1000))
++Label(fig[0, 1:3], basename(rstrip(folder, '/')) * ": daily means (line) against observed annual means (band)"; fontsize = 18)
++for (r, g) in enumerate(gateways), (c, (quantity, suffix, unit)) in enumerate(quantities)
++    ax = Axis(fig[r, c]; xlabel = r == 4 ? "day" : "", ylabel = c == 1 ? "$g ($unit)" : unit, title = r == 1 ? quantity : "")
++    low, high = getproperty(observed[g], Symbol(quantity))
++    hspan!(ax, low, high; color = (:gray, 0.3))
++    hlines!(ax, 0; color = :black, linewidth = 0.5)
++    values = daily(column(g * suffix))
++    scatterlines!(ax, days .+ 0.5, values; color = :red)
++end
++
++for g in gateways
++    @printf("%-6s mean over the run: volume %+6.2f Sv, heat %+7.1f TW, freshwater %+7.1f mSv\n", g,
++            sum(column(g * "_volume_Sv")) / length(rows), sum(column(g * "_heat_TW")) / length(rows),
++            sum(column(g * "_freshwater_mSv")) / length(rows))
++end
++
++file = joinpath(folder, "gateways.png")
++save(file, fig)
++@info "Wrote $file"
+-- 
+2.43.0
+

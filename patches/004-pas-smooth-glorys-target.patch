@@ -1,7 +1,7 @@
 From 890f1ef9b237439724e814d03a8ecaaf42a2097e Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Fri, 13 Nov 2026 18:46:10 -0500
-Subject: [PATCH 3/3] =?UTF-8?q?nested:=20GLORYS's=20mean=20=CE=B7=20joined?=
+Subject: [PATCH 3/5] =?UTF-8?q?nested:=20GLORYS's=20mean=20=CE=B7=20joined?=
  =?UTF-8?q?=20by=20a=20monotone=20cubic,=20so=20the=20volume=20target's=20?=
  =?UTF-8?q?tendency=20term=20no=20longer=20jumps=20daily?=
 MIME-Version: 1.0
