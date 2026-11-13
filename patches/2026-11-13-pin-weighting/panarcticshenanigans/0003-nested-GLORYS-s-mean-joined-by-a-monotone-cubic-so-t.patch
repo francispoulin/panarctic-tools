@@ -1,0 +1,180 @@
+From 890f1ef9b237439724e814d03a8ecaaf42a2097e Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 13 Nov 2026 18:46:10 -0500
+Subject: [PATCH 3/3] =?UTF-8?q?nested:=20GLORYS's=20mean=20=CE=B7=20joined?=
+ =?UTF-8?q?=20by=20a=20monotone=20cubic,=20so=20the=20volume=20target's=20?=
+ =?UTF-8?q?tendency=20term=20no=20longer=20jumps=20daily?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Slopes at the daily means from the harmonic mean of neighbouring secants (Fritsch & Butland 1984); the Hermite
+cubic passes through every daily mean and its time derivative is continuous. Run file
+runs/glorys-sqrtH-tendency-4d.toml: tendency on, relaxation over 5 days.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ nested/config.toml                        |  2 +-
+ nested/glorys_volume_target.jl            | 35 +++++++++++++++------
+ nested/runs/glorys-fastest-4d.toml        |  2 +-
+ nested/runs/glorys-sqrtH-4d.toml          |  2 +-
+ nested/runs/glorys-sqrtH-tendency-4d.toml | 38 +++++++++++++++++++++++
+ 5 files changed, 66 insertions(+), 13 deletions(-)
+ create mode 100644 nested/runs/glorys-sqrtH-tendency-4d.toml
+
+diff --git a/nested/config.toml b/nested/config.toml
+index a268b25..60c070e 100644
+--- a/nested/config.toml
++++ b/nested/config.toml
+@@ -22,7 +22,7 @@ net_inflow_control = false  # true (needs zero_net_inflow): prototype of a volum
+ # net_inflow_Sv = 0.0       # pin the total barotropic inflow through both edges together (Sv, positive into the domain), as NEMO and ROMS do; Flather splits it between the edges
+ follow_glorys_volume = false  # true: set that total inflow every step so that the domain-mean η follows GLORYS's (overrides net_inflow_Sv; glorys_volume_target.jl)
+ volume_relaxation_days = 1    # with follow_glorys_volume: time over which the remaining drift from GLORYS's mean η is removed
+-follow_glorys_tendency = false # with follow_glorys_volume: true also follows GLORYS's rate of change exactly, which jumps once a day
++follow_glorys_tendency = false # with follow_glorys_volume: true also follows GLORYS's rate of change exactly
+ net_inflow_depth_exponent = 0  # with net_inflow_Sv or follow_glorys_volume: the pin shifts each edge column's transport ∝ H^p; 0 uniform per length, 1 uniform velocity (NEMO, ROMS), 0.5 a uniform shift of GLORYS's η in Flather
+ # edge_inflow_Sv = { atlantic = -0.8, pacific = 0.8 }   # pin the barotropic inflow through each edge (Sv, positive into the domain), as NEMO and ROMS do
+ 
+diff --git a/nested/glorys_volume_target.jl b/nested/glorys_volume_target.jl
+index a3ec9d4..3c700f7 100644
+--- a/nested/glorys_volume_target.jl
++++ b/nested/glorys_volume_target.jl
+@@ -3,11 +3,11 @@
+ #
+ #     T = A dη̄ᴳ/dt − F + A [(η̄ᴳ − η̄ᴳ₀) − (η̄ − η̄₀)] / τ    (the first term only with `tendency = true`),
+ #
+-# with A the wet area, η̄ᴳ GLORYS's domain-mean η (daily means, interpolated in time), F the surface freshwater volume
+-# flux into the ocean, η̄ the model's domain-mean η and the subscript 0 the start of the run. The first term follows
+-# GLORYS's volume change, the second hands the surface freshwater back through the edges, and the third relaxes any
+-# remaining drift over τ. GLORYS's daily means make dη̄ᴳ/dt jump once a day; without it, the relaxation alone follows
+-# GLORYS, smoothly but about τ behind. Included by panarctic_nested.jl when `[boundaries] follow_glorys_volume = true`.
++# with A the wet area, η̄ᴳ GLORYS's domain-mean η (daily means, joined by a monotone cubic so that dη̄ᴳ/dt is
++# continuous), F the surface freshwater volume flux into the ocean, η̄ the model's domain-mean η and the subscript 0 the
++# start of the run. The first term follows GLORYS's volume change, the second hands the surface freshwater back through
++# the edges, and the third relaxes any remaining drift over τ. Without the first term the relaxation alone follows
++# GLORYS, about τ behind. Included by panarctic_nested.jl when `[boundaries] follow_glorys_volume = true`.
+ 
+ using Oceananigans.Operators: Azᶜᶜᶜ
+ using NumericalEarth.NestedModels: boundary_location, sample_parent!
+@@ -19,6 +19,7 @@ struct GLORYSVolumeTarget{R, C, J, H, M}
+     displacement :: H        # η
+     times        :: Vector{Float64}   # times of GLORYS's daily means (s since the start of the run)
+     means        :: Vector{Float64}   # GLORYS's domain-mean η at those times (m)
++    slopes       :: Vector{Float64}   # dη̄ᴳ/dt at those times (m s⁻¹)
+     area         :: Float64
+     relaxation_time :: Float64
+     tendency        :: Bool
+@@ -41,7 +42,7 @@ function GLORYSVolumeTarget(net_inflow, child, parent_η, relaxation_time, tende
+     end
+ 
+     target = GLORYSVolumeTarget(net_inflow, on_architecture(arch, area), child.forcing.η.parameters,
+-                                child.free_surface.displacement, times, means, A, Float64(relaxation_time), tendency,
++                                child.free_surface.displacement, times, means, monotone_slopes(times, means), A, Float64(relaxation_time), tendency,
+                                 Ref((0.0, 0.0)))
+     target.initial_means[] = (model_mean(target), glorys_mean(target, child.clock.time)[1])
+     return target
+@@ -49,13 +50,27 @@ end
+ 
+ model_mean(target) = sum(view(interior(target.displacement), :, :, 1) .* target.cell_area) / target.area
+ 
+-# GLORYS's domain-mean η and its rate of change at time t, linear between the daily means and held before the first
++# Slopes at the daily means: the harmonic mean of the neighbouring secants, zero where they differ in sign
++# (Fritsch & Butland 1984), so the cubic between two means never overshoots them
++function monotone_slopes(times, means)
++    δ = diff(means) ./ diff(times)
++    inner = [δ[n - 1] * δ[n] > 0 ? 2 / (1 / δ[n - 1] + 1 / δ[n]) : 0.0 for n in 2:length(δ)]
++    return [δ[1]; inner; δ[end]]
++end
++
++# GLORYS's domain-mean η and its rate of change at time t: the cubic Hermite interpolant through the daily means and
++# their slopes, held before the first
+ function glorys_mean(target, t)
+-    times, means = target.times, target.means
++    times, means, slopes = target.times, target.means, target.slopes
+     t ≤ times[1] && return means[1], 0.0
+     n = min(searchsortedlast(times, t), length(times) - 1)
+-    slope = (means[n + 1] - means[n]) / (times[n + 1] - times[n])
+-    return means[n] + slope * (t - times[n]), slope
++    h = times[n + 1] - times[n]
++    s = (t - times[n]) / h
++    η̄ᴳ = (2s^3 - 3s^2 + 1) * means[n] + (s^3 - 2s^2 + s) * h * slopes[n] +
++          (3s^2 - 2s^3) * means[n + 1] + (s^3 - s^2) * h * slopes[n + 1]
++    ∂tη̄ᴳ = ((6s^2 - 6s) * means[n] + (6s - 6s^2) * means[n + 1]) / h +
++            (3s^2 - 4s + 1) * slopes[n] + (3s^2 - 2s) * slopes[n + 1]
++    return η̄ᴳ, ∂tη̄ᴳ
+ end
+ 
+ function set_net_inflow!(sim, target)
+diff --git a/nested/runs/glorys-fastest-4d.toml b/nested/runs/glorys-fastest-4d.toml
+index 6664511..63a0d6b 100644
+--- a/nested/runs/glorys-fastest-4d.toml
++++ b/nested/runs/glorys-fastest-4d.toml
+@@ -24,7 +24,7 @@ net_inflow_control = false  # true (needs zero_net_inflow): prototype of a volum
+ # net_inflow_Sv = 0.0       # pin the total barotropic inflow through both edges together (Sv, positive into the domain), as NEMO and ROMS do; Flather splits it between the edges
+ follow_glorys_volume = true  # true: set that total inflow every step so that the domain-mean η follows GLORYS's (overrides net_inflow_Sv; glorys_volume_target.jl)
+ volume_relaxation_days = 1    # with follow_glorys_volume: time over which the remaining drift from GLORYS's mean η is removed
+-follow_glorys_tendency = false # with follow_glorys_volume: true also follows GLORYS's rate of change exactly, which jumps once a day
++follow_glorys_tendency = false # with follow_glorys_volume: true also follows GLORYS's rate of change exactly
+ # edge_inflow_Sv = { atlantic = -0.8, pacific = 0.8 }   # pin the barotropic inflow through each edge (Sv, positive into the domain), as NEMO and ROMS do
+ 
+ [coupling]
+diff --git a/nested/runs/glorys-sqrtH-4d.toml b/nested/runs/glorys-sqrtH-4d.toml
+index 83963cb..325b482 100644
+--- a/nested/runs/glorys-sqrtH-4d.toml
++++ b/nested/runs/glorys-sqrtH-4d.toml
+@@ -25,7 +25,7 @@ net_inflow_control = false  # true (needs zero_net_inflow): prototype of a volum
+ # net_inflow_Sv = 0.0       # pin the total barotropic inflow through both edges together (Sv, positive into the domain), as NEMO and ROMS do; Flather splits it between the edges
+ follow_glorys_volume = true  # true: set that total inflow every step so that the domain-mean η follows GLORYS's (overrides net_inflow_Sv; glorys_volume_target.jl)
+ volume_relaxation_days = 1    # with follow_glorys_volume: time over which the remaining drift from GLORYS's mean η is removed
+-follow_glorys_tendency = false # with follow_glorys_volume: true also follows GLORYS's rate of change exactly, which jumps once a day
++follow_glorys_tendency = false # with follow_glorys_volume: true also follows GLORYS's rate of change exactly
+ net_inflow_depth_exponent = 0.5 # the pin shifts each edge column's transport ∝ H^0.5
+ # edge_inflow_Sv = { atlantic = -0.8, pacific = 0.8 }   # pin the barotropic inflow through each edge (Sv, positive into the domain), as NEMO and ROMS do
+ 
+diff --git a/nested/runs/glorys-sqrtH-tendency-4d.toml b/nested/runs/glorys-sqrtH-tendency-4d.toml
+new file mode 100644
+index 0000000..b1559b5
+--- /dev/null
++++ b/nested/runs/glorys-sqrtH-tendency-4d.toml
+@@ -0,0 +1,38 @@
++# Run settings: as glorys-sqrtH-4d, but following GLORYS's rate of change (now continuous) with a 5-day relaxation
++# for the remaining drift. Compare with output-glorys-sqrtH-4d.
++#
++# Settings for nested/panarctic_nested.jl: the pan-Arctic ocean (and optionally sea ice and JRA55) nested in GLORYS
++# with NumericalEarth's nested_ocean_model.
++#
++# Run from the nested/ folder:  julia +1.13 --project=. panarctic_nested.jl [config file]
++
++architecture = "GPU"   # "GPU" or "CPU"
++
++[grid]
++spacing_km = 100         # 100 (≈1°) for quick tests; 15 for the production grid
++Nz         = 20
++depth      = 5000        # m
++bathymetry = "ETOPO"     # "ETOPO" (NumericalEarth's default) or "GEBCO2026" (as panarctic.jl; regridding needs ~55 GB of memory, cached)
++
++[time]
++start_date = 1993-01-01  # the run starts at 00:00 on this date, from GLORYS
++days       = 4
++dt_minutes = 20          # 20 at 100 km; 10 at 15 km
++
++[boundaries]
++zero_net_inflow = false     # true: the Flather exterior transport has no net inflow through the Atlantic and Pacific edges together
++net_inflow_control = false  # true (needs zero_net_inflow): prototype of a volume control from outside the substeps (net_inflow_control.jl); superseded by net_inflow_Sv
++# net_inflow_Sv = 0.0       # pin the total barotropic inflow through both edges together (Sv, positive into the domain), as NEMO and ROMS do; Flather splits it between the edges
++follow_glorys_volume = true  # true: set that total inflow every step so that the domain-mean η follows GLORYS's (overrides net_inflow_Sv; glorys_volume_target.jl)
++volume_relaxation_days = 5    # with follow_glorys_volume: time over which the remaining drift from GLORYS's mean η is removed
++follow_glorys_tendency = true  # with follow_glorys_volume: true also follows GLORYS's rate of change exactly
++net_inflow_depth_exponent = 0.5 # the pin shifts each edge column's transport ∝ H^0.5
++# edge_inflow_Sv = { atlantic = -0.8, pacific = 0.8 }   # pin the barotropic inflow through each edge (Sv, positive into the domain), as NEMO and ROMS do
++
++[coupling]
++coupled  = true         # true: add sea ice (nested in GLORYS) and the JRA55 atmosphere, radiation and rivers
++pressure = false         # with coupled = true: false sets the JRA55 sea-level pressure to 101325 Pa everywhere (GLORYS's η has no inverse barometer)
++
++[paths]
++data_dir   = ""          # where downloads are stored; "" = each dataset's default cache
++output_dir = "output-glorys-sqrtH-tendency-4d"
+-- 
+2.43.0
+

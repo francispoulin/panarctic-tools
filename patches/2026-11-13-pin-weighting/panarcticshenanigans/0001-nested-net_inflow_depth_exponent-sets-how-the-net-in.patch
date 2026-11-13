@@ -1,0 +1,115 @@
+From bc2cf15323451458cd7a702b0839cd27e35ccfe4 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 13 Nov 2026 18:45:34 -0500
+Subject: [PATCH 1/3] nested: net_inflow_depth_exponent sets how the net-inflow
+ pin spreads its shift along the edges
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+[boundaries] net_inflow_depth_exponent (default 0, unchanged): the pin shifts each edge column's transport ∝ H^p;
+0.5 is a uniform shift of GLORYS's η in Flather. NumericalEarth moves to nl+fjp/net-inflow-weighting (1a507d8);
+Oceananigans needs the NetInflow depth_exponent commit on fjp/net-inflow-target. Run file runs/glorys-sqrtH-4d.toml.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ nested/Project.toml              |  4 ++--
+ nested/config.toml               |  1 +
+ nested/panarctic_nested.jl       |  5 +++--
+ nested/runs/glorys-sqrtH-4d.toml | 38 ++++++++++++++++++++++++++++++++
+ 4 files changed, 44 insertions(+), 4 deletions(-)
+ create mode 100644 nested/runs/glorys-sqrtH-4d.toml
+
+diff --git a/nested/Project.toml b/nested/Project.toml
+index 6c8151f..a76f7b4 100644
+--- a/nested/Project.toml
++++ b/nested/Project.toml
+@@ -10,8 +10,8 @@ TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
+ 
+ [sources]
+ # NumericalEarth PR #676 (nested_ocean_model) plus PR #923 (zero_net_inflow, edge_transports) plus net_inflow,
+-# branch nl+fjp/net-inflow. Move to the #676 head once these are merged, and to a release once #676 is.
+-NumericalEarth = {url = "https://github.com/NumericalEarth/NumericalEarth.jl", rev = "d3603a660ef220ff57b4657bc4eaf631ad821023"}
++# and net_inflow_depth_exponent, branch nl+fjp/net-inflow-weighting. Move to the #676 head once these are merged, and to a release once #676 is.
++NumericalEarth = {url = "https://github.com/NumericalEarth/NumericalEarth.jl", rev = "1a507d838606a7fd21615c24fa666134937f600a"}
+ # Oceananigans 0.117.2 plus the NetInflow target_transport (pins the total inflow through several open sides)
+ Oceananigans = {url = "https://github.com/CliMA/Oceananigans.jl", rev = "fjp/net-inflow-target"}
+ 
+diff --git a/nested/config.toml b/nested/config.toml
+index 15614b8..a268b25 100644
+--- a/nested/config.toml
++++ b/nested/config.toml
+@@ -23,6 +23,7 @@ net_inflow_control = false  # true (needs zero_net_inflow): prototype of a volum
+ follow_glorys_volume = false  # true: set that total inflow every step so that the domain-mean η follows GLORYS's (overrides net_inflow_Sv; glorys_volume_target.jl)
+ volume_relaxation_days = 1    # with follow_glorys_volume: time over which the remaining drift from GLORYS's mean η is removed
+ follow_glorys_tendency = false # with follow_glorys_volume: true also follows GLORYS's rate of change exactly, which jumps once a day
++net_inflow_depth_exponent = 0  # with net_inflow_Sv or follow_glorys_volume: the pin shifts each edge column's transport ∝ H^p; 0 uniform per length, 1 uniform velocity (NEMO, ROMS), 0.5 a uniform shift of GLORYS's η in Flather
+ # edge_inflow_Sv = { atlantic = -0.8, pacific = 0.8 }   # pin the barotropic inflow through each edge (Sv, positive into the domain), as NEMO and ROMS do
+ 
+ [coupling]
+diff --git a/nested/panarctic_nested.jl b/nested/panarctic_nested.jl
+index 2674f1c..8fc363d 100644
+--- a/nested/panarctic_nested.jl
++++ b/nested/panarctic_nested.jl
+@@ -88,11 +88,12 @@ edge_targets       = isnothing(edge_inflow) ? nothing : (south = 1e6 * edge_infl
+ total_inflow       = get(config["boundaries"], "net_inflow_Sv", nothing)
+ follow_glorys      = get(config["boundaries"], "follow_glorys_volume", false)
+ net_inflow         = follow_glorys ? Ref(0.0) : isnothing(total_inflow) ? nothing : 1e6 * total_inflow
+-@info "Open boundaries: zero_net_inflow = $zero_net_inflow, net_inflow = $net_inflow, edge_transports = $edge_targets (m³/s, into the domain)"
++net_inflow_depth_exponent = get(config["boundaries"], "net_inflow_depth_exponent", 0)
++@info "Open boundaries: zero_net_inflow = $zero_net_inflow, net_inflow = $net_inflow (pin ∝ H^$net_inflow_depth_exponent), edge_transports = $edge_targets (m³/s, into the domain)"
+ coupled         = config["coupling"]["coupled"]
+ 
+ ocean = nested_ocean_simulation(grid, parent_dataset; dates, open_sides = (:south, :north), zero_net_inflow,
+-                                net_inflow, edge_transports = edge_targets,
++                                net_inflow, net_inflow_depth_exponent, edge_transports = edge_targets,
+                                 Δt, stop_time, dir_kw...)
+ child = ocean.model.child
+ 
+diff --git a/nested/runs/glorys-sqrtH-4d.toml b/nested/runs/glorys-sqrtH-4d.toml
+new file mode 100644
+index 0000000..83963cb
+--- /dev/null
++++ b/nested/runs/glorys-sqrtH-4d.toml
+@@ -0,0 +1,38 @@
++# Run settings: as glorys-fastest-4d, but the net-inflow pin shifts each edge column ∝ √H (a uniform shift of GLORYS's η
++# in Flather). Compare with output-glorys-fastest-4d.
++#
++# Settings for nested/panarctic_nested.jl: the pan-Arctic ocean (and optionally sea ice and JRA55) nested in GLORYS
++# with NumericalEarth's nested_ocean_model.
++#
++# Run from the nested/ folder:  julia +1.13 --project=. panarctic_nested.jl [config file]
++
++architecture = "GPU"   # "GPU" or "CPU"
++
++[grid]
++spacing_km = 100         # 100 (≈1°) for quick tests; 15 for the production grid
++Nz         = 20
++depth      = 5000        # m
++bathymetry = "ETOPO"     # "ETOPO" (NumericalEarth's default) or "GEBCO2026" (as panarctic.jl; regridding needs ~55 GB of memory, cached)
++
++[time]
++start_date = 1993-01-01  # the run starts at 00:00 on this date, from GLORYS
++days       = 4
++dt_minutes = 20          # 20 at 100 km; 10 at 15 km
++
++[boundaries]
++zero_net_inflow = false     # true: the Flather exterior transport has no net inflow through the Atlantic and Pacific edges together
++net_inflow_control = false  # true (needs zero_net_inflow): prototype of a volume control from outside the substeps (net_inflow_control.jl); superseded by net_inflow_Sv
++# net_inflow_Sv = 0.0       # pin the total barotropic inflow through both edges together (Sv, positive into the domain), as NEMO and ROMS do; Flather splits it between the edges
++follow_glorys_volume = true  # true: set that total inflow every step so that the domain-mean η follows GLORYS's (overrides net_inflow_Sv; glorys_volume_target.jl)
++volume_relaxation_days = 1    # with follow_glorys_volume: time over which the remaining drift from GLORYS's mean η is removed
++follow_glorys_tendency = false # with follow_glorys_volume: true also follows GLORYS's rate of change exactly, which jumps once a day
++net_inflow_depth_exponent = 0.5 # the pin shifts each edge column's transport ∝ H^0.5
++# edge_inflow_Sv = { atlantic = -0.8, pacific = 0.8 }   # pin the barotropic inflow through each edge (Sv, positive into the domain), as NEMO and ROMS do
++
++[coupling]
++coupled  = true         # true: add sea ice (nested in GLORYS) and the JRA55 atmosphere, radiation and rivers
++pressure = false         # with coupled = true: false sets the JRA55 sea-level pressure to 101325 Pa everywhere (GLORYS's η has no inverse barometer)
++
++[paths]
++data_dir   = ""          # where downloads are stored; "" = each dataset's default cache
++output_dir = "output-glorys-sqrtH-4d"
+-- 
+2.43.0
+

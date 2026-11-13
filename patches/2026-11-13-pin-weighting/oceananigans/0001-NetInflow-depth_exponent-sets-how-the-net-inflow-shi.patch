@@ -1,0 +1,195 @@
+From de346071b801e5c9b79bb0879bdf366c717f9f10 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 13 Nov 2026 18:42:53 -0500
+Subject: [PATCH] NetInflow: depth_exponent sets how the net-inflow shift is
+ spread over the columns
+
+The pinned net inflow is restored by a shift of each column's transport proportional to H^depth_exponent:
+0 is the previous behaviour (uniform per unit length), 1 a uniform velocity (NEMO, ROMS), 1/2 a uniform
+shift of the Flather exterior free surface, which cancels a datum offset common to the sides column by column.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ .../open_boundary_utils.jl                    | 21 ++++++++----
+ .../barotropic_targeted_transport.jl          | 29 ++++++++++-------
+ .../open_boundary_conditions.jl               | 32 +++++++++++++++++++
+ 3 files changed, 63 insertions(+), 19 deletions(-)
+
+diff --git a/src/BoundaryConditions/open_boundary_schemes/open_boundary_utils.jl b/src/BoundaryConditions/open_boundary_schemes/open_boundary_utils.jl
+index 61f13e2..6c0a651 100644
+--- a/src/BoundaryConditions/open_boundary_schemes/open_boundary_utils.jl
++++ b/src/BoundaryConditions/open_boundary_schemes/open_boundary_utils.jl
+@@ -133,30 +133,37 @@ end
+ end
+ 
+ """
+-    NetInflow(transport)
++    NetInflow(transport; depth_exponent = 0)
+ 
+-A `target_transport` shared by every open side that carries it: a single uniform shift, common to those sides and
++A `target_transport` shared by every open side that carries it: a single shift, common to those sides and
+ applied after the Flather fill of every barotropic substep, pins their net inflow, the sum of `∮U·n̂ dl` [m³ s⁻¹] counted
+ positive into the domain, to `transport`, as the volume constraints of NEMO and ROMS do. Each side keeps the shape of
+ its own Flather profile, and the split of the inflow between the sides is left to the Flather condition. Every side
+ carrying a `NetInflow` must carry the same one. `transport` is a number, or a `Ref` to one that may change during a
+ run (from a callback, say): the pin reads it at the start of every barotropic step.
+ 
++The shift of each column's transport is proportional to `H^depth_exponent`, with `H` the column depth: `0` shifts the
++transport uniformly per unit length, `1` shifts the velocity uniformly (as NEMO and ROMS do), and `1/2` shifts the
++exterior free surface of the Flather condition uniformly.
++
+ ```jldoctest
+ using Oceananigans
+ 
+-NetInflow(0.0)
++NetInflow(0.0; depth_exponent = 1/2)
+ 
+ # output
+-NetInflow{Float64}(0.0)
++NetInflow{Float64, Float64}(0.0, 0.5)
+ ```
+ """
+-struct NetInflow{T}
++struct NetInflow{T, P}
+     transport :: T
++    depth_exponent :: P
+ end
+ 
++NetInflow(transport; depth_exponent = 0) = NetInflow(transport, depth_exponent)
++
+ # Kernels never read the target, and a `Ref` cannot enter them
+-Adapt.adapt_structure(to, target::NetInflow{<:Base.RefValue}) = NetInflow(target.transport[])
++Adapt.adapt_structure(to, target::NetInflow{<:Base.RefValue}) = NetInflow(target.transport[], target.depth_exponent)
+ 
+ net_inflow_value(transport::Number) = transport
+ net_inflow_value(transport::Base.RefValue) = transport[]
+@@ -164,6 +171,6 @@ net_inflow_value(transport::Base.RefValue) = transport[]
+ # A `target_transport` is `nothing`, a fixed transport, a `NetInflow`, or a callable of the grid (kept as is).
+ convert_target_transport(FT, ::Nothing) = nothing
+ convert_target_transport(FT, target_transport::Number) = convert(FT, target_transport)
+-convert_target_transport(FT, target_transport::NetInflow{<:Number}) = NetInflow(convert(FT, target_transport.transport))
++convert_target_transport(FT, target_transport::NetInflow{<:Number}) = NetInflow(convert(FT, target_transport.transport), target_transport.depth_exponent)
+ convert_target_transport(FT, target_transport::NetInflow) = target_transport
+ convert_target_transport(FT, target_transport) = target_transport
+diff --git a/src/Models/HydrostaticFreeSurfaceModels/SplitExplicitFreeSurfaces/barotropic_targeted_transport.jl b/src/Models/HydrostaticFreeSurfaceModels/SplitExplicitFreeSurfaces/barotropic_targeted_transport.jl
+index 99b3818..6c1c743 100644
+--- a/src/Models/HydrostaticFreeSurfaceModels/SplitExplicitFreeSurfaces/barotropic_targeted_transport.jl
++++ b/src/Models/HydrostaticFreeSurfaceModels/SplitExplicitFreeSurfaces/barotropic_targeted_transport.jl
+@@ -115,12 +115,17 @@ pooled(target::NetInflow, sign) = sign
+ pooled(target, sign) = 0
+ net_inflow_weights(targets) = map(pooled, (targets.west, targets.east, targets.south, targets.north), (1, -1, 1, -1))
+ 
+-net_inflow_target(targets, grid) =
+-    convert(eltype(grid), net_inflow_value(first(target.transport for target in values(targets) if target isa NetInflow)))
++function net_inflow_target(targets, grid)
++    target = first(target for target in values(targets) if target isa NetInflow)
++    return convert(eltype(grid), net_inflow_value(target.transport)), convert(eltype(grid), target.depth_exponent)
++end
++
++@inline face_depth(i, j, grid, ::Val{:x}) = column_depthᶠᶜᵃ(i, j, grid)
++@inline face_depth(i, j, grid, ::Val{:y}) = column_depthᶜᶠᵃ(i, j, grid)
+ 
+-# As `_pin_barotropic_face!`, over every pooled face at once: with sₙ = ±1 the inflow sign of side n,
+-# Q = Σₙ sₙ ∮ U dl and L = Σₙ ∮ dl over the wet columns, every wet column of side n is shifted by -sₙ (Q - target) / L.
+-@kernel function _pin_net_barotropic_inflow!(U, V, grid, target, weights)
++# As `_pin_barotropic_face!`, over every pooled face at once: with sₙ = ±1 the inflow sign of side n and wᵢ = Hᵢᵖ,
++# Q = Σₙ sₙ ∮ U dl and L = Σₙ ∮ w dl over the wet columns, every wet column of side n is shifted by -sₙ wᵢ (Q - target) / L.
++@kernel function _pin_net_barotropic_inflow!(U, V, grid, target, p, weights)
+     t = @index(Local, Linear)
+     ΣQ = @localmem eltype(grid) (FACE_WORKGROUP_SIZE,)
+     ΣL = @localmem eltype(grid) (FACE_WORKGROUP_SIZE,)
+@@ -133,13 +138,13 @@ net_inflow_target(targets, grid) =
+         Δlʷ = abs(sʷ) * wet_face_width(1, n, grid, Val(:x))
+         Δlᵉ = abs(sᵉ) * wet_face_width(Nx + 1, n, grid, Val(:x))
+         @inbounds Q += sʷ * U[1, n, 1] * Δlʷ + sᵉ * U[Nx + 1, n, 1] * Δlᵉ
+-        L += Δlʷ + Δlᵉ
++        L += Δlʷ * face_depth(1, n, grid, Val(:x))^p + Δlᵉ * face_depth(Nx + 1, n, grid, Val(:x))^p
+     end
+     for n in t:FACE_WORKGROUP_SIZE:Nx
+         Δlˢ = abs(sˢ) * wet_face_width(n, 1, grid, Val(:y))
+         Δlⁿ = abs(sⁿ) * wet_face_width(n, Ny + 1, grid, Val(:y))
+         @inbounds Q += sˢ * V[n, 1, 1] * Δlˢ + sⁿ * V[n, Ny + 1, 1] * Δlⁿ
+-        L += Δlˢ + Δlⁿ
++        L += Δlˢ * face_depth(n, 1, grid, Val(:y))^p + Δlⁿ * face_depth(n, Ny + 1, grid, Val(:y))^p
+     end
+     @inbounds ΣQ[t] = Q
+     @inbounds ΣL[t] = L
+@@ -158,12 +163,12 @@ net_inflow_target(targets, grid) =
+ 
+     @inbounds shift = ΣQ[1]
+     for n in t:FACE_WORKGROUP_SIZE:Ny
+-        @inbounds U[1, n, 1]      -= ifelse(wet_face_width(1, n, grid, Val(:x)) > 0, sʷ * shift, zero(shift))
+-        @inbounds U[Nx + 1, n, 1] -= ifelse(wet_face_width(Nx + 1, n, grid, Val(:x)) > 0, sᵉ * shift, zero(shift))
++        @inbounds U[1, n, 1]      -= ifelse(wet_face_width(1, n, grid, Val(:x)) > 0, sʷ * shift * face_depth(1, n, grid, Val(:x))^p, zero(shift))
++        @inbounds U[Nx + 1, n, 1] -= ifelse(wet_face_width(Nx + 1, n, grid, Val(:x)) > 0, sᵉ * shift * face_depth(Nx + 1, n, grid, Val(:x))^p, zero(shift))
+     end
+     for n in t:FACE_WORKGROUP_SIZE:Nx
+-        @inbounds V[n, 1, 1]      -= ifelse(wet_face_width(n, 1, grid, Val(:y)) > 0, sˢ * shift, zero(shift))
+-        @inbounds V[n, Ny + 1, 1] -= ifelse(wet_face_width(n, Ny + 1, grid, Val(:y)) > 0, sⁿ * shift, zero(shift))
++        @inbounds V[n, 1, 1]      -= ifelse(wet_face_width(n, 1, grid, Val(:y)) > 0, sˢ * shift * face_depth(n, 1, grid, Val(:y))^p, zero(shift))
++        @inbounds V[n, Ny + 1, 1] -= ifelse(wet_face_width(n, Ny + 1, grid, Val(:y)) > 0, sⁿ * shift * face_depth(n, Ny + 1, grid, Val(:y))^p, zero(shift))
+     end
+ end
+ 
+@@ -172,7 +177,7 @@ function configure_net_inflow_pin(arch, grid, U, V, targets)
+     all(iszero, weights) && return nothing
+     workgroup = StaticSize((FACE_WORKGROUP_SIZE,))
+     kernel! = _pin_net_barotropic_inflow!(device(arch), workgroup, workgroup)
+-    args = convert_to_device(arch, (U, V, grid, net_inflow_target(targets, grid), weights))
++    args = convert_to_device(arch, (U, V, grid, net_inflow_target(targets, grid)..., weights))
+     return (; kernel!, args)
+ end
+ 
+diff --git a/test/hydrostatic_free_surface/open_boundary_conditions.jl b/test/hydrostatic_free_surface/open_boundary_conditions.jl
+index f87e9db..536291b 100644
+--- a/test/hydrostatic_free_surface/open_boundary_conditions.jl
++++ b/test/hydrostatic_free_surface/open_boundary_conditions.jl
+@@ -823,6 +823,34 @@ function test_gravity_wave_net_inflow()
+     return shared && rising && following
+ end
+ 
++# With the exterior free surface δ above the model's on both sides, Flather lets in √(gH) δ per unit length on every
++# column; a shift ∝ √H cancels it column by column, so a basin at rest stays at rest, while a shift uniform per unit
++# length moves water wherever the depth varies along the sides.
++function test_net_inflow_depth_exponent()
++    Nx, Ny, Nz, H = 8, 8, 4, 40.0
++    Lx = Ly = 1e4
++    underlying_grid = RectilinearGrid(size = (Nx, Ny, Nz), halo = (3, 3, 3), x = (0, Lx), y = (0, Ly), z = (-H, 0),
++                                      topology = (Open, Bounded, Bounded))
++    grid = ImmersedBoundaryGrid(underlying_grid, GridFittedBottom((x, y) -> -H * (1 + 3y / Ly) / 4))
++    δ = 0.03
++
++    function run_model(depth_exponent)
++        target = NetInflow(0; depth_exponent)
++        west = GravityWaveRadiationBoundaryCondition((0, δ); target_transport = target)
++        east = GravityWaveRadiationBoundaryCondition((0, δ); target_transport = target)
++        boundary_conditions = (; U = FieldBoundaryConditions(; west, east), u = zero_normal_flow(:west, :east))
++        model = HydrostaticFreeSurfaceModel(grid; boundary_conditions, free_surface = SplitExplicitFreeSurface(grid; substeps = 4),
++                                            buoyancy = nothing, tracers = ())
++        for _ in 1:5
++            time_step!(model, 30.0)
++        end
++        return maximum(abs, Array(interior(model.free_surface.barotropic_velocities.U)))
++    end
++
++    scale = sqrt(9.81 * H) * δ
++    return run_model(1/2) < 1e-10 * scale && run_model(0) > 1e-3 * scale
++end
++
+ @testset "Open Boundary Conditions for HydrostaticFreeSurfaceModel" begin
+     @testset "GravityWaveRadiation with target_transport" begin
+         @test test_gravity_wave_target_transport()
+@@ -832,6 +860,10 @@ end
+         @test test_gravity_wave_net_inflow()
+     end
+ 
++    @testset "NetInflow shifted ∝ √H moves no water for a common exterior datum" begin
++        @test test_net_inflow_depth_exponent()
++    end
++
+     @testset "Barotropic gravity wave radiation" begin
+         @test test_barotropic_gravity_wave_radiation()
+     end
+-- 
+2.43.0
+
