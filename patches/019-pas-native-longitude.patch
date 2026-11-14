@@ -1,0 +1,34 @@
+From 8b3d4eed927c51bd2a3dc8acca8d9b1064b523f9 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 13 Nov 2026 23:02:18 -0500
+Subject: [PATCH] =?UTF-8?q?glorys=5Fgateways=5Fnative.jl:=20longitude=20in?=
+ =?UTF-8?q?dex=20in=20boxes=20wider=20than=20180=C2=B0?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+nearest_corner wrapped λ − λ₀ into [−180, 180), which is wrong for the
+full-longitude Arctic box (Fram's 0°E landed outside it).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AbhhvmJrXadb5LQWtyUVrz
+---
+ nested/glorys_gateways_native.jl | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/nested/glorys_gateways_native.jl b/nested/glorys_gateways_native.jl
+index df22547..830efff 100644
+--- a/nested/glorys_gateways_native.jl
++++ b/nested/glorys_gateways_native.jl
+@@ -99,7 +99,7 @@ end
+ corner_lonlat(c::LonLatCorners, I, J) = (c.λ₀ + (I - 1) * c.Δλ, c.φ₀ + (J - 1) * c.Δφ)
+ 
+ function nearest_corner(c::LonLatCorners, λ, φ)
+-    I = 1 + round(Int, (mod(λ - c.λ₀ + 180, 360) - 180) / c.Δλ)
++    I = 1 + round(Int, mod(λ - c.λ₀, 360) / c.Δλ)   # the box starts at λ₀ (any width, including all longitudes)
+     J = 1 + round(Int, (φ - c.φ₀) / c.Δφ)
+     (1 ≤ I ≤ c.NI && 1 ≤ J ≤ c.NJ) || error(@sprintf("point %.2f°E %.2f°N is outside the downloaded box", λ, φ))
+     return (I, J)
+-- 
+2.43.0
+

@@ -24,6 +24,7 @@ Numbered in the order to apply, across repositories. Each was checked to apply w
 | 016 | PanArcticShenanigans | `fjp/nested` | after 015 | `runs/glorys-sqrtH-30d.toml` (1°, 30 days) and `runs/glorys-sqrtH-15km-5d.toml` (15 km, dt 10 min, ETOPO) |
 | 017 | PanArcticShenanigans | `fjp/nested` | a342cff | GLORYS Arctic volume closure (`glorys_arctic_budget.csv`); `PANARCTIC_DOWNLOAD_ONLY=1`; `runs/tsubouchi-2005-15km-2mo.toml` (Sep–Oct 2005, 15 km) |
 | 018 | PanArcticShenanigans | `fjp/nested` | 3ad3d86 | `plot_gateways.jl`: Tsubouchi et al. (2018) monthly volumes (orange), GLORYS Arctic budget panel, runs without a model; `nested/references/` |
+| 019 | PanArcticShenanigans | `fjp/nested` | after 018 | fixes 017: longitude index in the full-longitude Arctic box (`point … outside the downloaded box`) |
 
 ## Applying 001–006
 
