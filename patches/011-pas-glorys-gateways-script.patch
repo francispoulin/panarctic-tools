@@ -1,0 +1,212 @@
+From 0dad5b05f08a6d9e9b2c90de71b1ef644c103bb8 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 13 Nov 2026 20:53:34 -0500
+Subject: [PATCH] nested: GLORYS gateway transports from a standalone script on
+ the CPU (glorys_gateways_run.jl); setup.jl
+
+glorys_gateways advances GLORYS's clock and calls update_state! before sampling each day, so the days it reads are in
+memory (without it the GPU kernel read past them: CUDA_ERROR_ILLEGAL_ADDRESS). It now takes a grid, not a model.
+setup.jl holds the settings, packages, paths, grid and dates, included by panarctic_nested.jl and by
+glorys_gateways_run.jl, which builds only the grid and runs on the CPU.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AbhhvpGsnzaJJu3V9mqrum
+---
+ nested/gateways.jl            | 13 ++++----
+ nested/glorys_gateways_run.jl | 10 ++++++
+ nested/panarctic_nested.jl    | 57 ++--------------------------------
+ nested/setup.jl               | 58 +++++++++++++++++++++++++++++++++++
+ 4 files changed, 76 insertions(+), 62 deletions(-)
+ create mode 100644 nested/glorys_gateways_run.jl
+ create mode 100644 nested/setup.jl
+
+diff --git a/nested/gateways.jl b/nested/gateways.jl
+index 3c20262..336ccf7 100644
+--- a/nested/gateways.jl
++++ b/nested/gateways.jl
+@@ -138,13 +138,10 @@ function add_gateway_monitor!(simulation, child, output_dir; schedule = TimeInte
+     return file
+ end
+ 
+-# GLORYS through the same sections: its daily means, interpolated onto the child grid and rotated into the grid's
+-# frame as the initial state is, sampled at the center of each day of the run (noon) and written to
+-# <output_dir>/glorys_gateways.csv. Run in the REPL after a run:
+-#
+-#     glorys_gateways(child, parent_dataset, dates, output_dir; days = run_days, dir_kw...)
+-function glorys_gateways(child, dataset, dates, output_dir; days, dir = default_download_directory(dataset))
+-    grid     = child.grid
++# GLORYS through the same sections: its daily means, interpolated onto `grid` and rotated into the grid's frame as
++# the initial state is, sampled at the center of each day of the run (noon) and written to
++# <output_dir>/glorys_gateways.csv. Run by glorys_gateways_run.jl.
++function glorys_gateways(grid, dataset, dates, output_dir; days, dir = default_download_directory(dataset))
+     sections = gateway_sections(on_architecture(CPU(), grid))
+     region   = BoundingBox(grid.underlying_grid; padding = default_horizontal_padding(dataset))
+     glorys   = PrescribedOcean(region, dates, dataset; architecture = Oceananigans.Architectures.architecture(grid), dir)
+@@ -155,6 +152,8 @@ function glorys_gateways(child, dataset, dates, output_dir; days, dir = default_
+     open(io -> println(io, gateway_header(sections)), file, "w")
+     for n in 0:ceil(Int, days) - 1
+         t = (n + 1/2) * Oceananigans.Units.day
++        glorys.clock.time = t
++        Oceananigans.TimeSteppers.update_state!(glorys)   # loads the days around t into memory
+         for (field, name) in ((u, :u), (v, :v), (T, :T), (S, :S))
+             sample_parent!(field, boundary_location(name), getproperty(sources, name), t)
+         end
+diff --git a/nested/glorys_gateways_run.jl b/nested/glorys_gateways_run.jl
+new file mode 100644
+index 0000000..58d0742
+--- /dev/null
++++ b/nested/glorys_gateways_run.jl
+@@ -0,0 +1,10 @@
++# GLORYS's daily-mean volume, heat and freshwater transport through the four gateways of gateways.jl, on the grid of a
++# run file, for the days of that run: <output_dir>/glorys_gateways.csv, drawn by plot_gateways.jl as black dots.
++# Builds only the grid, on the CPU, so it needs no model and no GPU.
++#
++#   julia --project=. glorys_gateways_run.jl runs/glorys-sqrtH-4d.toml
++
++include("setup.jl")
++include("gateways.jl")
++
++glorys_gateways(on_architecture(CPU(), grid), GLORYSDaily(), dates, output_dir; days = run_days, dir_kw...)
+diff --git a/nested/panarctic_nested.jl b/nested/panarctic_nested.jl
+index 2c9e1d0..cb09a24 100644
+--- a/nested/panarctic_nested.jl
++++ b/nested/panarctic_nested.jl
+@@ -14,69 +14,16 @@
+ # Hourly diagnostics go to the log and to <output_dir>/nested_monitor.csv; surface fields every 3 hours and η every
+ # hour to <output_dir>/nested_surface.jld2 and nested_free_surface.jld2.
+ 
+-using TOML
+-config_file = isempty(ARGS) ? joinpath(@__DIR__, "config.toml") : ARGS[1]
+-config = TOML.parsefile(config_file)
+-@info "Settings from $config_file" config
+-
+-using NumericalEarth, Oceananigans, Oceananigans.Units
+-using Oceananigans.OrthogonalSphericalShellGrids: ConformalConicGrid
+-using NumericalEarth.DataWrangling: GEBCO2026
+-using CopernicusMarine   # enables the GLORYS download extension
+-using CUDA, Dates, Printf
+-
++include("setup.jl")
+ include("monitor.jl")
+ include("gateways.jl")
+ include("net_inflow_control.jl")
+ include("glorys_volume_target.jl")
+ 
+-arch       = config["architecture"] == "GPU" ? GPU() : CPU()
+-data_dir   = config["paths"]["data_dir"]
+-dir_kw     = isempty(data_dir) ? (;) : (; dir = data_dir)
+-output_dir = mkpath(config["paths"]["output_dir"])
+-
+-# ## Grid: as panarctic.jl (λ₀ = −40°, pole inside; Atlantic edge j = 1, Pacific edge j = Ny)
+-
+-Nz      = config["grid"]["Nz"]
+-depth   = config["grid"]["depth"] * meters
+-spacing = config["grid"]["spacing_km"] * kilometers
+-z       = ExponentialDiscretization(Nz, -depth, 0; scale = depth/4, mutable = true)
+-
+-x₁, x₂ = -3280e3, 3616e3
+-y₁, y₂ = -4100e3, 2700e3
+-underlying_grid = ConformalConicGrid(arch;
+-                                     size               = (round(Int, (x₂ - x₁) / spacing), round(Int, (y₂ - y₁) / spacing), Nz),
+-                                     x                  = (x₁, x₂),
+-                                     y                  = (y₁, y₂),
+-                                     central_longitude  = -40,
+-                                     standard_parallel  = 90,
+-                                     latitude_of_origin = 90,
+-                                     z,
+-                                     halo = (7, 7, 7))
+-
+-Nx, Ny = size(underlying_grid)[1:2]
+-@info "Grid: $Nx × $Ny × $Nz, largest spacing $(spacing / 1e3) km"
+-
+-# Regridded on a CPU copy of the grid, as in setup.jl; the result is cached
+-bathymetry_kw = (; minimum_depth = 15, interpolation_passes = 2, major_basins = 1)
+-cpu_grid = on_architecture(CPU(), underlying_grid)
+-bottom_height = if config["grid"]["bathymetry"] == "GEBCO2026"
+-    regrid_bathymetry(cpu_grid, Metadatum(:bottom_height; dataset = GEBCO2026(), dir_kw...); bathymetry_kw...)
+-else
+-    regrid_bathymetry(cpu_grid; bathymetry_kw...)
+-end
+-
+-grid = ImmersedBoundaryGrid(underlying_grid, PartialCellBottom(Array(interior(bottom_height, :, :, 1)));
+-                            active_cells_map = true)
+-
+ # ## Ocean (and sea ice) nested in GLORYS
+ #
+-# GLORYS daily means from start_date to one day past the end of the run. Only the Atlantic and Pacific edges are open
+-# (the default would open every side that touches water).
++# Only the Atlantic and Pacific edges are open (the default would open every side that touches water).
+ 
+-start_date = DateTime(config["time"]["start_date"])
+-run_days   = config["time"]["days"]
+-dates      = (start_date, start_date + Day(ceil(Int, run_days) + 1))
+ Δt         = config["time"]["dt_minutes"] * minutes
+ stop_time  = run_days * Oceananigans.Units.day   # qualified, so a `days` defined in the REPL cannot change it
+ 
+diff --git a/nested/setup.jl b/nested/setup.jl
+new file mode 100644
+index 0000000..0811727
+--- /dev/null
++++ b/nested/setup.jl
+@@ -0,0 +1,58 @@
++# Settings, packages, paths, the grid and the run's dates for the nested pan-Arctic model: included by
++# panarctic_nested.jl and by glorys_gateways_run.jl. Reads the config file named in ARGS (default config.toml).
++
++using TOML
++config_file = isempty(ARGS) ? joinpath(@__DIR__, "config.toml") : ARGS[1]
++config = TOML.parsefile(config_file)
++@info "Settings from $config_file" config
++
++using NumericalEarth, Oceananigans, Oceananigans.Units
++using Oceananigans.OrthogonalSphericalShellGrids: ConformalConicGrid
++using NumericalEarth.DataWrangling: GEBCO2026
++using CopernicusMarine   # enables the GLORYS download extension
++using CUDA, Dates, Printf
++
++
++arch       = config["architecture"] == "GPU" ? GPU() : CPU()
++data_dir   = config["paths"]["data_dir"]
++dir_kw     = isempty(data_dir) ? (;) : (; dir = data_dir)
++output_dir = mkpath(config["paths"]["output_dir"])
++
++# ## Grid: as panarctic.jl (λ₀ = −40°, pole inside; Atlantic edge j = 1, Pacific edge j = Ny)
++
++Nz      = config["grid"]["Nz"]
++depth   = config["grid"]["depth"] * meters
++spacing = config["grid"]["spacing_km"] * kilometers
++z       = ExponentialDiscretization(Nz, -depth, 0; scale = depth/4, mutable = true)
++
++x₁, x₂ = -3280e3, 3616e3
++y₁, y₂ = -4100e3, 2700e3
++underlying_grid = ConformalConicGrid(arch;
++                                     size               = (round(Int, (x₂ - x₁) / spacing), round(Int, (y₂ - y₁) / spacing), Nz),
++                                     x                  = (x₁, x₂),
++                                     y                  = (y₁, y₂),
++                                     central_longitude  = -40,
++                                     standard_parallel  = 90,
++                                     latitude_of_origin = 90,
++                                     z,
++                                     halo = (7, 7, 7))
++
++Nx, Ny = size(underlying_grid)[1:2]
++@info "Grid: $Nx × $Ny × $Nz, largest spacing $(spacing / 1e3) km"
++
++# Regridded on a CPU copy of the grid, as in setup.jl; the result is cached
++bathymetry_kw = (; minimum_depth = 15, interpolation_passes = 2, major_basins = 1)
++cpu_grid = on_architecture(CPU(), underlying_grid)
++bottom_height = if config["grid"]["bathymetry"] == "GEBCO2026"
++    regrid_bathymetry(cpu_grid, Metadatum(:bottom_height; dataset = GEBCO2026(), dir_kw...); bathymetry_kw...)
++else
++    regrid_bathymetry(cpu_grid; bathymetry_kw...)
++end
++
++grid = ImmersedBoundaryGrid(underlying_grid, PartialCellBottom(Array(interior(bottom_height, :, :, 1)));
++                            active_cells_map = true)
++
++# GLORYS daily means from start_date to one day past the end of the run
++start_date = DateTime(config["time"]["start_date"])
++run_days   = config["time"]["days"]
++dates      = (start_date, start_date + Day(ceil(Int, run_days) + 1))
+-- 
+2.43.0
+
