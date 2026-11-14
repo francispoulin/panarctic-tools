@@ -1,0 +1,44 @@
+From 66518ab2c55609a4f317bd96330890e01efe74e2 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 13 Nov 2026 21:00:43 -0500
+Subject: [PATCH] nested: glorys_gateways_run.jl builds the grid on the CPU
+ whatever the run file says
+
+setup.jl takes the architecture from PANARCTIC_ARCHITECTURE when it is set, else from the config;
+glorys_gateways_run.jl sets it to CPU, so it never touches the GPU.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AbhhvpGsnzaJJu3V9mqrum
+---
+ nested/glorys_gateways_run.jl | 1 +
+ nested/setup.jl               | 2 +-
+ 2 files changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/nested/glorys_gateways_run.jl b/nested/glorys_gateways_run.jl
+index 58d0742..1c59168 100644
+--- a/nested/glorys_gateways_run.jl
++++ b/nested/glorys_gateways_run.jl
+@@ -4,6 +4,7 @@
+ #
+ #   julia --project=. glorys_gateways_run.jl runs/glorys-sqrtH-4d.toml
+ 
++ENV["PANARCTIC_ARCHITECTURE"] = "CPU"
+ include("setup.jl")
+ include("gateways.jl")
+ 
+diff --git a/nested/setup.jl b/nested/setup.jl
+index 0811727..cdc8c4f 100644
+--- a/nested/setup.jl
++++ b/nested/setup.jl
+@@ -13,7 +13,7 @@ using CopernicusMarine   # enables the GLORYS download extension
+ using CUDA, Dates, Printf
+ 
+ 
+-arch       = config["architecture"] == "GPU" ? GPU() : CPU()
++arch       = get(ENV, "PANARCTIC_ARCHITECTURE", config["architecture"]) == "GPU" ? GPU() : CPU()   # the variable overrides the config
+ data_dir   = config["paths"]["data_dir"]
+ dir_kw     = isempty(data_dir) ? (;) : (; dir = data_dir)
+ output_dir = mkpath(config["paths"]["output_dir"])
+-- 
+2.43.0
+
