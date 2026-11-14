@@ -1,0 +1,95 @@
+From c0465f49b465f5385e31d124ebef3c88ecfa5c6d Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 13 Nov 2026 23:14:38 -0500
+Subject: [PATCH] [coupling] winds = false: JRA55 winds set to zero;
+ runs/glorys-sqrtH-nowind-4d.toml
+
+Tests whether the ~2-day Fram/BSO oscillation is forced by the January 1993
+winds or a free mode rung up at the start.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AbhhvmJrXadb5LQWtyUVrz
+---
+ nested/panarctic_nested.jl              | 14 +++++++--
+ nested/runs/glorys-sqrtH-nowind-4d.toml | 40 +++++++++++++++++++++++++
+ 2 files changed, 52 insertions(+), 2 deletions(-)
+ create mode 100644 nested/runs/glorys-sqrtH-nowind-4d.toml
+
+diff --git a/nested/panarctic_nested.jl b/nested/panarctic_nested.jl
+index cf1e557..37fc4cb 100644
+--- a/nested/panarctic_nested.jl
++++ b/nested/panarctic_nested.jl
+@@ -50,12 +50,22 @@ if coupled
+ 
+     jra55 = (; dataset = MultiYearJRA55(), start_date = dates[1], end_date = dates[2], dir_kw...)
+     atmosphere = JRA55PrescribedAtmosphere(arch; jra55...)
+-    if !config["coupling"]["pressure"]
+-        # The whole record in memory, so the uniform pressure is not overwritten by a reload
++    pressure = config["coupling"]["pressure"]
++    winds    = get(config["coupling"], "winds", true)
++    if !pressure || !winds
++        # The whole record in memory, so the values set below are not overwritten by a reload
+         atmosphere = JRA55PrescribedAtmosphere(arch; jra55..., time_indices_in_memory = length(atmosphere.velocities.u.times))
++    end
++    if !pressure
+         fill!(parent(atmosphere.pressure.data), 101325)
+         @warn "JRA55 sea-level pressure set to 101325 Pa everywhere ([coupling] pressure = false)"
+     end
++    if !winds
++        # No wind stress on the ocean or the ice; the turbulent heat and moisture fluxes then use calm air
++        fill!(parent(atmosphere.velocities.u.data), 0)
++        fill!(parent(atmosphere.velocities.v.data), 0)
++        @warn "JRA55 winds set to zero everywhere ([coupling] winds = false)"
++    end
+     radiation = JRA55PrescribedRadiation(arch; jra55...)
+     land      = JRA55PrescribedLand(child.grid; jra55...)
+ 
+diff --git a/nested/runs/glorys-sqrtH-nowind-4d.toml b/nested/runs/glorys-sqrtH-nowind-4d.toml
+new file mode 100644
+index 0000000..5f59477
+--- /dev/null
++++ b/nested/runs/glorys-sqrtH-nowind-4d.toml
+@@ -0,0 +1,40 @@
++# Run settings: as glorys-sqrtH-4d with the JRA55 winds set to zero (no stress on ocean or ice). Is the ~2-day
++# Fram/BSO oscillation forced by the January 1993 winds, or a free mode rung up at the start? Compare with
++# output-glorys-sqrtH-4d.
++#
++# Settings for nested/panarctic_nested.jl: the pan-Arctic ocean (and optionally sea ice and JRA55) nested in GLORYS
++# with NumericalEarth's nested_ocean_model.
++#
++# Run from the nested/ folder:  julia +1.13 --project=. panarctic_nested.jl [config file]
++
++architecture = "GPU"   # "GPU" or "CPU"
++
++[grid]
++spacing_km = 100         # 100 (≈1°) for quick tests; 15 for the production grid
++Nz         = 20
++depth      = 5000        # m
++bathymetry = "ETOPO"     # "ETOPO" (NumericalEarth's default) or "GEBCO2026" (as panarctic.jl; regridding needs ~55 GB of memory, cached)
++
++[time]
++start_date = 1993-01-01  # the run starts at 00:00 on this date, from GLORYS
++days       = 4
++dt_minutes = 20          # 20 at 100 km; 10 at 15 km
++
++[boundaries]
++zero_net_inflow = false     # true: the Flather exterior transport has no net inflow through the Atlantic and Pacific edges together
++net_inflow_control = false  # true (needs zero_net_inflow): prototype of a volume control from outside the substeps (net_inflow_control.jl); superseded by net_inflow_Sv
++# net_inflow_Sv = 0.0       # pin the total barotropic inflow through both edges together (Sv, positive into the domain), as NEMO and ROMS do; Flather splits it between the edges
++follow_glorys_volume = true  # true: set that total inflow every step so that the domain-mean η follows GLORYS's (overrides net_inflow_Sv; glorys_volume_target.jl)
++volume_relaxation_days = 1    # with follow_glorys_volume: time over which the remaining drift from GLORYS's mean η is removed
++follow_glorys_tendency = false # with follow_glorys_volume: true also follows GLORYS's rate of change exactly
++net_inflow_depth_exponent = 0.5 # the pin shifts each edge column's transport ∝ H^0.5
++# edge_inflow_Sv = { atlantic = -0.8, pacific = 0.8 }   # pin the barotropic inflow through each edge (Sv, positive into the domain), as NEMO and ROMS do
++
++[coupling]
++coupled  = true         # true: add sea ice (nested in GLORYS) and the JRA55 atmosphere, radiation and rivers
++pressure = false         # with coupled = true: false sets the JRA55 sea-level pressure to 101325 Pa everywhere (GLORYS's η has no inverse barometer)
++winds    = false         # false: JRA55 winds set to zero (no wind stress on ocean or ice); default true
++
++[paths]
++data_dir   = ""          # where downloads are stored; "" = each dataset's default cache
++output_dir = "output-glorys-sqrtH-nowind-4d"
+-- 
+2.43.0
+
