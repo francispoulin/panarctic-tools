@@ -26,6 +26,7 @@ Numbered in the order to apply, across repositories. Each was checked to apply w
 | 018 | PanArcticShenanigans | `fjp/nested` | 3ad3d86 | `plot_gateways.jl`: Tsubouchi et al. (2018) monthly volumes (orange), GLORYS Arctic budget panel, runs without a model; `nested/references/` |
 | 019 | PanArcticShenanigans | `fjp/nested` | after 018 | fixes 017: longitude index in the full-longitude Arctic box (`point … outside the downloaded box`) |
 | 020 | PanArcticShenanigans | `fjp/nested` | a7f3b53 | `[coupling] winds = false` (JRA55 winds zeroed); `runs/glorys-sqrtH-nowind-4d.toml` (1°, 4 days) |
+| 021 | PanArcticShenanigans | `fjp/nested` | a049a53 | `jra55_read_fix.jl`: JRA55 reads for runs not starting on 1 January (fixes `-(::Nothing, ::Int64)` in `build_flux_routing`); NumericalEarth bug, to report upstream |
 
 ## Applying 001–006
 
