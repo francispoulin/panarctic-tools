@@ -1,0 +1,28 @@
+From c04e6fe501b5c19b99b506713305fe122ad9fbd2 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 13 Nov 2026 20:04:58 -0500
+Subject: [PATCH] nested: gateways.csv header gets one column name per
+ quantity, not a tuple per gateway
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AbhhvpGsnzaJJu3V9mqrum
+---
+ nested/gateways.jl | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/nested/gateways.jl b/nested/gateways.jl
+index e1a70b0..d1cd609 100644
+--- a/nested/gateways.jl
++++ b/nested/gateways.jl
+@@ -103,7 +103,7 @@ function add_gateway_monitor!(simulation, child, output_dir; schedule = TimeInte
+     end
+ 
+     file = joinpath(output_dir, "gateways.csv")
+-    header = join(["hour"; [s.name .* ("_volume_Sv", "_heat_TW", "_freshwater_mSv") for s in sections]...], ',')
++    header = join(["hour"; [s.name * suffix for s in sections for suffix in ("_volume_Sv", "_heat_TW", "_freshwater_mSv")]], ',')
+     open(io -> println(io, header), file, "w")
+ 
+     function gateway_monitor(sim)
+-- 
+2.43.0
+
