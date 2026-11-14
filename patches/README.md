@@ -19,6 +19,7 @@ Numbered in the order to apply, across repositories. Each was checked to apply w
 | 011 | PanArcticShenanigans | `fjp/nested` | after 010 | fixes 010 (GLORYS clock advanced before sampling); `setup.jl`; `glorys_gateways_run.jl` (CPU, no model) |
 | 012 | PanArcticShenanigans | `fjp/nested` | after 011 | `glorys_gateways_run.jl` always on the CPU (`PANARCTIC_ARCHITECTURE` overrides the config) |
 | 013 | PanArcticShenanigans | `fjp/nested` | after 012 | `setup.jl` and `gateways.jl` import what they use (fixes `on_architecture not defined`) |
+| 014 | PanArcticShenanigans | `fjp/nested` | 90cb4fd | `glorys_gateways_native.jl`: GLORYS gateway transports on GLORYS's own 1/12° grid (replaces `glorys_gateways_run.jl`); also through the model's staircase; `plot_gateways.jl` draws both |
 
 ## Applying 001–006
 

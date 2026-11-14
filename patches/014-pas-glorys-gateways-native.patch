@@ -1,0 +1,431 @@
+From e33b8e68bc776d5646a2f6c34d6ded2392a2b601 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 13 Nov 2026 21:44:59 -0500
+Subject: [PATCH] GLORYS gateway transports on GLORYS's own grid
+
+glorys_gateways_native.jl replaces glorys_gateways_run.jl, which point-sampled
+GLORYS onto the model grid (not transport-conserving at 1 degree). Each gateway
+line becomes a staircase of faces between GLORYS's 1/12 degree cells; face
+velocity is the mean of the two wet cells, bottom level cut at deptho. Also
+reports GLORYS through the model's own staircase for each line, to separate
+line placement from model error. plot_gateways.jl draws both.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ nested/gateways.jl               |  31 +---
+ nested/glorys_gateways_native.jl | 273 +++++++++++++++++++++++++++++++
+ nested/glorys_gateways_run.jl    |  11 --
+ nested/plot_gateways.jl          |  10 +-
+ nested/setup.jl                  |   2 +-
+ 5 files changed, 283 insertions(+), 44 deletions(-)
+ create mode 100644 nested/glorys_gateways_native.jl
+ delete mode 100644 nested/glorys_gateways_run.jl
+
+diff --git a/nested/gateways.jl b/nested/gateways.jl
+index 7b7b233..9ae59b8 100644
+--- a/nested/gateways.jl
++++ b/nested/gateways.jl
+@@ -5,12 +5,11 @@
+ # Each section is a polyline of (longitude, latitude) points, mapped to a staircase of model faces through the cell
+ # corners nearest the line, so it stays in place when the resolution changes. The setup log lists each section's faces
+ # and warns when an end is in water. Hourly snapshots go to <output_dir>/gateways.csv; plot_gateways.jl takes daily
+-# means and compares them with the mooring estimates. glorys_gateways (below) puts GLORYS through the same sections.
++# means and compares them with the mooring estimates. glorys_gateways_native.jl puts GLORYS through the same lines on
++# GLORYS's own grid.
+ 
+ using Oceananigans.Architectures: on_architecture
+ using Oceananigans.Grids: inactive_node, λnode, φnode
+-using NumericalEarth.DataWrangling: default_download_directory, default_horizontal_padding
+-using NumericalEarth.NestedModels: boundary_location, child_frame_sources, parent_ocean_sources, sample_parent!
+ using Printf
+ using Oceananigans.Operators: Δxᶜᶠᶜ, Δyᶠᶜᶜ, Δzᶜᶠᶜ, Δzᶠᶜᶜ
+ 
+@@ -140,29 +139,3 @@ function add_gateway_monitor!(simulation, child, output_dir; schedule = TimeInte
+     add_callback!(simulation, gateway_monitor, schedule; name = :gateway_monitor)
+     return file
+ end
+-
+-# GLORYS through the same sections: its daily means, interpolated onto `grid` and rotated into the grid's frame as
+-# the initial state is, sampled at the center of each day of the run (noon) and written to
+-# <output_dir>/glorys_gateways.csv. Run by glorys_gateways_run.jl.
+-function glorys_gateways(grid, dataset, dates, output_dir; days, dir = default_download_directory(dataset))
+-    sections = gateway_sections(on_architecture(CPU(), grid))
+-    region   = BoundingBox(grid.underlying_grid; padding = default_horizontal_padding(dataset))
+-    glorys   = PrescribedOcean(region, dates, dataset; architecture = Oceananigans.Architectures.architecture(grid), dir)
+-    sources  = child_frame_sources(grid, parent_ocean_sources(glorys))
+-
+-    u, v, T, S = XFaceField(grid), YFaceField(grid), CenterField(grid), CenterField(grid)
+-    file = joinpath(output_dir, "glorys_gateways.csv")
+-    open(io -> println(io, gateway_header(sections)), file, "w")
+-    for n in 0:ceil(Int, days) - 1
+-        t = (n + 1/2) * Oceananigans.Units.day
+-        glorys.clock.time = t
+-        Oceananigans.TimeSteppers.update_state!(glorys)   # loads the days around t into memory
+-        for (field, name) in ((u, :u), (v, :v), (T, :T), (S, :S))
+-            sample_parent!(field, boundary_location(name), getproperty(sources, name), t)
+-        end
+-        values = gateway_row(sections, t / hours, u, v, T, S)
+-        write_gateway_row(file, values)
+-        @info @sprintf("GLORYS day %d: ", n) * join((@sprintf("%s %+.2f", s.name, values[3m - 1]) for (m, s) in enumerate(sections)), ", ") * " Sv"
+-    end
+-    return file
+-end
+diff --git a/nested/glorys_gateways_native.jl b/nested/glorys_gateways_native.jl
+new file mode 100644
+index 0000000..43259e3
+--- /dev/null
++++ b/nested/glorys_gateways_native.jl
+@@ -0,0 +1,273 @@
++# GLORYS's daily-mean volume, heat and freshwater transport through the four gateways of gateways.jl, computed on
++# GLORYS's own 1/12° grid: no interpolation onto the model grid, no inpainting, GLORYS's own coastline and sea floor.
++# This is the reference for the model's gateways.csv (glorys_gateways_run.jl point-samples GLORYS onto the model grid,
++# which does not conserve transport at 1°; its numbers are not GLORYS's).
++#
++#   julia --project=. glorys_gateways_native.jl runs/glorys-sqrtH-4d.toml
++#
++# Writes, in the run's output_dir,
++#   glorys_gateways.csv            through each gateway line (gateway_lines in gateways.jl): the reference;
++#                                  plot_gateways.jl draws it as black diamonds
++#   glorys_gateways_modelline.csv  through the model's staircase for that line (its cell corners at this resolution),
++#                                  still on GLORYS's grid: the difference from the first file is what the model's
++#                                  placement of the line alone changes
++# and prints a table per day plus the sum of the four (the net inflow to the Arctic, which only a change in its volume,
++# runoff and Fury and Hecla Strait can balance: it should be a few tenths of a Sv, not several Sv).
++#
++# Downloads, once, small boxes around each gateway: daily uo, vo, thetao, so (all depths) and the static deptho.
++# Builds the model grid on the CPU only to find the model's staircase; needs no GPU.
++#
++# Method. GLORYS's daily product is on a regular longitude-latitude grid with every variable at cell centres. Each line
++# is turned into a staircase through the corners of GLORYS's cells (as gateways.jl does on the model grid), so every
++# step is the face between two GLORYS cells. The velocity on a face is the mean of the two cells' (u on a meridional
++# step, v on a zonal one), at every level where both are wet; a face with land on either side carries nothing. Level
++# thicknesses come from GLORYS's levels, with the deepest one cut at the shallower of the two columns' deptho (partial
++# bottom cells). Heat relative to the gateway's reference temperature, freshwater relative to 34.8 (Shu et al. 2023).
++
++ENV["PANARCTIC_ARCHITECTURE"] = "CPU"
++include("setup.jl")
++include("gateways.jl")
++
++using NumericalEarth.DataWrangling: BoundingBox, Metadatum, default_download_directory, NCDatasets, Downloads
++using NumericalEarth.DataWrangling.GLORYS: GLORYSDaily, GLORYSStatic
++using .NCDatasets: Dataset, dimnames
++
++const R_earth = 6.371e6
++
++glorys_dir = isempty(data_dir) ? default_download_directory(GLORYSDaily()) : data_dir
++
++# ## GLORYS in a box around one line
++
++# Box around the points, 0.5° wider on every side (the download adds two more GLORYS cells)
++function line_box(points)
++    λ, φ = first.(points), last.(points)
++    return BoundingBox(longitude = (minimum(λ) - 0.5, maximum(λ) + 0.5), latitude = (minimum(φ) - 0.5, maximum(φ) + 0.5))
++end
++
++function read_variable(name, dataset, region; date = nothing)
++    meta = isnothing(date) ? Metadatum(name; dataset, region, dir = glorys_dir) :
++                             Metadatum(name; dataset, date, region, dir = glorys_dir)
++    path = Downloads.download(meta)
++    ds   = Dataset(path)
++    var  = ds[NumericalEarth.DataWrangling.GLORYS.GLORYS_dataset_variable_names[name]]
++    lon  = Float64.(ds["longitude"][:])
++    lat  = Float64.(ds["latitude"][:])
++    dims = dimnames(var)
++    if "depth" in dims
++        dims[1:3] == ("longitude", "latitude", "depth") || error("unexpected dimensions $dims in $path")
++        data  = Float64.(coalesce.(var[:, :, :, 1], NaN))
++        depth = Float64.(ds["depth"][:])
++    else
++        dims[1:2] == ("longitude", "latitude") || error("unexpected dimensions $dims in $path")
++        data  = Float64.(coalesce.(ndims(var) == 3 ? var[:, :, 1] : var[:, :], NaN))
++        depth = nothing
++    end
++    close(ds)
++    return (; lon, lat, depth, data)
++end
++
++# Thicknesses of GLORYS's levels from its level depths (interfaces halfway between, the top one at the surface)
++function level_interfaces(depth)
++    zf = vcat(0.0, (depth[1:end-1] .+ depth[2:end]) ./ 2)
++    return vcat(zf, depth[end] + (depth[end] - zf[end]))
++end
++
++# ## Staircase through GLORYS's cell corners
++#
++# Corner (I, J) sits at (lon[1] + (I - 3/2) Δλ, lat[1] + (J - 3/2) Δφ): cell (i, j) has corners I = i, i + 1 and
++# J = j, j + 1. Steps follow gateways.jl: corner (I, J) → (I + 1, J) crosses the v-face between cells (I, J - 1) and
++# (I, J), positive northward; (I, J) → (I, J + 1) crosses the u-face between cells (I - 1, J) and (I, J), with sign −1
++# for an eastward u, so a positive transport is always to the left of the direction of travel.
++
++struct LonLatCorners
++    λ₀ :: Float64
++    φ₀ :: Float64
++    Δλ :: Float64
++    Δφ :: Float64
++    NI :: Int
++    NJ :: Int
++end
++
++function LonLatCorners(lon, lat)
++    Δλ, Δφ = lon[2] - lon[1], lat[2] - lat[1]
++    all(d -> isapprox(d, Δλ; rtol = 1e-3), diff(lon)) && all(d -> isapprox(d, Δφ; rtol = 1e-3), diff(lat)) ||
++        error("GLORYS's grid is expected to be regular in longitude and latitude")
++    return LonLatCorners(lon[1] - Δλ / 2, lat[1] - Δφ / 2, Δλ, Δφ, length(lon) + 1, length(lat) + 1)
++end
++
++corner_lonlat(c::LonLatCorners, I, J) = (c.λ₀ + (I - 1) * c.Δλ, c.φ₀ + (J - 1) * c.Δφ)
++
++function nearest_corner(c::LonLatCorners, λ, φ)
++    I = 1 + round(Int, (mod(λ - c.λ₀ + 180, 360) - 180) / c.Δλ)
++    J = 1 + round(Int, (φ - c.φ₀) / c.Δφ)
++    (1 ≤ I ≤ c.NI && 1 ≤ J ≤ c.NJ) || error(@sprintf("point %.2f°E %.2f°N is outside the downloaded box", λ, φ))
++    return (I, J)
++end
++
++# Corners visited by the line through `points` (straight in longitude-latitude between points), in unit steps
++function lonlat_corner_path(c::LonLatCorners, points)
++    path = [nearest_corner(c, points[1]...)]
++    for p in 1:length(points) - 1
++        (λa, φa), (λb, φb) = points[p], points[p + 1]
++        Δλ = mod(λb - λa + 180, 360) - 180
++        n  = 4 * ceil(Int, max(abs(Δλ) / c.Δλ, abs(φb - φa) / c.Δφ)) + 1
++        for s in 1:n
++            α = s / n
++            target = nearest_corner(c, λa + α * Δλ, φa + α * (φb - φa))
++            while target != path[end]
++                I, J = path[end]
++                # step along the axis with the larger remaining distance, so the staircase hugs the line
++                if abs(target[1] - I) ≥ abs(target[2] - J)
++                    push!(path, (I + sign(target[1] - I), J))
++                else
++                    push!(path, (I, J + sign(target[2] - J)))
++                end
++            end
++        end
++    end
++    return path
++end
++
++# Faces as (kind, a, b, sign): the two cells on either side, `a` on the side the transport counts from
++function lonlat_faces(path)
++    signs = Dict{Tuple{Symbol, Int, Int}, Int}()
++    for (a, b) in zip(path[1:end-1], path[2:end])
++        face = b[2] == a[2] ? (:v, min(a[1], b[1]), a[2]) : (:u, a[1], min(a[2], b[2]))
++        signs[face] = get(signs, face, 0) + (b[2] == a[2] ? b[1] - a[1] : a[2] - b[2])
++    end
++    faces = [(f..., s) for (f, s) in signs if s != 0]
++    sort!(faces, by = f -> (f[2], f[3]))
++    return faces
++end
++
++# ## Transport through the faces of one day
++
++struct GatewayBox
++    corners :: LonLatCorners
++    lat     :: Vector{Float64}
++    zf      :: Vector{Float64}     # level interfaces, m, positive down
++    deptho  :: Matrix{Float64}     # sea floor depth, m (NaN on land)
++end
++
++# (cells on either side, the face's length) for a face; cells are (i, j) of GLORYS's arrays
++function face_geometry(box::GatewayBox, kind, I, J)
++    c = box.corners
++    if kind === :v
++        cells = ((I, J - 1), (I, J))
++        φ = c.φ₀ + (J - 1) * c.Δφ
++        return cells, R_earth * cosd(φ) * deg2rad(c.Δλ)
++    else
++        cells = ((I - 1, J), (I, J))
++        return cells, R_earth * deg2rad(c.Δφ)
++    end
++end
++
++inside(data, (i, j)) = 1 ≤ i ≤ size(data, 1) && 1 ≤ j ≤ size(data, 2)
++wet_floor(h) = isfinite(h) && h > 0   # deptho is missing or 0 on land
++
++function native_transport(box::GatewayBox, faces, Tʳᵉᶠ, u, v, T, S)
++    volume = heat = freshwater = 0.0
++    Nk = length(box.zf) - 1
++    for (kind, I, J, sgn) in faces
++        (a, b), L = face_geometry(box, kind, I, J)
++        (inside(u, a) && inside(u, b)) || continue
++        floor = min(box.deptho[a...], box.deptho[b...])
++        wet_floor(floor) || continue
++        velocity = kind === :v ? v : u
++        for k in 1:Nk
++            box.zf[k] ≥ floor && break
++            Δz = min(box.zf[k + 1], floor) - box.zf[k]
++            va, vb = velocity[a..., k], velocity[b..., k]
++            (isfinite(va) && isfinite(vb)) || continue
++            q = sgn * (va + vb) / 2 * L * Δz
++            volume += q
++            Tᶠ = (T[a..., k] + T[b..., k]) / 2
++            Sᶠ = (S[a..., k] + S[b..., k]) / 2
++            if isfinite(Tᶠ) && isfinite(Sᶠ)
++                heat       += ρ₀cₚ * q * (Tᶠ - Tʳᵉᶠ)
++                freshwater += q * (1 - Sᶠ / Sʳᵉᶠ)
++            end
++        end
++    end
++    return volume, heat, freshwater
++end
++
++# ## The model's staircase for each line, as (longitude, latitude) of its corners
++
++model_grid = on_architecture(CPU(), grid)
++model_sections = gateway_sections(model_grid)
++model_corner_λ = [λnode(i, j, 1, model_grid, Face(), Face(), Center()) for i in 1:Nx+1, j in 1:Ny+1]
++model_corner_φ = [φnode(i, j, 1, model_grid, Face(), Face(), Center()) for i in 1:Nx+1, j in 1:Ny+1]
++model_lines = map(gateway_lines) do (name, points, Tʳᵉᶠ)
++    path = corner_path(points, model_corner_λ, model_corner_φ)
++    [(model_corner_λ[c...], model_corner_φ[c...]) for c in path]
++end
++
++# ## Boxes, staircases and checks
++
++run_dates = [start_date + Day(n) for n in 0:ceil(Int, run_days) - 1]
++
++boxes = map(enumerate(gateway_lines)) do (g, (name, points, Tʳᵉᶠ))
++    all_points = vcat(points, model_lines[g])
++    region = line_box(all_points)
++    static = read_variable(:depth, GLORYSStatic(), region)
++    sample = read_variable(:u_velocity, GLORYSDaily(), region; date = run_dates[1])
++    (static.lon ≈ sample.lon && static.lat ≈ sample.lat) || error("$name: deptho and uo are on different grids")
++    box = GatewayBox(LonLatCorners(sample.lon, sample.lat), sample.lat, level_interfaces(sample.depth), static.data)
++
++    lines = map((("line", points), ("model line", model_lines[g]))) do (label, pts)
++        path  = lonlat_corner_path(box.corners, pts)
++        faces = lonlat_faces(path)
++        face_floor(f) = ((a, b), _ = face_geometry(box, f[1], f[2], f[3]); min(box.deptho[a...], box.deptho[b...]))
++        wet   = count(f -> wet_floor(face_floor(f)), faces)
++        width = sum(f -> face_geometry(box, f[1], f[2], f[3])[2], faces)
++        @info @sprintf("GLORYS %-6s %-10s %5d faces (%d wet), %.0f km of staircase", name, label, length(faces), wet, width / 1e3)
++        ends = (lonlat_faces(path[1:2]), lonlat_faces(path[end-1:end]))
++        for f in Iterators.flatten(ends)
++            wet_floor(face_floor(f)) &&
++                @warn "GLORYS $name ($label): an end of the line is in water on GLORYS's grid"
++        end
++        faces
++    end
++    (; name, region, box, Tʳᵉᶠ, faces = lines[1], model_faces = lines[2])
++end
++
++# ## Transports, day by day
++
++files = (joinpath(output_dir, "glorys_gateways.csv"), joinpath(output_dir, "glorys_gateways_modelline.csv"))
++for file in files
++    open(io -> println(io, gateway_header(model_sections)), file, "w")
++end
++
++@printf("\n%-12s", "date")
++for b in boxes
++    @printf(" %15s", b.name)
++end
++@printf(" %15s\n", "sum")
++@printf("%-12s", "")
++for _ in 1:length(boxes) + 1
++    @printf(" %7s %7s", "line", "model")
++end
++println()
++
++for (n, date) in enumerate(run_dates)
++    rows = (Float64[24 * (n - 1) + 12], Float64[24 * (n - 1) + 12])   # GLORYS daily means are centred at noon
++    for b in boxes
++        uᴳ = read_variable(:u_velocity,  GLORYSDaily(), b.region; date).data
++        vᴳ = read_variable(:v_velocity,  GLORYSDaily(), b.region; date).data
++        Tᴳ = read_variable(:temperature, GLORYSDaily(), b.region; date).data
++        Sᴳ = read_variable(:salinity,    GLORYSDaily(), b.region; date).data
++        for (row, faces) in zip(rows, (b.faces, b.model_faces))
++            Q, H, F = native_transport(b.box, faces, b.Tʳᵉᶠ, uᴳ, vᴳ, Tᴳ, Sᴳ)
++            append!(row, (Q / 1e6, H / 1e12, F / 1e3))
++        end
++    end
++    foreach(write_gateway_row, files, rows)
++    @printf("%-12s", Date(date))
++    for g in 1:length(boxes)
++        @printf(" %+7.2f %+7.2f", rows[1][3g - 1], rows[2][3g - 1])
++    end
++    @printf(" %+7.2f %+7.2f\n", sum(rows[1][3g - 1] for g in 1:length(boxes)), sum(rows[2][3g - 1] for g in 1:length(boxes)))
++end
++println("\nvolume transport, Sv, positive into the Arctic; line = the gateway line, model = the model's staircase for it")
++@info "Wrote $(files[1]) and $(files[2])"
+diff --git a/nested/glorys_gateways_run.jl b/nested/glorys_gateways_run.jl
+deleted file mode 100644
+index 1c59168..0000000
+--- a/nested/glorys_gateways_run.jl
++++ /dev/null
+@@ -1,11 +0,0 @@
+-# GLORYS's daily-mean volume, heat and freshwater transport through the four gateways of gateways.jl, on the grid of a
+-# run file, for the days of that run: <output_dir>/glorys_gateways.csv, drawn by plot_gateways.jl as black dots.
+-# Builds only the grid, on the CPU, so it needs no model and no GPU.
+-#
+-#   julia --project=. glorys_gateways_run.jl runs/glorys-sqrtH-4d.toml
+-
+-ENV["PANARCTIC_ARCHITECTURE"] = "CPU"
+-include("setup.jl")
+-include("gateways.jl")
+-
+-glorys_gateways(on_architecture(CPU(), grid), GLORYSDaily(), dates, output_dir; days = run_days, dir_kw...)
+diff --git a/nested/plot_gateways.jl b/nested/plot_gateways.jl
+index b628516..8d511a7 100644
+--- a/nested/plot_gateways.jl
++++ b/nested/plot_gateways.jl
+@@ -4,8 +4,8 @@
+ # The bottom row is the sum of the four volume transports: the net inflow to the Arctic, which only a change in its
+ # volume can balance (Tsubouchi et al. 2018: −0.2 Sv). Daily means and run means use whole days only.
+ #
+-# With <folder>/glorys_gateways.csv (glorys_gateways in gateways.jl), GLORYS's daily means through the same sections
+-# are drawn as black dots.
++# With <folder>/glorys_gateways.csv (glorys_gateways_native.jl: GLORYS on its own 1/12° grid, through the same lines),
++# GLORYS's daily means are drawn as black diamonds.
+ #
+ #   julia --project=.. plot_gateways.jl output-glorys-sqrtH-4d      # writes <folder>/gateways.png
+ 
+@@ -21,6 +21,8 @@ end
+ column = read_columns(joinpath(folder, "gateways.csv"))
+ glorys_file = joinpath(folder, "glorys_gateways.csv")
+ glorys = isfile(glorys_file) ? read_columns(glorys_file) : nothing
++modelline_file = joinpath(folder, "glorys_gateways_modelline.csv")   # GLORYS through the model's staircase for each line
++modelline = isfile(modelline_file) ? read_columns(modelline_file) : nothing
+ 
+ hour = column("hour")
+ day  = floor.(Int, hour ./ 24)
+@@ -41,7 +43,7 @@ quantities = (("volume", "_volume_Sv", "Sv"), ("heat", "_heat_TW", "TW"), ("fres
+ gateways   = ("fram", "bso", "bering", "davis")
+ 
+ fig = Figure(size = (1200, 1200))
+-Label(fig[0, 1:3], basename(rstrip(folder, '/')) * ": hourly (line) and daily means (red dots), GLORYS daily means (black dots), observed annual means (band)"; fontsize = 18)
++Label(fig[0, 1:3], basename(rstrip(folder, '/')) * ": hourly (line) and daily means (red dots), GLORYS daily means (black; open: on the model's staircase), observed annual means (band)"; fontsize = 18)
+ for (r, g) in enumerate(gateways), (c, (quantity, suffix, unit)) in enumerate(quantities)
+     ax = Axis(fig[r, c]; xlabel = r == 4 && c > 1 ? "day" : "", ylabel = c == 1 ? "$g ($unit)" : unit, title = r == 1 ? quantity : "")
+     low, high = getproperty(observed[g], Symbol(quantity))
+@@ -50,6 +52,7 @@ for (r, g) in enumerate(gateways), (c, (quantity, suffix, unit)) in enumerate(qu
+     lines!(ax, hour ./ 24, column(g * suffix); color = (:red, 0.4))
+     scatter!(ax, days .+ 0.5, daily(column(g * suffix)); color = :red)
+     isnothing(glorys) || scatter!(ax, glorys("hour") ./ 24, glorys(g * suffix); color = :black, marker = :diamond)
++    isnothing(modelline) || scatter!(ax, modelline("hour") ./ 24, modelline(g * suffix); color = :transparent, strokecolor = :black, strokewidth = 1, marker = :circle)
+ end
+ 
+ net = sum(column(g * "_volume_Sv") for g in gateways)
+@@ -59,6 +62,7 @@ hlines!(ax, -0.2; color = :gray, linestyle = :dash)
+ lines!(ax, hour ./ 24, net; color = (:red, 0.4))
+ scatter!(ax, days .+ 0.5, daily(net); color = :red)
+ isnothing(glorys) || scatter!(ax, glorys("hour") ./ 24, sum(glorys(g * "_volume_Sv") for g in gateways); color = :black, marker = :diamond)
++isnothing(modelline) || scatter!(ax, modelline("hour") ./ 24, sum(modelline(g * "_volume_Sv") for g in gateways); color = :transparent, strokecolor = :black, strokewidth = 1, marker = :circle)
+ 
+ for g in gateways
+     @printf("%-6s mean over %d days: volume %+6.2f Sv, heat %+7.1f TW, freshwater %+7.1f mSv\n", g, length(days),
+diff --git a/nested/setup.jl b/nested/setup.jl
+index 6d5c7c6..3cb3089 100644
+--- a/nested/setup.jl
++++ b/nested/setup.jl
+@@ -1,5 +1,5 @@
+ # Settings, packages, paths, the grid and the run's dates for the nested pan-Arctic model: included by
+-# panarctic_nested.jl and by glorys_gateways_run.jl. Reads the config file named in ARGS (default config.toml).
++# panarctic_nested.jl and by glorys_gateways_native.jl. Reads the config file named in ARGS (default config.toml).
+ 
+ using TOML
+ config_file = isempty(ARGS) ? joinpath(@__DIR__, "config.toml") : ARGS[1]
+-- 
+2.43.0
+
