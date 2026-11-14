@@ -21,6 +21,7 @@ Numbered in the order to apply, across repositories. Each was checked to apply w
 | 013 | PanArcticShenanigans | `fjp/nested` | after 012 | `setup.jl` and `gateways.jl` import what they use (fixes `on_architecture not defined`) |
 | 014 | PanArcticShenanigans | `fjp/nested` | 90cb4fd | `glorys_gateways_native.jl`: GLORYS gateway transports on GLORYS's own 1/12° grid (replaces `glorys_gateways_run.jl`); also through the model's staircase; `plot_gateways.jl` draws both |
 | 015 | PanArcticShenanigans | `fjp/nested` | after 014 | fixes 014 (syntax error in `glorys_gateways_native.jl`) |
+| 016 | PanArcticShenanigans | `fjp/nested` | after 015 | `runs/glorys-sqrtH-30d.toml` (1°, 30 days) and `runs/glorys-sqrtH-15km-5d.toml` (15 km, dt 10 min, ETOPO) |
 
 ## Applying 001–006
 
