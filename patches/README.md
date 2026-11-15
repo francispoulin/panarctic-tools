@@ -34,7 +34,7 @@ Numbered in the order to apply, across repositories. Each was checked to apply w
 | 026 | PanArcticShenanigans | `fjp/nested` | after 025 | `runs/tsubouchi-2005-15km-partial-{hybrid,ke}-15d.toml`: partial cells, 15 days, with a momentum fix from `sandbox/lake_at_rest/thickness_jump_fixes.jl` loaded first (see the files' headers) |
 | 027 | PanArcticShenanigans | `fjp/nested` | after 026 | `heat_freshwater_tsubouchi.jl` (gateway heat and freshwater on Tsubouchi et al.'s references, model and GLORYS vs their Table 3); `references/tsubouchi2018_table3.csv` |
 | 028 | PanArcticShenanigans | `fjp/nested` | after 027 | `heat_freshwater_tsubouchi.jl` compares Tsubouchi et al.'s monthly blocks (same days) for volume, heat and freshwater; `references/tsubouchi2018_monthly_{heat,freshwater}.csv` (from Figs. 7a, 9a) |
-| 029 | PanArcticShenanigans | `fjp/nested` | after 028 | fix: `plot_gateways.jl` CAA table label (`"$(a)–$(b)"`), a parse error from 025 |
+| 029 | PanArcticShenanigans | `fjp/nested` | after 028 | fix applied by hand (no patch file): in `plot_gateways.jl` line 181, `"$a–$b"` → `"$(a)–$(b)"` (parse error from 025) |
 
 ## Applying 001–006
 
