@@ -30,6 +30,7 @@ Numbered in the order to apply, across repositories. Each was checked to apply w
 | 022 | PanArcticShenanigans | `fjp/nested` | after 021 | `[grid] bottom = "full"` (GridFittedBottom); run files `tsubouchi-2005-15km-fullcell-10d`, `tsubouchi-2005-15km-nz50-10d` |
 | 023 | PanArcticShenanigans | `fjp/nested` | 7063a25 | `runs/tsubouchi-2005-15km-fullcell-2mo.toml` (Sep–Oct 2005, 15 km, whole cells) |
 | 024 | PanArcticShenanigans | `fjp/nested` | after 023 | `runs/tsubouchi-2005-15km-fullcell-nz50-2mo.toml` (Sep–Oct 2005, 15 km, whole cells, 50 levels) |
+| 025 | PanArcticShenanigans | `fjp/nested` | 3cdb26e | Nares, Jones, Barrow sections in `gateways.jl` (GLORYS budget still the four); daily ice h, ℵ to `nested_ice.jld2`; CAA summary in `plot_gateways.jl`; `runs/tsubouchi-2005-15km-fullcell-caa-2mo.toml` |
 
 ## Applying 001–006
 

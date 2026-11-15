@@ -1,0 +1,206 @@
+From 54941f2c7dba611749afc6ede752c71b67de86ff Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 15 Nov 2026 10:17:18 -0500
+Subject: [PATCH] Gateways: Nares, Jones and Barrow sections; daily ice output;
+ CAA rerun
+
+Three Canadian Archipelago sections (Kennedy Channel, Jones Sound, Barrow
+Strait) join the gateway lines, so gateways.csv and glorys_gateways_native.jl
+give model and GLORYS transports through them; the GLORYS Arctic budget still
+uses only Fram, BSO, Bering and Davis. Coupled runs write daily ice thickness
+and concentration to nested_ice.jld2. plot_gateways.jl prints 10-day means of
+the three channels, their sum and Davis. runs/tsubouchi-2005-15km-fullcell-caa-2mo.toml
+reruns the whole-cell Sep-Oct 2005 run with these diagnostics.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AbhhvpBQdtxRS1ZtXrmX6a
+---
+ nested/gateways.jl                            | 10 ++++-
+ nested/glorys_gateways_native.jl              |  9 ++--
+ nested/panarctic_nested.jl                    |  8 +++-
+ nested/plot_gateways.jl                       | 18 ++++++++
+ .../tsubouchi-2005-15km-fullcell-caa-2mo.toml | 42 +++++++++++++++++++
+ 5 files changed, 81 insertions(+), 6 deletions(-)
+ create mode 100644 nested/runs/tsubouchi-2005-15km-fullcell-caa-2mo.toml
+
+diff --git a/nested/gateways.jl b/nested/gateways.jl
+index 9ae59b8..af5b9a8 100644
+--- a/nested/gateways.jl
++++ b/nested/gateways.jl
+@@ -22,8 +22,16 @@ const gateway_lines = [
+     ("bso",    [(16.5, 76.6), (19.0, 74.45), (20.6, 70.1)],  0.0),   # Sørkapp, Bjørnøya, Norway
+     ("bering", [(-170.3, 66.2), (-167.6, 65.55)],            -1.9),  # Cape Dezhnev to Cape Prince of Wales
+     ("davis",  [(-63.0, 66.6), (-52.5, 66.6)],               0.0),   # Baffin Island to Greenland
++    # Canadian Archipelago channels that feed Davis Strait (their sum ≈ Davis): positive into the Arctic, so outflow
++    # towards Baffin Bay is negative, as at Davis. Endpoints approximate; the setup log warns if an end is in water.
++    ("nares",  [(-69.5, 80.5), (-65.5, 80.5)],               0.0),   # Kennedy Channel, Ellesmere to Greenland
++    ("jones",  [(-81.0, 75.6), (-81.0, 76.6)],               0.0),   # Jones Sound, Devon to Ellesmere
++    ("barrow", [(-91.0, 73.6), (-91.0, 75.0)],               0.0),   # Barrow Strait, Somerset to Cornwallis/Devon
+ ]
+ 
++# The four lines that close the Arctic (Shu et al. 2023); the Archipelago channels lie inside, upstream of Davis
++const arctic_gateways = ("fram", "bso", "bering", "davis")
++
+ great_circle(λ₁, φ₁, λ₂, φ₂) = 2asind(sqrt(sind((φ₂ - φ₁) / 2)^2 + cosd(φ₁) * cosd(φ₂) * sind((λ₂ - λ₁) / 2)^2))
+ 
+ # Corners visited by the line through `points`, joined by unit steps of i or j
+@@ -91,7 +99,7 @@ function section_transport(faces, Tʳᵉᶠ, u, v, T, S)
+     return volume, heat, freshwater
+ end
+ 
+-# The four sections as staircases of faces on `grid` (a CPU grid)
++# The sections as staircases of faces on `grid` (a CPU grid)
+ function gateway_sections(grid)
+     Nx, Ny, Nz = size(grid)
+     corner_λ = [λnode(i, j, 1, grid, Face(), Face(), Center()) for i in 1:Nx+1, j in 1:Ny+1]
+diff --git a/nested/glorys_gateways_native.jl b/nested/glorys_gateways_native.jl
+index 830efff..c7ec008 100644
+--- a/nested/glorys_gateways_native.jl
++++ b/nested/glorys_gateways_native.jl
+@@ -1,4 +1,4 @@
+-# GLORYS's daily-mean volume, heat and freshwater transport through the four gateways of gateways.jl, computed on
++# GLORYS's daily-mean volume, heat and freshwater transport through the gateway lines of gateways.jl, computed on
+ # GLORYS's own 1/12° grid: no interpolation onto the model grid, no inpainting, GLORYS's own coastline and sea floor.
+ # This is the reference for the model's gateways.csv (glorys_gateways_run.jl point-samples GLORYS onto the model grid,
+ # which does not conserve transport at 1°; its numbers are not GLORYS's).
+@@ -280,7 +280,7 @@ arctic_wet = wet_floor.(arctic_static.data[arctic_keep, :])
+ 
+ wrap_i(I) = arctic_periodic ? mod1(I, NIa) : I
+ blocked = Set{Tuple{Symbol, Int, Int}}()
+-for (name, points, _) in vcat(gateway_lines, closure_lines)
++for (name, points, _) in vcat(filter(l -> l[1] in arctic_gateways, gateway_lines), closure_lines)
+     for (kind, I, J, _) in lonlat_faces(lonlat_corner_path(arctic_corners, points))
+         push!(blocked, (kind, wrap_i(I), J))
+     end
+@@ -345,6 +345,7 @@ end
+ println()
+ 
+ gateway_sum = Float64[]
++budget_lines = [g for (g, l) in enumerate(gateway_lines) if l[1] in arctic_gateways]   # the four, not the CAA channels
+ fury_hecla  = Float64[]
+ volume      = Float64[]
+ 
+@@ -368,7 +369,7 @@ for (n, date) in enumerate(run_dates)
+                      (:u_velocity, :v_velocity, :temperature, :salinity))
+         Qᶜ += native_transport(b.box, b.faces, b.Tʳᵉᶠ, fields...)[1] / 1e6
+     end
+-    push!(gateway_sum, sum(rows[1][3g - 1] for g in 1:length(boxes)))
++    push!(gateway_sum, sum(rows[1][3g - 1] for g in budget_lines))
+     push!(fury_hecla, Qᶜ)
+     push!(volume, arctic_volume(date))
+ 
+@@ -376,7 +377,7 @@ for (n, date) in enumerate(run_dates)
+     for g in 1:length(boxes)
+         @printf(" %+7.2f %+7.2f", rows[1][3g - 1], rows[2][3g - 1])
+     end
+-    @printf(" %+7.2f %+7.2f %+8.3f\n", gateway_sum[end], sum(rows[2][3g - 1] for g in 1:length(boxes)), Qᶜ)
++    @printf(" %+7.2f %+7.2f %+8.3f\n", gateway_sum[end], sum(rows[2][3g - 1] for g in budget_lines), Qᶜ)
+ end
+ println("\nvolume transport, Sv, positive into the Arctic; line = the gateway line, model = the model's staircase for it;")
+ println("F&H = Fury and Hecla Strait (positive into the Arctic)")
+diff --git a/nested/panarctic_nested.jl b/nested/panarctic_nested.jl
+index 79ab540..e923ff6 100644
+--- a/nested/panarctic_nested.jl
++++ b/nested/panarctic_nested.jl
+@@ -12,7 +12,7 @@
+ #   julia +1.13 --project=. panarctic_nested.jl [config file]   # default config.toml
+ #
+ # Hourly diagnostics go to the log and to <output_dir>/nested_monitor.csv; surface fields every 3 hours and η every
+-# hour to <output_dir>/nested_surface.jld2 and nested_free_surface.jld2.
++# hour to <output_dir>/nested_surface.jld2 and nested_free_surface.jld2; with sea ice, daily h and ℵ to nested_ice.jld2.
+ 
+ include("setup.jl")
+ include("jra55_read_fix.jl")   # JRA55 reads for runs that do not start on 1 January
+@@ -96,6 +96,12 @@ simulation.output_writers[:free_surface] = JLD2Writer(child, (; η = child.free_
+                                                       overwrite_files = true)
+ 
+ if coupled
++    # Daily sea-ice thickness and concentration (2-D), to see where thick ice builds up (e.g. in the Archipelago channels)
++    ice_fields = (; h = sea_ice.model.ice_thickness, ℵ = sea_ice.model.ice_concentration)
++    simulation.output_writers[:ice] = JLD2Writer(sea_ice.model, ice_fields; schedule = TimeInterval(24hours),
++                                                 filename = joinpath(output_dir, "nested_ice"),
++                                                 overwrite_files = true)
++
+     function ice_progress(sim)
+         h, ℵ = sea_ice.model.ice_thickness, sea_ice.model.ice_concentration
+         @info @sprintf("         ice: max h %.2f m, mean ℵ %.3f", maximum(h), sum(interior(ℵ)) / length(interior(ℵ)))
+diff --git a/nested/plot_gateways.jl b/nested/plot_gateways.jl
+index 43b251c..902f512 100644
+--- a/nested/plot_gateways.jl
++++ b/nested/plot_gateways.jl
+@@ -164,6 +164,24 @@ if !isnothing(tsubouchi)
+     end
+ end
+ 
++# Canadian Archipelago channels (if the run has them): 10-day means, model / GLORYS, and their sum against Davis
++caa = ("nares", "jones", "barrow")
++has(source, name) = !isnothing(source) && try source(name); true catch; false end
++if has(model, "nares_volume_Sv") || has(glorys, "nares_volume_Sv")
++    println("\nArchipelago channels, volume (Sv, positive into the Arctic), 10-day means, model / GLORYS:")
++    @printf("%-10s %15s %15s %15s %15s %15s\n", "days", caa..., "sum of three", "davis")
++    last_day = has(model, "nares_volume_Sv") ? maximum(days) + 1 : floor(Int, maximum(glorys("hour")) / 24) + 1
++    for a in 0:10:last_day - 1
++        b = min(a + 10, last_day)
++        M(g) = has(model, g * "_volume_Sv") ? (m = [a ≤ d < b for d in days]; any(m) ? mean(daily(model(g * "_volume_Sv"))[m]) : NaN) : NaN
++        G(g) = has(glorys, g * "_volume_Sv") ? (m = [a ≤ t / 24 < b for t in glorys("hour")]; any(m) ? mean(glorys(g * "_volume_Sv")[m]) : NaN) : NaN
++        cells = [@sprintf("%+6.2f/%+6.2f", M(g), G(g)) for g in caa]
++        push!(cells, @sprintf("%+6.2f/%+6.2f", sum(M, caa), sum(G, caa)))
++        push!(cells, @sprintf("%+6.2f/%+6.2f", M("davis"), G("davis")))
++        @printf("%-10s %15s %15s %15s %15s %15s\n", "$a–$b", cells...)
++    end
++end
++
+ file = joinpath(folder, "gateways.png")
+ save(file, fig)
+ @info "Wrote $file"
+diff --git a/nested/runs/tsubouchi-2005-15km-fullcell-caa-2mo.toml b/nested/runs/tsubouchi-2005-15km-fullcell-caa-2mo.toml
+new file mode 100644
+index 0000000..125e0c9
+--- /dev/null
++++ b/nested/runs/tsubouchi-2005-15km-fullcell-caa-2mo.toml
+@@ -0,0 +1,42 @@
++# Run settings: as tsubouchi-2005-15km-fullcell-2mo (September and October 2005, 15 km, whole cells, 20 levels), rerun
++# for the Davis/Fram partition: gateways.csv now has the Nares, Jones and Barrow sections, and nested_ice.jld2 holds
++# daily ice thickness and concentration. Afterwards run glorys_gateways_native.jl for the GLORYS reference on the new
++# lines (in a separate CPU session).
++#
++# Settings for nested/panarctic_nested.jl: the pan-Arctic ocean (and optionally sea ice and JRA55) nested in GLORYS
++# with NumericalEarth's nested_ocean_model.
++#
++# Run from the nested/ folder:  julia +1.13 --project=. panarctic_nested.jl [config file]
++
++architecture = "GPU"   # "GPU" or "CPU"
++
++[grid]
++spacing_km = 15          # 100 (≈1°) for quick tests; 15 for the production grid
++Nz         = 20
++depth      = 5000        # m
++bathymetry = "ETOPO"
++bottom     = "full"      # "partial" (default) or "full": whole cells, a test of the partial-cell bottom
++# "ETOPO" (NumericalEarth's default) or "GEBCO2026" (as panarctic.jl; regridding needs ~55 GB of memory, cached)
++
++[time]
++start_date = 2005-09-01  # the run starts at 00:00 on this date, from GLORYS
++days       = 61
++dt_minutes = 10          # 20 at 100 km; 10 at 15 km
++
++[boundaries]
++zero_net_inflow = false     # true: the Flather exterior transport has no net inflow through the Atlantic and Pacific edges together
++net_inflow_control = false  # true (needs zero_net_inflow): prototype of a volume control from outside the substeps (net_inflow_control.jl); superseded by net_inflow_Sv
++# net_inflow_Sv = 0.0       # pin the total barotropic inflow through both edges together (Sv, positive into the domain), as NEMO and ROMS do; Flather splits it between the edges
++follow_glorys_volume = true  # true: set that total inflow every step so that the domain-mean η follows GLORYS's (overrides net_inflow_Sv; glorys_volume_target.jl)
++volume_relaxation_days = 1    # with follow_glorys_volume: time over which the remaining drift from GLORYS's mean η is removed
++follow_glorys_tendency = false # with follow_glorys_volume: true also follows GLORYS's rate of change exactly
++net_inflow_depth_exponent = 0.5 # the pin shifts each edge column's transport ∝ H^0.5
++# edge_inflow_Sv = { atlantic = -0.8, pacific = 0.8 }   # pin the barotropic inflow through each edge (Sv, positive into the domain), as NEMO and ROMS do
++
++[coupling]
++coupled  = true         # true: add sea ice (nested in GLORYS) and the JRA55 atmosphere, radiation and rivers
++pressure = false         # with coupled = true: false sets the JRA55 sea-level pressure to 101325 Pa everywhere (GLORYS's η has no inverse barometer)
++
++[paths]
++data_dir   = ""          # where downloads are stored; "" = each dataset's default cache
++output_dir = "output-tsubouchi-2005-15km-fullcell-caa-2mo"
+-- 
+2.43.0
+
