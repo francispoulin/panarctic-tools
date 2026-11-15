@@ -19,3 +19,19 @@ T and S instead of 0. Part 2: two days of stepping, largest |u| every 6 h.
 Results so far (14 Nov): the lake at rest is exact at η = 0 for partial and whole cells, 20 and 50 levels; at
 η = −0.47 m both have a ~1.5–2 × 10⁻⁷ m/s² z-star datum error (u stays ~2–3 mm/s). Filling the immersed cells changes
 nothing. So the static pressure gradient is not the cause of the deep jets.
+
+4. `julia --project=<PanArcticShenanigans>/nested ridge_fixes.jl [profile.csv] [days] [Nz]` — the ridge test with
+   experimental fixes switched on and off in one session: partial cells (none, F1, F2, F1+F2) and whole cells (none,
+   F2), f = 0 and f(72°N). Adds the background potential energy (water re-sorted by buoyancy into the model's own
+   cells), so that ΔPE splits into mixing (ΔBPE) and conversion (ΔAPE = ΔPE − ΔBPE). Ends with a summary table.
+   CPU; "none" should repeat `flow_over_ridge.jl`.
+
+   The fixes are in `partial_cell_fixes.jl`, as method overrides loaded at run time (Oceananigans itself is not
+   changed; see the file's header):
+   - F1: in the z-star chain-rule term (∂x z)(∂z p′), take ∂z p′ with the full-cell face spacing, as p′ is
+     integrated, instead of the partial spacing (partial cells only).
+   - F2: immersed cells take the bottom wet cell's buoyancy in the p′ integration instead of T = S = 0 (both bottoms).
+   With F1 on the run prints how many times the override was called; 0 means it never took effect.
+
+Results (15 Nov, flow_over_ridge.jl): at 20 levels partial cells gain energy that whole cells don't (day 10, f = 0:
+ΔE/KE₀ +0.26 vs +0.12; f(72°N): +0.09 vs +0.015 from day 2 to 10); at 50 levels partial ≈ whole.
