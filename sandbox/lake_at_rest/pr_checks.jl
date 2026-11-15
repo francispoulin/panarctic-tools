@@ -18,8 +18,8 @@
 #                                  with resolution with the fix as without it.
 #   static [days]                  Static levels instead of z-star.
 #
-# Defaults: 10 days, no rotation (seamount: 72°N). Schemes: stock (WENOVectorInvariant), hybrid, ke, flux (reference)
-# and their "-wet" forms; see thin_cell_cases.jl and thickness_jump_fixes.jl. Not run in Julia before it was pushed:
+# Defaults: 10 days, no rotation (seamount: 72°N). Schemes: stock (WENOVectorInvariant), hybrid, hybrid-wet, flux
+# (reference); see thin_cell_cases.jl and thickness_jump_fixes.jl. Not run in Julia before it was pushed:
 # the first run of each check also tests the script.
 
 if "gpu" in ARGS
@@ -62,11 +62,10 @@ function check_untouched(args)
     @printf("%-38s  %-11s  %-12s  %s\n", "grid", "scheme", "max |diff|", "result")
     for (label, bottom_kind, bottom) in cases
         ref = final_state(c, bottom_kind, "stock", nsteps; bottom)
-        for name in ("hybrid", "hybrid-wet", "ke", "ke-wet")
+        for name in ("hybrid", "hybrid-wet")
             s = final_state(c, bottom_kind, name, nsteps; bottom)
             d = maximum(maximum(abs, s[f] .- ref[f]) for f in keys(ref))
-            expected = startswith(name, "ke") ? "(ke includes symdiv everywhere: change expected)" :
-                       name == "hybrid" && bottom_kind == :whole && label[1] == 'p' ? "(walls counted: change expected)" : ""
+            expected = name == "hybrid" && bottom_kind == :whole && label[1] == 'p' ? "(walls counted: change expected)" : ""
             @printf("%-38s  %-11s  %-12.3e  %s %s\n", label, name, d, d == 0 ? "identical" : "differs", expected)
         end
     end
@@ -83,7 +82,7 @@ end
 function check_mirror(args)
     days = argday(args, 1, 10.0)
     latitude = argday(args, 2, 0.0)
-    schemes = ["stock", "hybrid", "hybrid-wet", "ke"]
+    schemes = ["stock", "hybrid", "hybrid-wet"]
     cx = ThinCellCase(geometry = :x, latitude = latitude)
     cy = ThinCellCase(geometry = :y, latitude = latitude)
     println("Mirror test: the same channel along x and along y, $days days, ",
@@ -103,7 +102,7 @@ function check_mirror(args)
     println("""
 
 Pass: every row "same" (relative difference below 1e-3; round-off alone gives ~1e-12 or less). A difference only for
-hybrid/ke partial points at the v-face code of the fix (thickness_changes_y, flux_form_v∂yv, U_dot_∇v).""")
+hybrid partial points at the v-face code of the fix (thickness_changes_y, U_dot_∇v).""")
     @printf("Largest relative difference: %.1e\n", worst)
 end
 
@@ -112,13 +111,13 @@ end
 #####
 
 check_channel(args) = scheme_table(ThinCellCase(geometry = :x, latitude = argday(args, 2, 0.0)),
-                                   ["stock", "hybrid", "hybrid-wet", "ke", "ke-wet", "flux"]; days = argday(args, 1, 10.0))
+                                   ["stock", "hybrid", "hybrid-wet", "flux"]; days = argday(args, 1, 10.0))
 
 function check_seamount(args)
     arch = "gpu" in args ? GPU() : CPU()
     numbers = filter(a -> a != "gpu", args)
     c = ThinCellCase(geometry = :xy, latitude = argday(numbers, 2, 72.0), arch = arch)
-    scheme_table(c, ["stock", "hybrid", "hybrid-wet", "ke", "flux"]; days = argday(numbers, 1, 10.0))
+    scheme_table(c, ["stock", "hybrid", "hybrid-wet", "flux"]; days = argday(numbers, 1, 10.0))
     grid = thin_cell_grid(with(c; arch = CPU()), :partial)
     for walls in (true, false)
         set_jump_walls!(walls)
