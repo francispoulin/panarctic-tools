@@ -9,7 +9,9 @@
 # cells. In Oceananigans 0.117.2 it is larger, and the fastest flow sits in the partial bottom cell at the downstream
 # cliff.
 #
-#   julia --project=<PanArcticShenanigans>/nested mwe_partial_cells.jl [days] [Nz] [zstar|static] [n_bottom] [plateau depth]
+#   julia --project=<PanArcticShenanigans>/nested mwe_partial_cells.jl [days] [Nz] [zstar|static] [n_bottom] [plateau depth] [vector|flux]
+#
+# The last argument picks the momentum advection: WENOVectorInvariant() (default) or the flux form WENO(order = 5).
 #
 # max|u| is over the lowest n_bottom wet u-faces of every column (default 5), so near-bottom flow is compared, not the
 # surface. The plateau depth (default 1863 m) sets the wet fraction of the plateau's bottom cell.
@@ -23,6 +25,8 @@ Nz       = length(ARGS) ≥ 2 ? parse(Int, ARGS[2]) : 20
 vertical = length(ARGS) ≥ 3 ? ARGS[3] : "zstar"
 n_bottom = length(ARGS) ≥ 4 ? parse(Int, ARGS[4]) : 5      # speeds compared over the lowest n wet faces of each column
 plateau  = length(ARGS) ≥ 5 ? parse(Float64, ARGS[5]) : 1863.0
+momentum = length(ARGS) ≥ 6 ? ARGS[6] : "vector"
+momentum ∈ ("vector", "flux") || error("momentum advection must be vector or flux, got $momentum")
 
 Nx, Δx = 32, 15kilometers
 Lx     = Nx * Δx
@@ -42,7 +46,7 @@ function cliff_model(bottom_kind)
     Bottom = bottom_kind == :partial ? PartialCellBottom : GridFittedBottom
     grid = ImmersedBoundaryGrid(underlying, Bottom(bottom))
     model = HydrostaticFreeSurfaceModel(grid;
-                                        momentum_advection = WENOVectorInvariant(),
+                                        momentum_advection = momentum == "vector" ? WENOVectorInvariant() : WENO(order = 5),
                                         tracer_advection = WENO(order = 5),
                                         buoyancy = BuoyancyTracer(), tracers = :b,
                                         free_surface = SplitExplicitFreeSurface(grid; substeps = 30))
@@ -95,7 +99,7 @@ function diagnostics(model)
     return (; KE, PE, BPE, Eη, umax, loc)
 end
 
-println("Flow over a cliff, $(Nz) levels, $(vertical). Energies divided by the initial KE.")
+println("Flow over a cliff, $(Nz) levels, $(vertical), momentum advection: $(momentum == "vector" ? "WENOVectorInvariant()" : "WENO(order = 5), flux form"). Energies divided by the initial KE.")
 println("ΔBPE = numerical mixing. Cliffs at faces i = 13 and 21 (plateau cells 13–20), plateau at $(plateau) m.")
 println("Bottom max|u| = largest speed over the lowest $(n_bottom) wet u-faces of each column.\n")
 
