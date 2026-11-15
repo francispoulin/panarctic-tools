@@ -24,6 +24,7 @@ include(joinpath(@__DIR__, "thickness_jump_fixes.jl"))
 using Oceananigans.Units, Printf
 using Oceananigans.Operators: volume, Azᶜᶜᶜ, Δrᶜᶜᶜ
 using Oceananigans.Grids: peripheral_node, inactive_node, znode
+using Oceananigans.Architectures: convert_to_device
 
 days     = length(ARGS) ≥ 1 ? parse(Float64, ARGS[1]) : 10.0
 latitude = length(ARGS) ≥ 2 ? parse(Float64, ARGS[2]) : 0.0
@@ -99,6 +100,21 @@ function energies(model)
     return (; KE, PE, BPE, Eη, jet)
 end
 
+# Net push of the advection term alone on the domain's total x-momentum, Σ V (u·∇)u, as a percentage of Σ V |u| per
+# day. A scheme that conserves momentum gives ~0 (its fluxes telescope); pressure and bottom drag are not included,
+# so the real form drag of the cliffs does not enter.
+function momentum_drift(model)
+    grid, Uk = convert_to_device(CPU(), (model.grid, model.velocities))
+    net, total = 0.0, 0.0
+    for i in 1:Nx, k in 1:Nz
+        peripheral_node(i, 1, k, model.grid, Face(), Center(), Center()) && continue
+        V = volume(i, 1, k, model.grid, Face(), Center(), Center())
+        net   += V * Advection.U_dot_∇u(i, 1, k, grid, model.advection.momentum, Uk)
+        total += V * abs(Uk.u[i, 1, k])
+    end
+    return 100 * 86400 * net / total
+end
+
 # Run one case; the jet is the largest near-bottom speed, sampled once a day
 function run_case_daily(bottom_kind, name)
     model = cliff_model(bottom_kind, name)
@@ -112,8 +128,9 @@ function run_case_daily(bottom_kind, name)
         jet = max(jet, E.jet)
     end
     mixing = (E.BPE - E₀.BPE) / E₀.KE
+    drift = momentum_drift(model)
     energy = (E.KE + E.PE + E.Eη - E₀.KE - E₀.PE - E₀.Eη) / E₀.KE
-    return (; mixing, energy, jet)
+    return (; mixing, energy, jet, drift)
 end
 
 # Wet fraction of the plateau's bottom cell (partial cells)
@@ -136,30 +153,36 @@ end
 # Verdict: partial cells must mix no more than 1.2 × whole cells, the near-bottom jet with partial cells must be no
 # faster than 1.15 × the whole-cell jet, and (for a fix, not the flux reference) whole cells must stay within 15 %
 # of the stock scheme's whole-cell mixing (the fix should not change the model where nothing is wrong).
-stock_whole = haskey(results, ("stock", :whole)) ? results[("stock", :whole)].mixing : NaN
-println()
-println("scheme   mixing (whole → partial)   ratio   near-bottom jet (whole → partial)   energy, partial   verdict")
-println("-------  ------------------------  ------  ---------------------------------  ----------------  -------")
+stock_whole  = haskey(results, ("stock", :whole)) ? results[("stock", :whole)].mixing : NaN
+flux_partial = haskey(results, ("flux", :partial)) ? results[("flux", :partial)].jet : NaN
+println("scheme   mixing (whole → partial)   ratio   jet, partial   whole vs stock   energy, partial   momentum push   verdict")
+println("-------  ------------------------  ------  -------------  ---------------  ----------------  --------------  -------")
 for name in schemes
     w, p = results[(name, :whole)], results[(name, :partial)]
     ratio = p.mixing / w.mixing
-    whole_kept = name == "flux" || isnan(stock_whole) || abs(w.mixing / stock_whole - 1) ≤ 0.15
-    pass = ratio ≤ 1.2 && p.jet ≤ 1.15 * w.jet && whole_kept
+    change = isnan(stock_whole) ? NaN : 100 * (w.mixing / stock_whole - 1)
+    whole_kept = name == "flux" || isnan(change) || abs(change) ≤ 15
+    jet_ok = isnan(flux_partial) ? true : p.jet ≤ 1.1 * flux_partial
+    pass = ratio ≤ 1.2 && jet_ok && whole_kept && p.energy ≤ 0
     note = name == "flux" ? "reference" : pass ? "PASS" : "FAIL"
-    !whole_kept && (note *= " (changes whole cells)")
-    @printf("%-7s  %8.3f → %-8.3f         %5.2f   %6.2f → %-6.2f m/s                  %+7.3f %-8s  %s\n",
-            name, w.mixing, p.mixing, ratio, w.jet, p.jet, p.energy, p.energy > 0 ? "(rises)" : "(falls)", note)
+    @printf("%-7s  %8.3f → %-8.3f         %5.2f   %6.2f m/s     %+6.0f %%          %+7.3f %-8s  %+7.3f %%/day   %s\n",
+            name, w.mixing, p.mixing, ratio, p.jet, change, p.energy, p.energy > 0 ? "(rises)" : "(falls)",
+            p.drift, note)
 end
 println("""
 
 How to read it
-  mixing  rise of the background potential energy over the run, in units of the initial kinetic energy.
-          Nothing forces the flow, so this is numerical mixing. Lower is better.
-  ratio   partial-cell mixing ÷ whole-cell mixing. 1 means thin bottom cells add nothing; the stock scheme gives
-          about 2.4. Pass: 1.2 or less.
-  jet     fastest flow in the lowest 5 wet faces of any column (largest daily value). The thin cell at the
-          downstream cliff is where the jet forms. Pass: partial no more than 15 % above whole.
-  energy  change of total energy (kinetic + potential + free surface), partial cells. With no forcing it should
-          fall; a rise means the scheme is feeding the flow.
-  The fix must also leave whole cells within 15 % of the stock scheme's mixing. "flux" is the reference (MITgcm's
-  default form), not a candidate.""")
+  mixing          rise of the background potential energy over the run, in units of the initial kinetic energy.
+                  Nothing forces the flow, so this is numerical mixing. Lower is better.
+  ratio           partial-cell mixing ÷ whole-cell mixing. 1 = thin bottom cells add nothing; stock gives ~2.4.
+                  Pass: 1.2 or less.
+  jet, partial    fastest flow in the lowest 5 wet faces of any column, partial cells (largest daily value).
+                  Pass: within 10 % of the flux form's.
+  whole vs stock  change of the whole-cell mixing from the stock scheme. A fix should not change the model where
+                  nothing was wrong. Pass: within 15 %.
+  energy          change of total energy (kinetic + potential + free surface), partial cells. With no forcing it
+                  must fall; a rise means the scheme feeds the flow. Pass: falls.
+  momentum push   net push of the advection term alone on the channel's total momentum at the end of the run,
+                  % of the momentum per day, partial cells. ~0 = momentum conserved by advection (flux form).
+                  Shown, not part of the verdict: the vector-invariant form never conserves it exactly.
+  "flux" is the reference (MITgcm's default form), not a candidate.""")
