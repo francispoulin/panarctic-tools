@@ -33,6 +33,7 @@ Numbered in the order to apply, across repositories. Each was checked to apply w
 | 025 | PanArcticShenanigans | `fjp/nested` | 3cdb26e | Nares, Jones, Barrow sections in `gateways.jl` (GLORYS budget still the four); daily ice h, ℵ to `nested_ice.jld2`; CAA summary in `plot_gateways.jl`; `runs/tsubouchi-2005-15km-fullcell-caa-2mo.toml` |
 | 026 | PanArcticShenanigans | `fjp/nested` | after 025 | `runs/tsubouchi-2005-15km-partial-{hybrid,ke}-15d.toml`: partial cells, 15 days, with a momentum fix from `sandbox/lake_at_rest/thickness_jump_fixes.jl` loaded first (see the files' headers) |
 | 027 | PanArcticShenanigans | `fjp/nested` | after 026 | `heat_freshwater_tsubouchi.jl` (gateway heat and freshwater on Tsubouchi et al.'s references, model and GLORYS vs their Table 3); `references/tsubouchi2018_table3.csv` |
+| 028 | PanArcticShenanigans | `fjp/nested` | after 027 | `heat_freshwater_tsubouchi.jl` compares Tsubouchi et al.'s monthly blocks (same days) for volume, heat and freshwater; `references/tsubouchi2018_monthly_{heat,freshwater}.csv` (from Figs. 7a, 9a) |
 
 ## Applying 001–006
 
