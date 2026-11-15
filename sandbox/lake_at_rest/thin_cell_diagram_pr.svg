@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 470" font-family="Helvetica, Arial, sans-serif" font-size="13">
+  <rect width="780" height="470" fill="#ffffff"/>
+  <text x="390" y="22" text-anchor="middle" font-size="15" font-weight="bold">Downstream cliff of the plateau (plateau at 1863 m, 20 levels)</text>
+
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#c0392b"/>
+    </marker>
+    <pattern id="ground" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <rect width="8" height="8" fill="#d9d9d9"/>
+      <line x1="0" y1="0" x2="0" y2="8" stroke="#a6a6a6" stroke-width="2"/>
+    </pattern>
+  </defs>
+
+  <!-- y(z) = 50 + (-1441 - z) * 0.25 ; levels: -1441 -> 50, -1780 -> 134.75, -1863 -> 155.5, -2195 -> 238.5, -2702 -> 365.25 -->
+
+  <!-- ===== Whole cells ===== -->
+  <g transform="translate(70,0)">
+    <text x="150" y="44" text-anchor="middle" font-weight="bold">Whole cells</text>
+    <rect x="0" y="50" width="300" height="315" fill="#eaf3fb"/>
+    <!-- plateau ground fills level 5 and below -->
+    <rect x="0" y="134.75" width="150" height="230.5" fill="url(#ground)"/>
+    <!-- level lines -->
+    <g stroke="#7f7f7f" stroke-dasharray="3,3">
+      <line x1="0" y1="134.75" x2="300" y2="134.75"/>
+      <line x1="0" y1="238.5"  x2="300" y2="238.5"/>
+    </g>
+    <!-- true sea floor of the plateau -->
+    <line x1="0" y1="155.5" x2="150" y2="155.5" stroke="#1f77b4" stroke-width="2" stroke-dasharray="6,3"/>
+    <text x="4" y="171" font-size="11" fill="#1f77b4">true floor 1863 m</text>
+    <!-- cliff face -->
+    <line x1="150" y1="50" x2="150" y2="365" stroke="#333" stroke-width="1"/>
+    <text x="150" y="382" text-anchor="middle" font-size="11">face i = 21</text>
+    <!-- flow -->
+    <line x1="60" y1="95" x2="200" y2="95" stroke="#c0392b" stroke-width="3" marker-end="url(#arrow)"/>
+    <text x="40" y="86" font-size="12" fill="#c0392b">bottom flow ≈ 0.20 m/s (level 6)</text>
+    <text x="75" y="260" text-anchor="middle" font-size="12">plateau</text>
+    <text x="225" y="300" text-anchor="middle" font-size="12">basin</text>
+    <text x="150" y="405" text-anchor="middle" font-size="12">floor rounded up to 1780 m;  mixing ΔBPE = 0.14 KE₀</text>
+  </g>
+
+  <!-- ===== Partial cells ===== -->
+  <g transform="translate(430,0)">
+    <text x="150" y="44" text-anchor="middle" font-weight="bold">Partial cells</text>
+    <rect x="0" y="50" width="300" height="315" fill="#eaf3fb"/>
+    <!-- plateau ground below the true floor -->
+    <rect x="0" y="155.5" width="150" height="209.75" fill="url(#ground)"/>
+    <!-- the thin wet layer -->
+    <rect x="0" y="134.75" width="150" height="20.75" fill="#f6d5cf"/>
+    <g stroke="#7f7f7f" stroke-dasharray="3,3">
+      <line x1="0" y1="134.75" x2="300" y2="134.75"/>
+      <line x1="0" y1="238.5"  x2="300" y2="238.5"/>
+    </g>
+    <line x1="0" y1="155.5" x2="150" y2="155.5" stroke="#1f77b4" stroke-width="2" stroke-dasharray="6,3"/>
+    <line x1="150" y1="50" x2="150" y2="365" stroke="#333" stroke-width="1"/>
+    <text x="150" y="382" text-anchor="middle" font-size="11">face i = 21</text>
+    <!-- jet through the thin cell, spilling into the basin -->
+    <path d="M 20 145 L 150 145 Q 185 145 200 200" fill="none" stroke="#c0392b" stroke-width="3" marker-end="url(#arrow)"/>
+    <text x="160" y="128" font-size="12" fill="#c0392b">0.33–0.40 m/s (stock)</text>
+    <text x="4" y="182" font-size="11">level 5: 83 of 415 m wet (φ = 0.20)</text>
+    <line x1="60" y1="95" x2="200" y2="95" stroke="#c0392b" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <text x="75" y="260" text-anchor="middle" font-size="12">plateau</text>
+    <text x="225" y="300" text-anchor="middle" font-size="12">basin</text>
+    <text x="150" y="405" text-anchor="middle" font-size="12">floor at 1863 m;  stock: ΔBPE = 0.35 KE₀ (2.4×)</text>
+    <text x="150" y="425" text-anchor="middle" font-size="12" fill="#1a7f37" font-weight="bold">with the fix: ΔBPE = 0.17 KE₀ (1.15×), jet 0.25 m/s</text>
+  </g>
+
+  <!-- level labels -->
+  <g font-size="11" fill="#555">
+    <text x="62" y="92" text-anchor="end">level 6</text>
+    <text x="62" y="190" text-anchor="end">level 5</text>
+    <text x="62" y="305" text-anchor="end">level 4</text>
+    <text x="62" y="138" text-anchor="end">1780 m</text>
+    <text x="62" y="242" text-anchor="end">2195 m</text>
+  </g>
+  <text x="390" y="458" text-anchor="middle" font-size="11" fill="#555">2-D channel, no rotation, 10 days, WENOVectorInvariant; flux form (reference): ΔBPE 0.18 KE₀ (1.12×), jet 0.27 m/s</text>
+</svg>
