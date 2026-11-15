@@ -62,7 +62,7 @@ end
 
 function run_case(Bottom, momentum_advection; days = 10)
     z = ExponentialDiscretization(Nz, -5000, 0; scale = 1250, mutable = true)
-    underlying = RectilinearGrid(size = (Nx, Nz), x = (0, Nx * Δx), z, halo = (7, 7),
+    underlying = RectilinearGrid(CPU(); size = (Nx, Nz), x = (0, Nx * Δx), z, halo = (7, 7),
                                  topology = (Periodic, Flat, Bounded))
     grid = ImmersedBoundaryGrid(underlying, Bottom(bottom))
     model = HydrostaticFreeSurfaceModel(grid; momentum_advection, tracer_advection = WENO(order = 5),
