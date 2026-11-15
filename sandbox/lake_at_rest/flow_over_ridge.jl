@@ -113,13 +113,13 @@ for latitude in (nothing, 72), Nz in (20, 50), bottom_kind in (:partial, :whole)
     println(label)
     @printf("  %5s %9s %9s %9s %9s %9s %16s\n", "day", "ΔE", "ΔKE", "ΔKE_bot", "ΔPE", "ΔE_η", "max|u| (i, k)")
     Δt = 10minutes
-    for day in 1:ceil(Int, run_days)
-        for _ in 1:round(Int, 1day / Δt)
+    for n in 1:ceil(Int, run_days)
+        for _ in 1:round(Int, Oceananigans.Units.day / Δt)
             time_step!(model, Δt)
         end
         E = energies(model)
         u, i, k, at_bottom = E.fastest
-        @printf("  %5d %+9.2e %+9.2e %+9.2e %+9.2e %+9.2e %7.3f (%2d,%2d)%s\n", day,
+        @printf("  %5d %+9.2e %+9.2e %+9.2e %+9.2e %+9.2e %7.3f (%2d,%2d)%s\n", n,
                 (E.kinetic + E.potential + E.surface - total₀) / KE₀, (E.kinetic - KE₀) / KE₀,
                 (E.bottom_kinetic - E₀.bottom_kinetic) / KE₀, (E.potential - E₀.potential) / KE₀,
                 (E.surface - E₀.surface) / KE₀, abs(u), i, k, at_bottom ? "*" : "")
