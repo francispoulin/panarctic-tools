@@ -19,6 +19,9 @@
 using Oceananigans, Oceananigans.Units, Printf
 using Oceananigans.Operators: volume, Azᶜᶜᶜ
 using Oceananigans.Grids: peripheral_node, inactive_node, znode
+using Oceananigans.Architectures: convert_to_device
+using Oceananigans.Operators: Operators, V⁻¹ᶠᶜᶜ, δzᵃᵃᶜ, δxᶠᶜᶜ, Δx⁻¹ᶠᶜᶜ
+using Oceananigans.Advection: Advection
 
 days     = length(ARGS) ≥ 1 ? parse(Float64, ARGS[1]) : 10.0
 Nz       = length(ARGS) ≥ 2 ? parse(Int, ARGS[2]) : 20
@@ -118,6 +121,53 @@ let
     end
     println()
 end
+# Momentum budget at one u-face: each term's contribution to ∂u/∂t (m/s per day), as the model computes it, and the
+# change of u over the next step. Vector-invariant form only (2-D, no rotation, so the vorticity term is ~0):
+#   KE grad  = −∂x(u²/2)                       (bernoulli_head_U)
+#   div      = −u ∇·U / V, upwinded            (upwinded_divergence_flux_U, part of vertical_advection_U)
+#   ∂z(wu)   = −δz(W u) / V                    (vector_invariant_flux_Wu, the other part of vertical_advection_U)
+#   p′ grad  = −∂x p′ (baroclinic, with the z-star chain rule)
+#   g ∂x η   = −g δx η / Δx (barotropic; applied in the substeps, so not in "sum" but in "actual")
+function momentum_budget(model, i, k)
+    scheme = model.advection.momentum
+    grid, U, p = convert_to_device(CPU(), (model.grid, model.velocities, model.pressure.pHY′))
+    η = model.free_surface.displacement
+    g = Oceananigans.defaults.gravitational_acceleration
+    KE  = - Advection.bernoulli_head_U(i, 1, k, grid, scheme, U.u, U.v)
+    hor = - Advection.horizontal_advection_U(i, 1, k, grid, scheme, U.u, U.v)
+    div = - V⁻¹ᶠᶜᶜ(i, 1, k, grid) * Advection.upwinded_divergence_flux_Uᶠᶜᶜ(i, 1, k, grid, scheme, U.u, U.v)
+    wu  = - V⁻¹ᶠᶜᶜ(i, 1, k, grid) * δzᵃᵃᶜ(i, 1, k, grid, Advection.vector_invariant_flux_Wu, scheme, U.w, U.u)
+    pb  = - Operators.∂xᶠᶜᶜ(i, 1, k, grid, p)
+    ps  = - g * (η[i, 1, Nz+1] - η[i-1, 1, Nz+1]) * Δx⁻¹ᶠᶜᶜ(i, 1, Nz+1, model.grid)
+    return (; KE, hor, div, wu, pb, ps)
+end
+
+if momentum == "vector"
+    hours = (0, 1, 2, 3, 6, 12, 24)
+    for bottom_kind in (:whole, :partial)
+        model = cliff_model(bottom_kind)
+        i = 21                                    # downstream cliff
+        k = findfirst(k -> !peripheral_node(i, 1, k, model.grid, Face(), Center(), Center()), 1:Nz)
+        println("Momentum budget, $bottom_kind cells, face (i, k) = ($i, $k) (lowest wet face at the downstream cliff), m/s per day:")
+        @printf("  %5s %8s %10s %10s %10s %10s %10s %10s %10s %10s\n", "hour", "u",
+                "KE grad", "div", "∂z(wu)", "vorticity", "p′ grad", "sum", "actual", "g∂xη")
+        nstep = 0
+        for h in hours
+            while nstep < 6h
+                time_step!(model, 10minutes); nstep += 1
+            end
+            T = momentum_budget(model, i, k)
+            u₀ = model.velocities.u[i, 1, k]
+            time_step!(model, 10minutes); nstep += 1
+            actual = (model.velocities.u[i, 1, k] - u₀) / 10minutes
+            total = T.KE + T.div + T.wu + T.hor + T.pb
+            @printf("  %5d %8.3f %+10.4f %+10.4f %+10.4f %+10.4f %+10.4f %+10.4f %+10.4f %+10.4f\n", h, u₀,
+                    86400 .* (T.KE, T.div, T.wu, T.hor, T.pb, total, actual, T.ps)...)
+        end
+        println()
+    end
+end
+
 results = Dict{Symbol, Any}()
 for bottom_kind in (:whole, :partial)
     model = cliff_model(bottom_kind)
