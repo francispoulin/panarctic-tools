@@ -50,14 +50,14 @@ U, Δb, d = 0.1, 0.01, 1000
 bᵢ(x, z) = Δb * exp(z / d)
 uᵢ(x, z) = U * basin / (on_plateau(x) ? plateau : basin)
 
-function cliff_model(bottom_kind)
+function cliff_model(bottom_kind; scheme = momentum_scheme)
     z = ExponentialDiscretization(Nz, -depth, 0; scale = depth / 4, mutable = vertical == "zstar")
     underlying = RectilinearGrid(CPU(); size = (Nx, Nz), x = (0, Lx), z, halo = (7, 7),
                                  topology = (Periodic, Flat, Bounded))
     Bottom = bottom_kind == :partial ? PartialCellBottom : GridFittedBottom
     grid = ImmersedBoundaryGrid(underlying, Bottom(bottom))
     model = HydrostaticFreeSurfaceModel(grid;
-                                        momentum_advection = momentum_scheme,
+                                        momentum_advection = scheme,
                                         tracer_advection = WENO(order = 5),
                                         buoyancy = BuoyancyTracer(), tracers = :b,
                                         free_surface = SplitExplicitFreeSurface(grid; substeps = 30))
@@ -199,8 +199,11 @@ end
 # transports and volumes as the water, so it is the reference; a vector-invariant piece that differs from it at the
 # thin face is the inconsistency.
 #   KE: −∂x(u²/2)    vert: the vertical term (w ∂z u)    flux x / flux z: −V⁻¹ δx(Uu), −V⁻¹ δz(Wu)
-let schemes = (; weno = WENOVectorInvariant(), centred = VectorInvariant(), flux = WENO(order = 5))
+let
     for bottom_kind in (:whole, :partial)
+        # Schemes as a model builds them for this grid (a bare WENOVectorInvariant() lacks the grid's settings)
+        schemes = map(s -> cliff_model(bottom_kind; scheme = s).advection.momentum,
+                      (; weno = WENOVectorInvariant(), centred = VectorInvariant(), flux = WENO(order = 5)))
         model = cliff_model(bottom_kind)
         for _ in 1:144
             time_step!(model, 10minutes)
