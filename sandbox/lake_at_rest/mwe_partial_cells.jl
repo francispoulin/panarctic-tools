@@ -9,10 +9,11 @@
 # cells. In Oceananigans 0.117.2 it is larger, and the fastest flow sits in the partial bottom cell at the downstream
 # cliff.
 #
-#   julia --project=<PanArcticShenanigans>/nested mwe_partial_cells.jl [days] [Nz] [zstar|static] [n_bottom] [plateau depth] [vector|centred|flux]
+#   julia --project=<PanArcticShenanigans>/nested mwe_partial_cells.jl [days] [Nz] [zstar|static] [n_bottom] [plateau depth] [vector|symdiv|centred|flux]
 #
-# The last argument picks the momentum advection: WENOVectorInvariant() ("vector", default), VectorInvariant()
-# ("centred") or the flux form WENO(order = 5) ("flux").
+# The last argument picks the momentum advection: WENOVectorInvariant() ("vector", default), the same with the
+# candidate fix of symmetric_divergence_fix.jl ("symdiv"), VectorInvariant() ("centred") or the flux form
+# WENO(order = 5) ("flux").
 #
 # Consistency check at t = 0 (vector-invariant schemes): u starts uniform in depth in every column, so the vertical
 # advection w ∂z u is exactly zero; the script prints the largest discrete value over all wet u-faces. This is the
@@ -34,8 +35,11 @@ vertical = length(ARGS) ≥ 3 ? ARGS[3] : "zstar"
 n_bottom = length(ARGS) ≥ 4 ? parse(Int, ARGS[4]) : 5      # speeds compared over the lowest n wet faces of each column
 plateau  = length(ARGS) ≥ 5 ? parse(Float64, ARGS[5]) : 1863.0
 momentum = length(ARGS) ≥ 6 ? ARGS[6] : "vector"
-momentum ∈ ("vector", "centred", "flux") || error("momentum advection must be vector, centred or flux, got $momentum")
+momentum ∈ ("vector", "symdiv", "centred", "flux") || error("momentum advection must be vector, symdiv, centred or flux, got $momentum")
+include(joinpath(@__DIR__, "symmetric_divergence_fix.jl"))   # candidate fix, active only for "symdiv"
+SYMMETRIC_DIVERGENCE[] = momentum == "symdiv"
 momentum_scheme = Dict("vector"  => WENOVectorInvariant(),   # WENO, upwinded divergence + flux-form vertical term
+                       "symdiv"  => WENOVectorInvariant(),   # same, with the divergence interpolated symmetrically
                        "centred" => VectorInvariant(),       # centred, energy-conserving w ∂z u (MITgcm's form)
                        "flux"    => WENO(order = 5))[momentum]
 
@@ -110,7 +114,7 @@ function diagnostics(model)
     return (; KE, PE, BPE, Eη, umax, loc)
 end
 
-println("Flow over a cliff, $(Nz) levels, $(vertical), momentum advection: $(summary(momentum_scheme)). Energies divided by the initial KE.")
+println("Flow over a cliff, $(Nz) levels, $(vertical), momentum advection: $(summary(momentum_scheme))$(momentum == "symdiv" ? " with the symmetric-divergence fix" : ""). Energies divided by the initial KE.")
 println("ΔBPE = numerical mixing. Cliffs at faces i = 13 and 21 (plateau cells 13–20), plateau at $(plateau) m.")
 println("Bottom max|u| = largest speed over the lowest $(n_bottom) wet u-faces of each column.\n")
 
