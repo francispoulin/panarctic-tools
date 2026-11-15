@@ -29,6 +29,7 @@ Numbered in the order to apply, across repositories. Each was checked to apply w
 | 021 | PanArcticShenanigans | `fjp/nested` | a049a53 | `jra55_read_fix.jl`: JRA55 reads for runs not starting on 1 January (fixes `-(::Nothing, ::Int64)` in `build_flux_routing`); NumericalEarth bug, to report upstream |
 | 022 | PanArcticShenanigans | `fjp/nested` | after 021 | `[grid] bottom = "full"` (GridFittedBottom); run files `tsubouchi-2005-15km-fullcell-10d`, `tsubouchi-2005-15km-nz50-10d` |
 | 023 | PanArcticShenanigans | `fjp/nested` | 7063a25 | `runs/tsubouchi-2005-15km-fullcell-2mo.toml` (Sep–Oct 2005, 15 km, whole cells) |
+| 024 | PanArcticShenanigans | `fjp/nested` | after 023 | `runs/tsubouchi-2005-15km-fullcell-nz50-2mo.toml` (Sep–Oct 2005, 15 km, whole cells, 50 levels) |
 
 ## Applying 001–006
 
