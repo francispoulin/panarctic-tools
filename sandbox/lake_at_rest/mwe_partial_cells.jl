@@ -193,12 +193,19 @@ if momentum == "vector"
     end
 end
 
-# Same state, three discretisations of the advection term (u·∇)u. After one day of the chosen scheme (the jet is
+# Same state, several discretisations of the advection term (u·∇)u. After one day of the chosen scheme (the jet is
 # there), evaluate each form's contribution to ∂u/∂t (m/s per day) on that one state, at the faces around the
-# downstream cliff, in the lowest two wet levels there. The flux form δx(Uu) + δz(Wu) moves momentum with the same
-# transports and volumes as the water, so it is the reference; a vector-invariant piece that differs from it at the
-# thin face is the inconsistency.
-#   KE: −∂x(u²/2)    vert: the vertical term (w ∂z u)    flux x / flux z: −V⁻¹ δx(Uu), −V⁻¹ δz(Wu)
+# downstream cliff, in the lowest two wet levels there. The flux form −V⁻¹[δx(Uu) + δz(Wu)] moves momentum with the
+# same transports and volumes as the water, so it is the reference.
+#
+#   WENO-VI, centred : Oceananigans' WENOVectorInvariant() and VectorInvariant()
+#   flux             : WENO(order = 5), flux form (what the flux-form model uses)
+#   VI+uDiv          : WENO kinetic-energy gradient + WENO vertical term with the u-cell's own divergence
+#   MITgcm vertical term (mom_vi_u_vertshear.F, centred): w averaged to the u-point, times the velocity difference
+#   across each interface, divided by the u-cell's own (partial) thickness Δzᶠᶜᶜ:
+#       −(1 / Δzᶠᶜᶜ) · ½ [ w̄(k+1) (u(k+1) − u(k)) + w̄(k) (u(k) − u(k−1)) ]     (an interface next to land is dropped)
+#   MIT+cKE          : that, plus the centred kinetic-energy gradient (plain average of u², VectorInvariant())
+#   MIT+hKE          : that, plus a thickness-weighted kinetic energy, K = ¼ Σ Δzᶠᶜᶜ u² / Δzᶜᶜᶜ (MITgcm's hFac weighting)
 let
     for bottom_kind in (:whole, :partial)
         # Schemes as a model builds them for this grid (a bare WENOVectorInvariant() lacks the grid's settings)
@@ -209,34 +216,37 @@ let
             time_step!(model, 10minutes)
         end
         grid, Uk = convert_to_device(CPU(), (model.grid, model.velocities))
-        kb = findfirst(k -> !peripheral_node(21, 1, k, model.grid, Face(), Center(), Center()), 1:Nz)
+        g = model.grid
+        wetu(i, k) = 1 ≤ k ≤ Nz && !peripheral_node(i, 1, k, g, Face(), Center(), Center())
+        u(i, k) = Uk.u[i, 1, k]
+        w̄(i, k) = (Uk.w[i - 1, 1, k] + Uk.w[i, 1, k]) / 2                      # at the interface below level k
+        Δzu(i, k) = Operators.Δzᶠᶜᶜ(i, 1, k, grid)
+        A(i, k) = Operators.Axᶠᶜᶜ(i, 1, k, grid)
+        Ū(c, k) = (A(c, k) * u(c, k) + A(c + 1, k) * u(c + 1, k)) / 2
+        Kh(c, k) = (Δzu(c, k) * u(c, k)^2 + Δzu(c + 1, k) * u(c + 1, k)^2) / (4 * Operators.Δzᶜᶜᶜ(c, 1, k, grid))
+        kb = findfirst(k -> wetu(21, k), 1:Nz)
         println("Advection term on the same state (after 1 day of $(momentum)), $bottom_kind cells, m/s per day:")
-        @printf("  %8s %7s | %9s %9s %9s | %9s %9s %9s | %9s %9s %9s | %9s %9s\n", "(i, k)", "u",
-                "WENO-VI", "KE", "vert", "centred", "KE", "vert", "flux", "flux x", "flux z", "VI+uDiv", "vert")
-        # Candidate: the WENOVectorInvariant vertical term with the u-cell's own horizontal divergence δx Ū
-        # (Ū = transport at the centres either side of the u-face, ℑx(Ax u)) in place of the upwinded divergence of
-        # one neighbouring T-cell, so that w ∂z u = V⁻¹ [δz(W u) + u δx Ū] uses the continuity of the u-cell itself.
-        # (An area-weighted kinetic energy, tried before, accelerated the jet: +0.08 m/s per day at (21, 5).)
-        A(i, k) = Oceananigans.Operators.Axᶠᶜᶜ(i, 1, k, grid)
-        Ū(c, k) = (A(c, k) * Uk.u[c, 1, k] + A(c + 1, k) * Uk.u[c + 1, 1, k]) / 2
+        @printf("  %8s %7s | %9s %9s | %9s | %9s | %9s %9s %9s\n", "(i, k)", "u",
+                "WENO-VI", "centred", "flux", "VI+uDiv", "MIT vert", "MIT+cKE", "MIT+hKE")
         for k in (kb, kb + 1), i in 19:23
-            peripheral_node(i, 1, k, model.grid, Face(), Center(), Center()) && continue
+            wetu(i, k) || continue
             V⁻¹ = V⁻¹ᶠᶜᶜ(i, 1, k, grid)
-            row = Float64[]
-            for s in (schemes.weno, schemes.centred)
-                KE   = - Advection.bernoulli_head_U(i, 1, k, grid, s, Uk.u, Uk.v)
-                vert = - Advection.vertical_advection_U(i, 1, k, grid, s, Uk)
-                hor  = - Advection.horizontal_advection_U(i, 1, k, grid, s, Uk.u, Uk.v)
-                append!(row, (KE + vert + hor, KE, vert))
-            end
-            ftot = - Advection.div_𝐯u(i, 1, k, grid, schemes.flux, Uk, Uk.u)    # exactly what the flux-form model uses
-            fz   = - V⁻¹ * δzᵃᵃᶜ(i, 1, k, grid, Advection._advective_momentum_flux_Wu, schemes.flux, Uk.w, Uk.u)
-            append!(row, (ftot, ftot - fz, fz))
+            total(s) = - Advection.bernoulli_head_U(i, 1, k, grid, s, Uk.u, Uk.v) -
+                         Advection.vertical_advection_U(i, 1, k, grid, s, Uk) -
+                         Advection.horizontal_advection_U(i, 1, k, grid, s, Uk.u, Uk.v)
+            weno, centred = total(schemes.weno), total(schemes.centred)
+            flux = - Advection.div_𝐯u(i, 1, k, grid, schemes.flux, Uk, Uk.u)
             Wu   = δzᵃᵃᶜ(i, 1, k, grid, Advection.vector_invariant_flux_Wu, schemes.weno, Uk.w, Uk.u)
-            vert = - V⁻¹ * (Wu + Uk.u[i, 1, k] * (Ū(i, k) - Ū(i - 1, k)))
-            append!(row, (row[2] + vert, vert))                    # WENO kinetic-energy gradient + consistent vertical term
-            @printf("  %8s %7.3f | %+9.4f %+9.4f %+9.4f | %+9.4f %+9.4f %+9.4f | %+9.4f %+9.4f %+9.4f | %+9.4f %+9.4f\n",
-                    "($i, $k)", model.velocities.u[i, 1, k], (86400 .* row)...)
+            uDiv = - Advection.bernoulli_head_U(i, 1, k, grid, schemes.weno, Uk.u, Uk.v) -
+                     V⁻¹ * (Wu + u(i, k) * (Ū(i, k) - Ū(i - 1, k)))
+            above = wetu(i, k + 1) ? w̄(i, k + 1) * (u(i, k + 1) - u(i, k)) : 0.0
+            below = wetu(i, k - 1) ? w̄(i, k) * (u(i, k) - u(i, k - 1)) : 0.0
+            mit  = - (above + below) / (2 * Δzu(i, k))
+            cKE  = - Advection.bernoulli_head_U(i, 1, k, grid, schemes.centred, Uk.u, Uk.v)
+            hKE  = - (Kh(i, k) - Kh(i - 1, k)) * Δx⁻¹ᶠᶜᶜ(i, 1, k, grid)
+            row  = (weno, centred, flux, uDiv, mit, mit + cKE, mit + hKE)
+            @printf("  %8s %7.3f | %+9.4f %+9.4f | %+9.4f | %+9.4f | %+9.4f %+9.4f %+9.4f\n",
+                    "($i, $k)", u(i, k), (86400 .* row)...)
         end
         println()
     end
