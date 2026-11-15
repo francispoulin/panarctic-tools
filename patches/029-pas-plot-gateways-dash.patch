@@ -1,0 +1,33 @@
+From 4cc705ca4eb34c4ba54e645ce31a7c8c18b9bc25 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 15 Nov 2026 15:15:00 -0500
+Subject: [PATCH] =?UTF-8?q?plot=5Fgateways.jl:=20fix=20the=20CAA=20table's?=
+ =?UTF-8?q?=20day=20label=20("$(a)=E2=80=93$(b)")?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+"$a–$b" does not parse: Julia reads the en dash as part of the variable
+name. Patch 025's CAA block is reached only for runs with Nares, Jones and
+Barrow sections.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AbhhvkZczyeYtTrrNtPzaw
+---
+ nested/plot_gateways.jl | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/nested/plot_gateways.jl b/nested/plot_gateways.jl
+index c3c2141..1817332 100644
+--- a/nested/plot_gateways.jl
++++ b/nested/plot_gateways.jl
+@@ -1,5 +1,5 @@
+         push!(cells, @sprintf("%+6.2f/%+6.2f", sum(M, caa), sum(G, caa)))
+         push!(cells, @sprintf("%+6.2f/%+6.2f", M("davis"), G("davis")))
+-        @printf("%-10s %15s %15s %15s %15s %15s\n", "$a–$b", cells...)
++        @printf("%-10s %15s %15s %15s %15s %15s\n", "$(a)–$(b)", cells...)
+     end
+ end
+-- 
+2.43.0
+
