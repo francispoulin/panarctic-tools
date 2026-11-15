@@ -44,3 +44,23 @@ why partial cells do worse. The difference is all in the background potential en
 5. `julia --project=<PanArcticShenanigans>/nested mwe_partial_cells.jl [days] [Nz] [zstar|static]` — the minimal
    example for that: 2-D, f = 0, buoyancy tracer with b = Δb exp(z/d), whole vs partial cells, ΔBPE and a PASS/FAIL
    line (partial must not mix more than whole). This is the candidate test case for a PR.
+
+## Current test (15 Nov, afternoon): `compare_schemes.jl`
+
+One command, one table. Start here; the scripts above are the detailed diagnostics behind it.
+
+    julia --project=<PanArcticShenanigans>/nested compare_schemes.jl            # 10 days, no rotation, all schemes
+    julia --project=<PanArcticShenanigans>/nested compare_schemes.jl 10 72      # same with f at 72°N
+
+Schemes compared, whole vs partial cells, plateau bottom cell 20 % wet:
+
+| name | what it is | file |
+|---|---|---|
+| stock | `WENOVectorInvariant()`, as the pan-Arctic model uses now | — |
+| symdiv | stock + the u-cell's own divergence in the vertical term | `symmetric_divergence_fix.jl` |
+| ke | symdiv + the flux form's u∂xu where the cell thickness changes | `thickness_jump_fixes.jl` |
+| hybrid | stock, but the flux form where the cell thickness changes | `thickness_jump_fixes.jl` |
+| flux | `WENO(order = 5)` flux form everywhere (reference; MITgcm's default form) | — |
+
+PASS = partial cells mix at most 1.2 × whole cells, the near-bottom jet with partial cells is at most 1.15 × the
+whole-cell one, and whole cells stay within 15 % of the stock scheme. The table ends with a short guide to the columns.
