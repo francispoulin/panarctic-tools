@@ -1,0 +1,123 @@
+From fe92fe81391d01bc065010e27ab882b2d46daeca Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 15 Nov 2026 13:29:27 -0500
+Subject: [PATCH] runs: 15-day partial-cell runs with the hybrid and ke
+ momentum fixes
+
+Sep 2005, 15 km, 20 levels, partial bottom cells (the case with the deep
+bottom-cell jets). The fix is loaded in the REPL first from
+panarctic-tools/sandbox/lake_at_rest/thickness_jump_fixes.jl; the file
+headers give the three lines.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AbhhvkZczyeYtTrrNtPzaw
+---
+ ...subouchi-2005-15km-partial-hybrid-15d.toml | 44 +++++++++++++++++++
+ .../tsubouchi-2005-15km-partial-ke-15d.toml   | 44 +++++++++++++++++++
+ 2 files changed, 88 insertions(+)
+ create mode 100644 nested/runs/tsubouchi-2005-15km-partial-hybrid-15d.toml
+ create mode 100644 nested/runs/tsubouchi-2005-15km-partial-ke-15d.toml
+
+diff --git a/nested/runs/tsubouchi-2005-15km-partial-hybrid-15d.toml b/nested/runs/tsubouchi-2005-15km-partial-hybrid-15d.toml
+new file mode 100644
+index 0000000..074e5ed
+--- /dev/null
++++ b/nested/runs/tsubouchi-2005-15km-partial-hybrid-15d.toml
+@@ -0,0 +1,44 @@
++# Run settings: as tsubouchi-2005-15km-2mo (September 2005, 15 km, 20 levels, PARTIAL bottom cells), 15 days, with a
++# candidate fix for the deep bottom-cell jets loaded first:
++#   hybrid: the flux form for momentum advection only at faces where the bottom-cell thickness changes; stock WENOVectorInvariant elsewhere
++# The fix lives in panarctic-tools/sandbox/lake_at_rest/thickness_jump_fixes.jl and is loaded in the REPL before this
++# file is run (it is not part of the model scripts):
++#
++#   include("../../panarctic-tools/sandbox/lake_at_rest/thickness_jump_fixes.jl")   # path from nested/
++#   set_momentum_fix!("hybrid")
++#   empty!(ARGS); push!(ARGS, "runs/tsubouchi-2005-15km-partial-hybrid-15d.toml"); include("panarctic_nested.jl")
++#
++# Compare with output-tsubouchi-2005-15km-2mo (stock scheme, partial cells: 3–5.6 m/s jets in bottom cells from day ~5)
++# and output-tsubouchi-2005-15km-fullcell-2mo (whole cells, no jets).
++#
++# Run from the nested/ folder:  julia +1.13 --project=. panarctic_nested.jl [config file]
++
++architecture = "GPU"   # "GPU" or "CPU"
++
++[grid]
++spacing_km = 15
++Nz         = 20
++depth      = 5000        # m
++bathymetry = "ETOPO"
++bottom     = "partial"   # partial cells: the case with the jets
++
++[time]
++start_date = 2005-09-01
++days       = 15          # the jets appeared from day ~5
++dt_minutes = 10
++
++[boundaries]
++zero_net_inflow = false
++net_inflow_control = false
++follow_glorys_volume = true
++volume_relaxation_days = 1
++follow_glorys_tendency = false
++net_inflow_depth_exponent = 0.5
++
++[coupling]
++coupled  = true
++pressure = false
++
++[paths]
++data_dir   = ""
++output_dir = "output-tsubouchi-2005-15km-partial-hybrid-15d"
+diff --git a/nested/runs/tsubouchi-2005-15km-partial-ke-15d.toml b/nested/runs/tsubouchi-2005-15km-partial-ke-15d.toml
+new file mode 100644
+index 0000000..249c6c0
+--- /dev/null
++++ b/nested/runs/tsubouchi-2005-15km-partial-ke-15d.toml
+@@ -0,0 +1,44 @@
++# Run settings: as tsubouchi-2005-15km-2mo (September 2005, 15 km, 20 levels, PARTIAL bottom cells), 15 days, with a
++# candidate fix for the deep bottom-cell jets loaded first:
++#   ke: WENOVectorInvariant with the u-cell's own divergence in the vertical term, and the flux form's u∂xu where the bottom-cell thickness changes
++# The fix lives in panarctic-tools/sandbox/lake_at_rest/thickness_jump_fixes.jl and is loaded in the REPL before this
++# file is run (it is not part of the model scripts):
++#
++#   include("../../panarctic-tools/sandbox/lake_at_rest/thickness_jump_fixes.jl")   # path from nested/
++#   set_momentum_fix!("ke")
++#   empty!(ARGS); push!(ARGS, "runs/tsubouchi-2005-15km-partial-ke-15d.toml"); include("panarctic_nested.jl")
++#
++# Compare with output-tsubouchi-2005-15km-2mo (stock scheme, partial cells: 3–5.6 m/s jets in bottom cells from day ~5)
++# and output-tsubouchi-2005-15km-fullcell-2mo (whole cells, no jets).
++#
++# Run from the nested/ folder:  julia +1.13 --project=. panarctic_nested.jl [config file]
++
++architecture = "GPU"   # "GPU" or "CPU"
++
++[grid]
++spacing_km = 15
++Nz         = 20
++depth      = 5000        # m
++bathymetry = "ETOPO"
++bottom     = "partial"   # partial cells: the case with the jets
++
++[time]
++start_date = 2005-09-01
++days       = 15          # the jets appeared from day ~5
++dt_minutes = 10
++
++[boundaries]
++zero_net_inflow = false
++net_inflow_control = false
++follow_glorys_volume = true
++volume_relaxation_days = 1
++follow_glorys_tendency = false
++net_inflow_depth_exponent = 0.5
++
++[coupling]
++coupled  = true
++pressure = false
++
++[paths]
++data_dir   = ""
++output_dir = "output-tsubouchi-2005-15km-partial-ke-15d"
+-- 
+2.43.0
+

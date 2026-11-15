@@ -26,6 +26,8 @@
 # Switches are functions, not Refs, so the same file works in GPU kernels. Use set_momentum_fix!(name) and run the
 # model through Base.invokelatest (the switch redefines a method).
 
+include(joinpath(@__DIR__, "symmetric_divergence_fix.jl"))   # symdiv, used by "ke"
+
 using Oceananigans
 using Oceananigans.ImmersedBoundaries: ImmersedBoundaryGrid
 using Oceananigans.Grids: inactive_node, topology, Flat, Center, Face
@@ -151,8 +153,33 @@ built with the flux form). Call before building the model, and run it through `B
 """
 function set_momentum_fix!(name)
     name ∈ ("stock", "symdiv", "ke", "hybrid", "flux") || error("unknown fix $name")
-    isdefined(Main, :SYMMETRIC_DIVERGENCE) && (Main.SYMMETRIC_DIVERGENCE[] = name ∈ ("symdiv", "ke"))
+    set_symmetric_divergence!(name ∈ ("symdiv", "ke"))
     @eval ke_fix_on() = $(name == "ke")
     @eval hybrid_on() = $(name == "hybrid")
+    return nothing
+end
+
+"""
+    report_fix_faces(grid)
+
+Count the wet u- and v-faces where "ke" and "hybrid" act (the cell thickness changes nearby), level by level summed.
+A quick check, on the CPU, that the fixes reach the grid at all and touch only a small part of it.
+"""
+function report_fix_faces(grid)
+    grid isa ImmersedBoundaryGrid || (println("not an immersed-boundary grid: the fixes do nothing here"); return nothing)
+    cpu = Oceananigans.Architectures.on_architecture(Oceananigans.Architectures.CPU(), grid)
+    Nx, Ny, Nz = size(cpu)
+    C = Center(); F = Face()
+    nu = au = nv = av = 0
+    for k in 1:Nz, j in 1:Ny, i in 1:Nx
+        if !Oceananigans.Grids.peripheral_node(i, j, k, cpu, F, C, C)
+            nu += 1; au += thickness_changes_x(i, j, k, cpu)
+        end
+        if acts_in_y(cpu) && !Oceananigans.Grids.peripheral_node(i, j, k, cpu, C, F, C)
+            nv += 1; av += thickness_changes_y(i, j, k, cpu)
+        end
+    end
+    println("fix acts at ", au, " of ", nu, " wet u-faces (", round(100au / max(nu, 1), digits = 1), " %)",
+            acts_in_y(cpu) ? string(" and ", av, " of ", nv, " wet v-faces (", round(100av / max(nv, 1), digits = 1), " %)") : "")
     return nothing
 end

@@ -31,6 +31,7 @@ Numbered in the order to apply, across repositories. Each was checked to apply w
 | 023 | PanArcticShenanigans | `fjp/nested` | 7063a25 | `runs/tsubouchi-2005-15km-fullcell-2mo.toml` (Sep–Oct 2005, 15 km, whole cells) |
 | 024 | PanArcticShenanigans | `fjp/nested` | after 023 | `runs/tsubouchi-2005-15km-fullcell-nz50-2mo.toml` (Sep–Oct 2005, 15 km, whole cells, 50 levels) |
 | 025 | PanArcticShenanigans | `fjp/nested` | 3cdb26e | Nares, Jones, Barrow sections in `gateways.jl` (GLORYS budget still the four); daily ice h, ℵ to `nested_ice.jld2`; CAA summary in `plot_gateways.jl`; `runs/tsubouchi-2005-15km-fullcell-caa-2mo.toml` |
+| 026 | PanArcticShenanigans | `fjp/nested` | after 025 | `runs/tsubouchi-2005-15km-partial-{hybrid,ke}-15d.toml`: partial cells, 15 days, with a momentum fix from `sandbox/lake_at_rest/thickness_jump_fixes.jl` loaded first (see the files' headers) |
 
 ## Applying 001–006
 

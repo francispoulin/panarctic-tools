@@ -37,7 +37,7 @@ plateau  = length(ARGS) ≥ 5 ? parse(Float64, ARGS[5]) : 1863.0
 momentum = length(ARGS) ≥ 6 ? ARGS[6] : "vector"
 momentum ∈ ("vector", "symdiv", "centred", "flux") || error("momentum advection must be vector, symdiv, centred or flux, got $momentum")
 include(joinpath(@__DIR__, "symmetric_divergence_fix.jl"))   # candidate fix, active only for "symdiv"
-SYMMETRIC_DIVERGENCE[] = momentum == "symdiv"
+set_symmetric_divergence!(momentum == "symdiv")
 momentum_scheme = Dict("vector"  => WENOVectorInvariant(),   # WENO, upwinded divergence + flux-form vertical term
                        "symdiv"  => WENOVectorInvariant(),   # same, with the divergence interpolated symmetrically
                        "centred" => VectorInvariant(),       # centred, energy-conserving w ∂z u (MITgcm's form)

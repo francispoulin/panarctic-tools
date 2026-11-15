@@ -8,7 +8,8 @@
 # u-cell's mass budget, so the two parts no longer cancel and a bottom jet forms (mwe_partial_cells.jl).
 #
 # The fix: interpolate the divergence symmetrically (the mean of the two neighbouring T-cells, which is the u-cell's
-# own horizontal divergence δx ℑx(Ax u)). Gated by SYMMETRIC_DIVERGENCE[] so that one session can run both.
+# own horizontal divergence δx ℑx(Ax u)). Gated by symmetric_divergence_on(), a function (not a Ref) so that it also
+# works in GPU kernels; switch with set_symmetric_divergence!(true/false) before building a model.
 # Applied to every immersed grid (whole and partial cells) so the comparison stays fair.
 
 using Oceananigans
@@ -18,7 +19,8 @@ using Oceananigans.Advection: Advection, VectorInvariantSelfVerticalUpwinding, u
                               δx_U_plus_∂t_σ, δy_V
 using Oceananigans.Operators: V⁻¹ᶠᶜᶜ, V⁻¹ᶜᶠᶜ, δzᵃᵃᶜ, ℑxᶠᵃᵃ, ℑyᵃᶠᵃ
 
-const SYMMETRIC_DIVERGENCE = Ref(false)
+symmetric_divergence_on() = false
+set_symmetric_divergence!(on::Bool) = (@eval symmetric_divergence_on() = $on; nothing)
 
 # Horizontal divergence of a T-cell (plus the z-star grid-motion term, as in the stock self-upwinding)
 @inline cell_divergence(i, j, k, grid, u, v) = δx_U_plus_∂t_σ(i, j, k, grid, u, v) + δy_V(i, j, k, grid, u, v)
@@ -26,7 +28,7 @@ const SYMMETRIC_DIVERGENCE = Ref(false)
 @inline function Advection.vertical_advection_U(i, j, k, grid::ImmersedBoundaryGrid,
                                                 scheme::VectorInvariantSelfVerticalUpwinding, U)
     𝒜ᶻ = δzᵃᵃᶜ(i, j, k, grid, vector_invariant_flux_Wu, scheme, U.w, U.u)
-    Φᵟ = SYMMETRIC_DIVERGENCE[] ?
+    Φᵟ = symmetric_divergence_on() ?
          (@inbounds U.u[i, j, k]) * ℑxᶠᵃᵃ(i, j, k, grid, cell_divergence, U.u, U.v) :
          upwinded_divergence_flux_Uᶠᶜᶜ(i, j, k, grid, scheme, U.u, U.v)
     return V⁻¹ᶠᶜᶜ(i, j, k, grid) * (Φᵟ + 𝒜ᶻ)
@@ -35,7 +37,7 @@ end
 @inline function Advection.vertical_advection_V(i, j, k, grid::ImmersedBoundaryGrid,
                                                 scheme::VectorInvariantSelfVerticalUpwinding, U)
     𝒜ᶻ = δzᵃᵃᶜ(i, j, k, grid, vector_invariant_flux_Wv, scheme, U.w, U.v)
-    Φᵟ = SYMMETRIC_DIVERGENCE[] ?
+    Φᵟ = symmetric_divergence_on() ?
          (@inbounds U.v[i, j, k]) * ℑyᵃᶠᵃ(i, j, k, grid, cell_divergence, U.u, U.v) :
          upwinded_divergence_flux_Vᶜᶠᶜ(i, j, k, grid, scheme, U.u, U.v)
     return V⁻¹ᶜᶠᶜ(i, j, k, grid) * (Φᵟ + 𝒜ᶻ)

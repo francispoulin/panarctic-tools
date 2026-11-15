@@ -18,7 +18,6 @@
 #   hybrid  stock, but the flux form where the cell thickness changes         (thickness_jump_fixes.jl)
 #   flux    WENO(order = 5) flux form everywhere: the reference, as in MITgcm's default
 
-include(joinpath(@__DIR__, "symmetric_divergence_fix.jl"))
 include(joinpath(@__DIR__, "thickness_jump_fixes.jl"))
 
 using Oceananigans.Units, Printf
