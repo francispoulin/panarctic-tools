@@ -94,7 +94,7 @@ function force_report(model, label)
     end
     a, i, k = largest.total
     @printf("%-38s total %9.2e m/s² at (i, k) = (%2d, %2d), z = %7.1f m%s → %6.3f m/s after a day\n", label, a, i, k,
-            znode(i, 1, k, grid, Face(), Center(), Center()), bottom_cell(i, 1, k, grid) ? " (bottom cell)" : "", abs(a) * day)
+            znode(i, 1, k, grid, Face(), Center(), Center()), bottom_cell(i, 1, k, grid) ? " (bottom cell)" : "", abs(a) * Oceananigans.Units.day)
     @printf("%-38s along the levels %9.2e (k = %2d), chain rule %9.2e (k = %2d), largest away from the bottom %9.2e\n", "",
             largest.along[1], largest.along[3], largest.chain[1], largest.chain[3], largest_interior)
 end
