@@ -1,7 +1,7 @@
 # Why do the fixes not take effect? Builds the f(72°N) partial-cell ridge model once and checks, without time
 # stepping, whether each override is reached and what it changes.
 #
-#   julia --project=<PanArcticShenanigans>/nested probe_fixes.jl [profile.csv]
+#   julia --project=<PanArcticShenanigans>/nested probe_fixes.jl [profile.csv] [partial|whole]
 
 using Oceananigans, Printf
 using Oceananigans.Architectures: CPU, convert_to_device   # the conversion launch! applies to kernel arguments
@@ -11,15 +11,18 @@ using Oceananigans.Grids: inactive_node, Center
 RIDGE_NO_RUN = true
 include(joinpath(@__DIR__, "ridge_fixes.jl"))   # definitions only: ridge_model, the fixes
 
-model = ridge_model(:partial, 20, 72)
+bottom_kind = length(ARGS) ≥ 2 ? Symbol(ARGS[2]) : :partial
+model = ridge_model(bottom_kind, 20, 72)
+time_step!(model, 10minutes)   # so that the grid stretching σ (and ∂x z) reflects η; at t = 0 it may still be 1
 grid  = model.grid
 pHY′  = model.pressure.pHY′
 
 kgrid, kp = convert_to_device(CPU(), (grid, pHY′))
+println("bottom: ", bottom_kind)
 
 println("\n--- types ---")
-println("model.grid isa PCBMutableGrid:            ", grid  isa PCBMutableGrid)
-println("adapted grid isa PCBMutableGrid:          ", kgrid isa PCBMutableGrid)
+println("model.grid isa BottomMutableGrid:         ", grid  isa BottomMutableGrid)
+println("adapted grid isa BottomMutableGrid:       ", kgrid isa BottomMutableGrid)
 println("adapted pHY′ isa OffsetArray3:            ", kp    isa OffsetArray3)
 println("typeof(adapted pHY′):                     ", typeof(kp))
 println("z topology:                               ", Oceananigans.Grids.topology(grid, 3))
@@ -45,6 +48,9 @@ function pressure_with(; F1 = false, F2 = false)
     Oceananigans.BoundaryConditions.fill_halo_regions!(pHY′)
     return copy(interior(pHY′)), vcat(cliff_force(13), cliff_force(21))
 end
+
+ζ = [Operators.∂x_zᶠᶜᶜ(i, j, k, kgrid) for i in (13, 21), j in 1:size(grid, 2), k in 1:size(grid, 3)]
+@printf("\nmax |∂x z| at the cliff faces:              %.3e\n", maximum(abs, ζ))
 
 p0, f0 = pressure_with()
 p2, f2 = pressure_with(F2 = true)

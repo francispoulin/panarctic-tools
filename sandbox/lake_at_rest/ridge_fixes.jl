@@ -6,7 +6,8 @@
 # Same set-up as flow_over_ridge.jl (periodic channel, two 1000 m cliffs, z-star, GLORYS profile, linear equation of
 # state, barotropic 0.1 m/s current, f = 0 and f(72°N)), run for these cases:
 #
-#   partial cells: none, F1, F2, F1+F2          whole cells: none, F2
+#   partial cells: none, F1, F2, F1+F2          whole cells: none, F1, F1+F2
+#   (F2 alone changes nothing: see partial_cell_fixes.jl)
 #
 # "none" is the stock model and should repeat flow_over_ridge.jl (day 10, Nz = 20: ΔE/KE₀ ≈ +0.26 partial vs +0.12
 # whole at f = 0; at f(72°N) partial gains about +0.09 from day 2 to 10, whole +0.015).
@@ -149,7 +150,8 @@ cases = [(:partial, (F1 = false, F2 = false)),
          (:partial, (F1 = false, F2 = true)),
          (:partial, (F1 = true,  F2 = true)),
          (:whole,   (F1 = false, F2 = false)),
-         (:whole,   (F1 = false, F2 = true))]
+         (:whole,   (F1 = true,  F2 = false)),
+         (:whole,   (F1 = true,  F2 = true))]
 
 results = []
 

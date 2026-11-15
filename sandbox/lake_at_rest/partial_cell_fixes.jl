@@ -7,21 +7,23 @@
 #   src/ImmersedBoundaries/mutable_immersed_grid.jl             z-star chain rule  ∂xᶠᶜᶜ, ∂yᶜᶠᶜ (grid::AMG, ϕ)
 #   src/Models/NonhydrostaticModels/update_hydrostatic_pressure.jl   pHY′ integration
 #
-# F1 — chain-rule ∂z p′ with the full-cell face spacing.
-#   The force is −∂x p′|_z = −δx p′/Δx + (∂x z)(∂z p′), with ∂z p′ = ℑxz(∂zᶜᶜᶠ p′). On a partial-cell grid ∂zᶜᶜᶠ divides
-#   by the partial face spacing (wet midpoint, up to ×1.7 at face kᵇ+1), while p′ was integrated with the full
-#   spacing. F1 divides by the full spacing (the underlying grid's), so that ∂z p′ = ℑz b at every wet face, as the
-#   integration says. Partial-cell grids only (on whole-cell grids the two spacings are the same).
+# What the stock chain-rule term sees in a bottom cell k = kᵇ (∂z p′ averaged over faces kᵇ and kᵇ+1 of both columns):
+#   face kᵇ+1: δz p′ / (partial spacing) = ℑz b × (full / partial spacing), up to ×1.7 for φ = 0.2;
+#   face kᵇ:   0. On the immersed grid δz is masked at faces next to an immersed cell (conditional_differences.jl),
+#              so the bottom face contributes nothing instead of b. (Found 15 Nov with probe_fixes.jl: F2 alone
+#              changes p′ in immersed cells by up to 624 m²/s² but the force not at all.)
 #
-# F2 — immersed cells take the bottom wet cell's buoyancy in the p′ integration.
-#   Immersed cells hold T = S = 0, and the integration runs through them, so p′ in the first immersed cell (used by
-#   ∂z p′ at face kᵇ in the chain rule) is built from fresh 0 °C water. F2 extrapolates the last wet cell's buoyancy
-#   downward instead. Wet cells are unchanged. Both partial- and whole-cell grids (the integral passes through
-#   immersed cells in both).
+# F1 — chain-rule ∂z p′ taken on the underlying grid: full spacing and no masking. Face kᵇ+1 then gives ℑz b exactly.
+#   Face kᵇ gives δz p′ between the bottom cell and the immersed cell below it, i.e. ½(b_kᵇ + b_immersed): fresh
+#   0 °C water unless F2 is also on. So F1 alone replaces 0 by ½(b + b₀) at the bottom face.
+#   Partial- and whole-cell grids (whole cells have the bottom-face masking too).
 #
-# Inside a kernel every Field arrives as its OffsetArray (`adapt`, also on the CPU), so F1 is defined for 3-D
-# OffsetArrays. In the hydrostatic model the only ∂xᶠᶜᶜ/∂yᶜᶠᶜ of an array is the pressure gradient (the other callers
-# are closures and the implicit free surface, not used in the ridge test), so F1 touches nothing else there.
+# F2 — immersed cells take the bottom wet cell's buoyancy in the p′ integration. Wet cells' p′ is unchanged; only p′
+#   in immersed cells changes, which matters only through F1's unmasked bottom face. F1+F2: ∂z p′ = b at both faces.
+#
+# Inside a kernel every Field arrives as an offset array (`adapt`, also on the CPU; on 0.117 a
+# StaticStridesOffsetArray), so F1 is defined for those. In the hydrostatic model the only ∂xᶠᶜᶜ/∂yᶜᶠᶜ of an array is
+# the pressure gradient (other callers are closures and the implicit free surface, not used in the ridge test).
 # `F1_CALLS[]` counts the overridden calls: it must be > 0 after a step with F1 on.
 
 using Oceananigans
@@ -37,7 +39,9 @@ using Oceananigans.Models.NonhydrostaticModels: @kernel, @index   # KernelAbstra
 
 import Oceananigans.Models.NonhydrostaticModels: update_hydrostatic_pressure!
 
-const OffsetArray3 = Oceananigans.Grids.OffsetArrays.OffsetArray{<:Any, 3}
+# Kernel arguments: on 0.117 a Field arrives in a kernel as a StaticStridesOffsetArray (plain OffsetArray on others).
+const OffsetArray3 = Union{Oceananigans.Grids.OffsetArrays.OffsetArray{<:Any, 3},
+                           Oceananigans.Utils.StaticStridesOffsetArray{<:Any, 3}}
 
 const FIX_F1 = Ref(false)
 const FIX_F2 = Ref(false)
@@ -61,7 +65,9 @@ const GFBMutableGrid = ImmersedBoundaryGrid{<:Any, <:Any, <:Any, <:Bounded, <:Un
 ##### F1
 #####
 
-@inline function Operators.∂xᶠᶜᶜ(i, j, k, grid::PCBMutableGrid, ϕ::OffsetArray3)
+const BottomMutableGrid = Union{PCBMutableGrid, GFBMutableGrid}
+
+@inline function Operators.∂xᶠᶜᶜ(i, j, k, grid::BottomMutableGrid, ϕ::OffsetArray3)
     ∂x_at_r = δxᶠᶜᶜ(i, j, k, grid, ϕ) * Δx⁻¹ᶠᶜᶜ(i, j, k, grid)
     if FIX_F1[]
         Threads.atomic_add!(F1_CALLS, 1)
@@ -72,7 +78,7 @@ const GFBMutableGrid = ImmersedBoundaryGrid{<:Any, <:Any, <:Any, <:Bounded, <:Un
     return ∂x_at_r - ∂x_zᶠᶜᶜ(i, j, k, grid) * ∂z_ϕ
 end
 
-@inline function Operators.∂yᶜᶠᶜ(i, j, k, grid::PCBMutableGrid, ϕ::OffsetArray3)
+@inline function Operators.∂yᶜᶠᶜ(i, j, k, grid::BottomMutableGrid, ϕ::OffsetArray3)
     ∂y_at_r = δyᶜᶠᶜ(i, j, k, grid, ϕ) * Δy⁻¹ᶜᶠᶜ(i, j, k, grid)
     if FIX_F1[]
         Threads.atomic_add!(F1_CALLS, 1)
