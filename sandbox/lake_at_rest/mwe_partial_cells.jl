@@ -211,8 +211,12 @@ let
         grid, Uk = convert_to_device(CPU(), (model.grid, model.velocities))
         kb = findfirst(k -> !peripheral_node(21, 1, k, model.grid, Face(), Center(), Center()), 1:Nz)
         println("Advection term on the same state (after 1 day of $(momentum)), $bottom_kind cells, m/s per day:")
-        @printf("  %8s %7s | %9s %9s %9s | %9s %9s %9s | %9s %9s %9s\n", "(i, k)", "u",
-                "WENO-VI", "KE", "vert", "centred", "KE", "vert", "flux", "flux x", "flux z")
+        @printf("  %8s %7s | %9s %9s %9s | %9s %9s %9s | %9s %9s %9s | %9s %9s\n", "(i, k)", "u",
+                "WENO-VI", "KE", "vert", "centred", "KE", "vert", "flux", "flux x", "flux z", "cent+wKE", "wKE")
+        # Candidate: kinetic energy at a centre weighted by the areas of its two u-faces (Hollingsworth-type),
+        # K = (A₋ u₋² + A₊ u₊²) / (2 (A₋ + A₊)), instead of the plain average of u²
+        A(i, k) = Oceananigans.Operators.Axᶠᶜᶜ(i, 1, k, grid)
+        Kw(i, k) = (A(i, k) * Uk.u[i, 1, k]^2 + A(i + 1, k) * Uk.u[i + 1, 1, k]^2) / (2 * max(A(i, k) + A(i + 1, k), eps()))
         for k in (kb, kb + 1), i in 19:23
             peripheral_node(i, 1, k, model.grid, Face(), Center(), Center()) && continue
             V⁻¹ = V⁻¹ᶠᶜᶜ(i, 1, k, grid)
@@ -226,7 +230,9 @@ let
             ftot = - Advection.div_𝐯u(i, 1, k, grid, schemes.flux, Uk, Uk.u)    # exactly what the flux-form model uses
             fz   = - V⁻¹ * δzᵃᵃᶜ(i, 1, k, grid, Advection._advective_momentum_flux_Wu, schemes.flux, Uk.w, Uk.u)
             append!(row, (ftot, ftot - fz, fz))
-            @printf("  %8s %7.3f | %+9.4f %+9.4f %+9.4f | %+9.4f %+9.4f %+9.4f | %+9.4f %+9.4f %+9.4f\n",
+            wKE = - (Kw(i, k) - Kw(i - 1, k)) * Δx⁻¹ᶠᶜᶜ(i, 1, k, grid)
+            append!(row, (wKE + row[6], wKE))                      # centred vertical term + weighted KE gradient
+            @printf("  %8s %7.3f | %+9.4f %+9.4f %+9.4f | %+9.4f %+9.4f %+9.4f | %+9.4f %+9.4f %+9.4f | %+9.4f %+9.4f\n",
                     "($i, $k)", model.velocities.u[i, 1, k], (86400 .* row)...)
         end
         println()
