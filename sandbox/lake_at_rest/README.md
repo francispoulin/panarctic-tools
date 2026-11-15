@@ -35,3 +35,12 @@ nothing. So the static pressure gradient is not the cause of the deep jets.
 
 Results (15 Nov, flow_over_ridge.jl): at 20 levels partial cells gain energy that whole cells don't (day 10, f = 0:
 ΔE/KE₀ +0.26 vs +0.12; f(72°N): +0.09 vs +0.015 from day 2 to 10); at 50 levels partial ≈ whole.
+
+**15 Nov, after `ridge_fixes.jl` and `probe_fixes.jl`:** the z-star chain-rule fixes F1/F2 work (F1 is called, it
+changes the cliff force by 9e-8 m/s²) but change the 10-day energies by ≤ 0.001 KE₀. The pressure gradient is not
+why partial cells do worse. The difference is all in the background potential energy: partial cells **mix** more
+(f = 0: ΔBPE +0.41 vs +0.30 KE₀; f(72°N): +0.71 vs +0.48), with the fastest flow in the downstream bottom cell.
+
+5. `julia --project=<PanArcticShenanigans>/nested mwe_partial_cells.jl [days] [Nz] [zstar|static]` — the minimal
+   example for that: 2-D, f = 0, buoyancy tracer with b = Δb exp(z/d), whole vs partial cells, ΔBPE and a PASS/FAIL
+   line (partial must not mix more than whole). This is the candidate test case for a PR.
