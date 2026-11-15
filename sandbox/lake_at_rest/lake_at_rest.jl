@@ -46,7 +46,7 @@ Sᵢ(x, y, z) = interpolate_profile(profile_S, z)
 
 # ## Grid and model
 
-Nx, Ny  = 16, 3
+Nx, Ny  = 16, 8   # Ny ≥ the halo (7)
 spacing = 15kilometers
 depth   = 5000
 deep_floor, shallow_floor = -2837, -1863
