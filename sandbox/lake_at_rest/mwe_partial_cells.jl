@@ -9,9 +9,14 @@
 # cells. In Oceananigans 0.117.2 it is larger, and the fastest flow sits in the partial bottom cell at the downstream
 # cliff.
 #
-#   julia --project=<PanArcticShenanigans>/nested mwe_partial_cells.jl [days] [Nz] [zstar|static] [n_bottom] [plateau depth] [vector|flux]
+#   julia --project=<PanArcticShenanigans>/nested mwe_partial_cells.jl [days] [Nz] [zstar|static] [n_bottom] [plateau depth] [vector|centred|flux]
 #
-# The last argument picks the momentum advection: WENOVectorInvariant() (default) or the flux form WENO(order = 5).
+# The last argument picks the momentum advection: WENOVectorInvariant() ("vector", default), VectorInvariant()
+# ("centred") or the flux form WENO(order = 5) ("flux").
+#
+# Consistency check at t = 0 (vector-invariant schemes): u starts uniform in depth in every column, so the vertical
+# advection w ∂z u is exactly zero; the script prints the largest discrete value over all wet u-faces. This is the
+# instant test for a fix.
 #
 # max|u| is over the lowest n_bottom wet u-faces of every column (default 5), so near-bottom flow is compared, not the
 # surface. The plateau depth (default 1863 m) sets the wet fraction of the plateau's bottom cell.
@@ -29,7 +34,10 @@ vertical = length(ARGS) ≥ 3 ? ARGS[3] : "zstar"
 n_bottom = length(ARGS) ≥ 4 ? parse(Int, ARGS[4]) : 5      # speeds compared over the lowest n wet faces of each column
 plateau  = length(ARGS) ≥ 5 ? parse(Float64, ARGS[5]) : 1863.0
 momentum = length(ARGS) ≥ 6 ? ARGS[6] : "vector"
-momentum ∈ ("vector", "flux") || error("momentum advection must be vector or flux, got $momentum")
+momentum ∈ ("vector", "centred", "flux") || error("momentum advection must be vector, centred or flux, got $momentum")
+momentum_scheme = Dict("vector"  => WENOVectorInvariant(),   # WENO, upwinded divergence + flux-form vertical term
+                       "centred" => VectorInvariant(),       # centred, energy-conserving w ∂z u (MITgcm's form)
+                       "flux"    => WENO(order = 5))[momentum]
 
 Nx, Δx = 32, 15kilometers
 Lx     = Nx * Δx
@@ -49,7 +57,7 @@ function cliff_model(bottom_kind)
     Bottom = bottom_kind == :partial ? PartialCellBottom : GridFittedBottom
     grid = ImmersedBoundaryGrid(underlying, Bottom(bottom))
     model = HydrostaticFreeSurfaceModel(grid;
-                                        momentum_advection = momentum == "vector" ? WENOVectorInvariant() : WENO(order = 5),
+                                        momentum_advection = momentum_scheme,
                                         tracer_advection = WENO(order = 5),
                                         buoyancy = BuoyancyTracer(), tracers = :b,
                                         free_surface = SplitExplicitFreeSurface(grid; substeps = 30))
@@ -102,7 +110,7 @@ function diagnostics(model)
     return (; KE, PE, BPE, Eη, umax, loc)
 end
 
-println("Flow over a cliff, $(Nz) levels, $(vertical), momentum advection: $(momentum == "vector" ? "WENOVectorInvariant()" : "WENO(order = 5), flux form"). Energies divided by the initial KE.")
+println("Flow over a cliff, $(Nz) levels, $(vertical), momentum advection: $(summary(momentum_scheme)). Energies divided by the initial KE.")
 println("ΔBPE = numerical mixing. Cliffs at faces i = 13 and 21 (plateau cells 13–20), plateau at $(plateau) m.")
 println("Bottom max|u| = largest speed over the lowest $(n_bottom) wet u-faces of each column.\n")
 
@@ -121,6 +129,23 @@ let
     end
     println()
 end
+# t = 0: largest |vertical advection| over the wet u-faces; zero for a consistent scheme (u is uniform in depth)
+if momentum != "flux"
+    println("t = 0 check: u is uniform in depth, so the vertical advection w ∂z u must vanish. Largest |value| (m/s per day):")
+    for bottom_kind in (:whole, :partial)
+        model = cliff_model(bottom_kind)
+        grid, Uk = convert_to_device(CPU(), (model.grid, model.velocities))
+        worst, at = 0.0, (0, 0)
+        for i in 1:Nx, k in 1:Nz
+            peripheral_node(i, 1, k, model.grid, Face(), Center(), Center()) && continue
+            a = abs(Advection.vertical_advection_U(i, 1, k, grid, model.advection.momentum, Uk))
+            a > worst && ((worst, at) = (a, (i, k)))
+        end
+        @printf("  %-7s %10.4f at (i, k) = (%2d, %2d)\n", bottom_kind, 86400 * worst, at...)
+    end
+    println()
+end
+
 # Momentum budget at one u-face: each term's contribution to ∂u/∂t (m/s per day), as the model computes it, and the
 # change of u over the next step. Vector-invariant form only (2-D, no rotation, so the vorticity term is ~0):
 #   KE grad  = −∂x(u²/2)                       (bernoulli_head_U)
