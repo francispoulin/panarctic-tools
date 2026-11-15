@@ -64,3 +64,27 @@ Schemes compared, whole vs partial cells, plateau bottom cell 20 % wet:
 
 PASS = partial cells mix at most 1.2 × whole cells, the near-bottom jet with partial cells is at most 1.15 × the
 whole-cell one, and whole cells stay within 15 % of the stock scheme. The table ends with a short guide to the columns.
+
+## Checks before the Oceananigans PR (15 Nov, evening)
+
+`pr_checks.jl` (shared cases in `thin_cell_cases.jl`) and `curvature_check.jl`. Not yet run: the first run of each
+check also tests the script.
+
+    julia --project=<PanArcticShenanigans>/nested pr_checks.jl untouched        # bit-for-bit, < 1 min: run first
+    julia --project=<PanArcticShenanigans>/nested pr_checks.jl mirror           # x vs y (v-face code)
+    julia --project=<PanArcticShenanigans>/nested pr_checks.jl channel 10 72    # with the "-wet" variants, rotation
+    julia --project=<PanArcticShenanigans>/nested pr_checks.jl seamount 10 72   # 3-D, edges at all angles ("gpu" optional)
+    julia --project=<PanArcticShenanigans>/nested pr_checks.jl seam             # φ 0.2 → 1.0 across the 1 % switch
+    julia --project=<PanArcticShenanigans>/nested pr_checks.jl nz               # 10, 20, 40 levels
+    julia --project=<PanArcticShenanigans>/nested pr_checks.jl static           # static levels
+
+- **Walls.** `thickness_jump_fixes.jl` counts an immersed cell as thickness 0, so the fixes also act at every cliff
+  edge and coast, in whole-cell grids too (stock 0.144 vs hybrid 0.145 whole-cell mixing). `set_jump_walls!(false)`
+  (scheme names ending in `-wet`) compares wet cells only: a thin partial cell next to a thick one still triggers it,
+  whole-cell grids are untouched. `untouched` checks that bit for bit; `channel`, `seamount` and `seam` show whether
+  the fix still works that way.
+- **Curvature.** At the patch faces the hybrid uses the flux form, which has no curvature terms on curvilinear grids.
+  `curvature_check(ocean.model)`, in the REPL of a finished pan-Arctic hybrid run, sizes the missing terms against
+  Coriolis and against the change the fix makes.
+- Not repeated: the lake at rest (with u = 0 advection is zero whatever the scheme, so it cannot test an advection
+  fix); GPU compilation (the 15-day pan-Arctic runs already ran the fixes on an A100).

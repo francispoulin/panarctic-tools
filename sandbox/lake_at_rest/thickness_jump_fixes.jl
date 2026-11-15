@@ -50,9 +50,16 @@ hybrid_on() = false
 @inline wet_thickness(i, j, k, grid) =
     ifelse(inactive_node(i, j, k, grid, Center(), Center(), Center()), zero(grid), Δrᶜᶜᶜ(i, j, k, grid))
 
+# With walls counted (default, as tested so far) an immersed cell counts as thickness 0, so the fix also acts next to
+# every wall: cliff edges and coastlines, in whole-cell grids too. With walls not counted only wet cells are compared
+# (a thin partial cell next to a thick one), and a whole-cell grid is left exactly as the stock scheme has it.
+jump_counts_walls() = true
+
 @inline function thickness_changes(a, b, c, d)
     hi = max(a, b, c, d)
-    lo = min(a, b, c, d)
+    lo_all = min(a, b, c, d)
+    lo_wet = min(ifelse(a == 0, hi, a), ifelse(b == 0, hi, b), ifelse(c == 0, hi, c), ifelse(d == 0, hi, d))
+    lo = ifelse(jump_counts_walls(), lo_all, lo_wet)
     return hi - lo > hi / 100
 end
 
@@ -146,6 +153,14 @@ end
 #####
 
 """
+    set_jump_walls!(on::Bool)
+
+`true` (default): an immersed cell counts as a thickness change, so the fix also acts next to walls (cliff edges,
+coasts). `false`: only wet cells are compared, so whole-cell grids are untouched. Call before building the model.
+"""
+set_jump_walls!(on::Bool) = (@eval jump_counts_walls() = $on; nothing)
+
+"""
     set_momentum_fix!(name)
 
 `name` ∈ ("stock", "symdiv", "ke", "hybrid", "flux"). "ke" includes symdiv. "flux" uses no override (the model is
@@ -162,7 +177,8 @@ end
 """
     report_fix_faces(grid)
 
-Count the wet u- and v-faces where "ke" and "hybrid" act (the cell thickness changes nearby), level by level summed.
+Count the wet u- and v-faces where "ke" and "hybrid" act (the cell thickness changes nearby), level by level summed, with the
+current `set_jump_walls!` setting.
 A quick check, on the CPU, that the fixes reach the grid at all and touch only a small part of it.
 """
 function report_fix_faces(grid)
