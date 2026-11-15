@@ -1,4 +1,4 @@
-From 811e712ae5af42ed50c09b1334f4081a00251c40 Mon Sep 17 00:00:00 2001
+From 6c600dc39a1bfa8b681bef1be2a6fc64b57b402c Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Sun, 15 Nov 2026 13:53:53 -0500
 Subject: [PATCH] heat_freshwater_tsubouchi.jl: gateway heat and freshwater on
@@ -21,7 +21,7 @@ Claude-Session: https://claude.ai/code/session_01AbhhvkZczyeYtTrrNtPzaw
 
 diff --git a/nested/heat_freshwater_tsubouchi.jl b/nested/heat_freshwater_tsubouchi.jl
 new file mode 100644
-index 0000000..12dd12d
+index 0000000..40afe72
 --- /dev/null
 +++ b/nested/heat_freshwater_tsubouchi.jl
 @@ -0,0 +1,83 @@
@@ -106,24 +106,24 @@ index 0000000..12dd12d
 +        "sum", m[1], G[1], r.volume_Sv, r.volume_std, m[2], G[2], r.heat_TW, r.heat_std, m[3], G[3], r.freshwater_mSv, r.freshwater_std)
 +println("""
 +The "sum" row's Tsubouchi values are their ocean-only net through the whole boundary (which also includes the small
-+Fury and Hecla Strait). The four gateways' heat in their Table 3 adds up to 175 TW, their ocean-plus-ice total.
-+Each gateway's heat and freshwater depend on the reference values; the sum does not, if the boundary is closed.""")
++Fury and Hecla Strait). Each gateway's heat and freshwater depend on the reference values; the sum does not, if the
++boundary is closed.""")
 diff --git a/nested/references/tsubouchi2018_table3.csv b/nested/references/tsubouchi2018_table3.csv
 new file mode 100644
-index 0000000..1f58f4f
+index 0000000..e87d615
 --- /dev/null
 +++ b/nested/references/tsubouchi2018_table3.csv
 @@ -0,0 +1,11 @@
 +# Tsubouchi et al. (2018), JPO 48, 2029-2055, Table 3: annual mean and standard deviation, Sep 2005 - Aug 2006.
 +# Signs converted to POSITIVE INTO THE ARCTIC for all three quantities (the paper's freshwater is positive out of the
-+# Arctic, so its freshwater signs are flipped here). Heat relative to 1.01 degC (TW-eq per gateway); freshwater relative
-+# to 34.67 (mSv-eq per gateway). Net rows: ocean only. Note: the four gateways' heat sums to 175 TW, the paper's
-+# ocean-plus-ice total, not its ocean-only 154 TW (to check in the paper).
++# Arctic: it is built from S'v, salinity anomaly times velocity; so its freshwater signs are flipped here). Heat
++# relative to 1.01 degC (TW-eq per gateway); freshwater relative to 34.67 (mSv-eq per gateway). Net row: ocean only.
++# Checked against the PDF (page 2037): Bering heat is -0 +- 10 TW-eq.
 +gateway,volume_Sv,volume_std,heat_TW,heat_std,freshwater_mSv,freshwater_std
 +davis,-2.1,0.7,37,9,-109,13
 +fram,-1.1,1.2,63,17,-79,22
 +bso,2.3,1.2,55,28,-15,12
-+bering,0.7,0.7,20,10,48,52
++bering,0.7,0.7,0,10,48,52
 +net_ocean,-0.15,0.06,154,44,-155,65
 -- 
 2.43.0
