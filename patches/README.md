@@ -35,6 +35,7 @@ Numbered in the order to apply, across repositories. Each was checked to apply w
 | 027 | PanArcticShenanigans | `fjp/nested` | after 026 | `heat_freshwater_tsubouchi.jl` (gateway heat and freshwater on Tsubouchi et al.'s references, model and GLORYS vs their Table 3); `references/tsubouchi2018_table3.csv` |
 | 028 | PanArcticShenanigans | `fjp/nested` | after 027 | `heat_freshwater_tsubouchi.jl` compares Tsubouchi et al.'s monthly blocks (same days) for volume, heat and freshwater; `references/tsubouchi2018_monthly_{heat,freshwater}.csv` (from Figs. 7a, 9a) |
 | 029 | PanArcticShenanigans | `fjp/nested` | after 028 | fix applied by hand (no patch file): in `plot_gateways.jl` line 181, `"$a–$b"` → `"$(a)–$(b)"` (parse error from 025) |
+| 030 | Oceananigans | new branch `fjp/mass-consistent-bottom-advection` from `main` (9840bec, v0.118.1) | — | mass-consistent momentum advection at bottom-cell thickness jumps (`src/Advection/mass_consistent_bottom_advection.jl`) and its test (`test/hydrostatic_free_surface/`); the fix of `sandbox/lake_at_rest/thickness_jump_fixes.jl` (hybrid, wet cells only) as source |
 
 ## Applying 001–006
 
