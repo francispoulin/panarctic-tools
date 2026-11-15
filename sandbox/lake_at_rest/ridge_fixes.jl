@@ -141,6 +141,9 @@ function energies(model)
     return (; kinetic, bottom_kinetic, potential, background, surface, fastest)
 end
 
+# Set RIDGE_NO_RUN = true before `include` to get the definitions only (probe_fixes.jl does).
+if !(isdefined(Main, :RIDGE_NO_RUN) && Main.RIDGE_NO_RUN)
+
 cases = [(:partial, (F1 = false, F2 = false)),
          (:partial, (F1 = true,  F2 = false)),
          (:partial, (F1 = false, F2 = true)),
@@ -195,4 +198,6 @@ println("Summary at day $(ceil(Int, run_days)), Nz = $Nz_run (energies / KE₀):
 for r in results
     @printf("  %-30s %+9.3f %+9.3f %+9.3f %+9.3f %+9.3f %7.3f%s\n",
             r.label, r.ΔE, r.ΔKE, r.ΔPE, r.ΔBPE, r.ΔAPE, r.umax, r.at_bottom ? "*" : "")
+end
+
 end
