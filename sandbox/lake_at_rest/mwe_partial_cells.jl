@@ -193,6 +193,43 @@ if momentum == "vector"
     end
 end
 
+# Same state, three discretisations of the advection term (u·∇)u. After one day of the chosen scheme (the jet is
+# there), evaluate each form's contribution to ∂u/∂t (m/s per day) on that one state, at the faces around the
+# downstream cliff, in the lowest two wet levels there. The flux form δx(Uu) + δz(Wu) moves momentum with the same
+# transports and volumes as the water, so it is the reference; a vector-invariant piece that differs from it at the
+# thin face is the inconsistency.
+#   KE: −∂x(u²/2)    vert: the vertical term (w ∂z u)    flux x / flux z: −V⁻¹ δx(Uu), −V⁻¹ δz(Wu)
+let schemes = (; weno = WENOVectorInvariant(), centred = VectorInvariant(), flux = WENO(order = 5))
+    for bottom_kind in (:whole, :partial)
+        model = cliff_model(bottom_kind)
+        for _ in 1:144
+            time_step!(model, 10minutes)
+        end
+        grid, Uk = convert_to_device(CPU(), (model.grid, model.velocities))
+        kb = findfirst(k -> !peripheral_node(21, 1, k, model.grid, Face(), Center(), Center()), 1:Nz)
+        println("Advection term on the same state (after 1 day of $(momentum)), $bottom_kind cells, m/s per day:")
+        @printf("  %8s %7s | %9s %9s %9s | %9s %9s %9s | %9s %9s %9s\n", "(i, k)", "u",
+                "WENO-VI", "KE", "vert", "centred", "KE", "vert", "flux", "flux x", "flux z")
+        for k in (kb, kb + 1), i in 19:23
+            peripheral_node(i, 1, k, model.grid, Face(), Center(), Center()) && continue
+            V⁻¹ = V⁻¹ᶠᶜᶜ(i, 1, k, grid)
+            row = Float64[]
+            for s in (schemes.weno, schemes.centred)
+                KE   = - Advection.bernoulli_head_U(i, 1, k, grid, s, Uk.u, Uk.v)
+                vert = - Advection.vertical_advection_U(i, 1, k, grid, s, Uk)
+                hor  = - Advection.horizontal_advection_U(i, 1, k, grid, s, Uk.u, Uk.v)
+                append!(row, (KE + vert + hor, KE, vert))
+            end
+            ftot = - Advection.div_𝐯u(i, 1, k, grid, schemes.flux, Uk, Uk.u)    # exactly what the flux-form model uses
+            fz   = - V⁻¹ * δzᵃᵃᶜ(i, 1, k, grid, Advection._advective_momentum_flux_Wu, schemes.flux, Uk.w, Uk.u)
+            append!(row, (ftot, ftot - fz, fz))
+            @printf("  %8s %7.3f | %+9.4f %+9.4f %+9.4f | %+9.4f %+9.4f %+9.4f | %+9.4f %+9.4f %+9.4f\n",
+                    "($i, $k)", model.velocities.u[i, 1, k], (86400 .* row)...)
+        end
+        println()
+    end
+end
+
 results = Dict{Symbol, Any}()
 for bottom_kind in (:whole, :partial)
     model = cliff_model(bottom_kind)
