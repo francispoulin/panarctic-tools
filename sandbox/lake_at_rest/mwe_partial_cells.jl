@@ -9,7 +9,10 @@
 # cells. In Oceananigans 0.117.2 it is larger, and the fastest flow sits in the partial bottom cell at the downstream
 # cliff.
 #
-#   julia --project=<PanArcticShenanigans>/nested mwe_partial_cells.jl [days] [Nz] [zstar|static] [k]
+#   julia --project=<PanArcticShenanigans>/nested mwe_partial_cells.jl [days] [Nz] [zstar|static] [n_bottom] [plateau depth]
+#
+# max|u| is over the lowest n_bottom wet u-faces of every column (default 5), so near-bottom flow is compared, not the
+# surface. The plateau depth (default 1863 m) sets the wet fraction of the plateau's bottom cell.
 
 using Oceananigans, Oceananigans.Units, Printf
 using Oceananigans.Operators: volume, Azᶜᶜᶜ
@@ -18,12 +21,13 @@ using Oceananigans.Grids: peripheral_node, inactive_node, znode
 days     = length(ARGS) ≥ 1 ? parse(Float64, ARGS[1]) : 10.0
 Nz       = length(ARGS) ≥ 2 ? parse(Int, ARGS[2]) : 20
 vertical = length(ARGS) ≥ 3 ? ARGS[3] : "zstar"
-k_ref    = length(ARGS) ≥ 4 ? parse(Int, ARGS[4]) : 5      # the level whose speeds are compared
+n_bottom = length(ARGS) ≥ 4 ? parse(Int, ARGS[4]) : 5      # speeds compared over the lowest n wet faces of each column
+plateau  = length(ARGS) ≥ 5 ? parse(Float64, ARGS[5]) : 1863.0
 
 Nx, Δx = 32, 15kilometers
 Lx     = Nx * Δx
 depth  = 5000
-basin, plateau = 2837, 1863
+basin = 2837
 on_plateau(x) = 12Δx ≤ x < 20Δx
 bottom(x) = on_plateau(x) ? -plateau : -basin
 
@@ -76,11 +80,15 @@ end
 
 function diagnostics(model)
     grid, u, η = model.grid, model.velocities.u, model.free_surface.displacement
-    KE, umax, loc = 0.0, 0.0, 0
-    for i in 1:Nx, k in 1:Nz
-        peripheral_node(i, 1, k, grid, Face(), Center(), Center()) && continue
-        KE += u[i, 1, k]^2 / 2 * volume(i, 1, k, grid, Face(), Center(), Center())
-        k == k_ref && abs(u[i, 1, k]) > umax && ((umax, loc) = (abs(u[i, 1, k]), i))
+    KE, umax, loc = 0.0, 0.0, (0, 0)
+    for i in 1:Nx
+        counted = 0
+        for k in 1:Nz
+            peripheral_node(i, 1, k, grid, Face(), Center(), Center()) && continue
+            KE += u[i, 1, k]^2 / 2 * volume(i, 1, k, grid, Face(), Center(), Center())
+            counted += 1
+            counted ≤ n_bottom && abs(u[i, 1, k]) > umax && ((umax, loc) = (abs(u[i, 1, k]), (i, k)))
+        end
     end
     Eη = sum(Oceananigans.defaults.gravitational_acceleration * η[i, 1, Nz+1]^2 / 2 * Azᶜᶜᶜ(i, 1, Nz+1, grid) for i in 1:Nx)
     PE, BPE = potential_energies(model)
@@ -88,7 +96,8 @@ function diagnostics(model)
 end
 
 println("Flow over a cliff, $(Nz) levels, $(vertical). Energies divided by the initial KE.")
-println("ΔBPE = numerical mixing. Cliffs at faces i = 13 and 21 (plateau cells 13–20).\n")
+println("ΔBPE = numerical mixing. Cliffs at faces i = 13 and 21 (plateau cells 13–20), plateau at $(plateau) m.")
+println("Bottom max|u| = largest speed over the lowest $(n_bottom) wet u-faces of each column.\n")
 
 # Where the bottom is, level by level, for each kind of bottom: the wet thickness of each level in a basin column
 # (i = 5) and a plateau column (i = 16). 0 = immersed.
@@ -101,7 +110,7 @@ let
         wet(kind, i) = inactive_node(i, 1, k, grids[kind], Center(), Center(), Center()) ? 0.0 :
                        Oceananigans.Operators.Δzᶜᶜᶜ(i, 1, k, grids[kind])
         @printf("%3d   %7.0f to %7.0f      %16.0f %8.0f    %19.0f %8.0f%s\n", k, zf, zt,
-                wet(:whole, 5), wet(:partial, 5), wet(:whole, 16), wet(:partial, 16), k == k_ref ? "   <- k_ref" : "")
+                wet(:whole, 5), wet(:partial, 5), wet(:whole, 16), wet(:partial, 16), "")
     end
     println()
 end
@@ -109,7 +118,7 @@ results = Dict{Symbol, Any}()
 for bottom_kind in (:whole, :partial)
     model = cliff_model(bottom_kind)
     D₀ = diagnostics(model)
-    @printf("%-7s  %4s %9s %9s %9s %9s %16s\n", bottom_kind, "day", "ΔE", "ΔKE", "ΔBPE", "ΔAPE", "max|u| at k = $k_ref (i)")
+    @printf("%-7s  %4s %9s %9s %9s %9s %16s\n", bottom_kind, "day", "ΔE", "ΔKE", "ΔBPE", "ΔAPE", "bottom max|u| (i, k)")
     local D = D₀
     for n in 1:ceil(Int, days)
         for _ in 1:144
@@ -119,8 +128,8 @@ for bottom_kind in (:whole, :partial)
         ΔE   = (D.KE + D.PE + D.Eη - D₀.KE - D₀.PE - D₀.Eη) / D₀.KE
         ΔBPE = (D.BPE - D₀.BPE) / D₀.KE
         ΔAPE = (D.PE - D.BPE - D₀.PE + D₀.BPE) / D₀.KE
-        @printf("         %4d %+9.3f %+9.3f %+9.3f %+9.3f %12.3f (%2d)\n", n, ΔE, (D.KE - D₀.KE) / D₀.KE,
-                ΔBPE, ΔAPE, D.umax, D.loc)
+        @printf("         %4d %+9.3f %+9.3f %+9.3f %+9.3f %12.3f (%2d,%2d)\n", n, ΔE, (D.KE - D₀.KE) / D₀.KE,
+                ΔBPE, ΔAPE, D.umax, D.loc...)
     end
     results[bottom_kind] = (D.BPE - D₀.BPE) / D₀.KE
     println()
