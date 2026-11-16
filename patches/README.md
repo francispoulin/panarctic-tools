@@ -42,6 +42,7 @@ Numbered in the order to apply, across repositories. Each was checked to apply w
 | 034 | PanArcticShenanigans | `fjp/nested` | after 032 | inflow/outflow and sections per 30 km stretch of the line and level (`binned` in `section_properties_common.jl`), not per staircase face; rerun `glorys_gateways_native.jl`, `section_properties.jl`, `plot_sections.jl` |
 | 035 | PanArcticShenanigans | `fjp/nested` | after 034 | `rivers_and_straits.jl` (CPU): does the Baltic connect to the Skagerrak, map of the Danish straits, JRA55 river discharge by region against what the routing delivers |
 | 036 | PanArcticShenanigans | `fjp/nested` | after 035 | `rivers_and_straits.jl` loads `jra55_read_fix.jl` (the river part failed in `jra55_read_data`) |
+| 037 | PanArcticShenanigans | `fjp/nested` | after 036 | `[grid] bathymetry = "GLORYS"` (`glorys_bathymetry.jl`, GLORYS's `deptho` regridded like `regrid_bathymetry`); `runs/tsubouchi-2005-15km-partial-hybridwet-nz50-glorysbathy-2mo.toml` |
 
 ## Applying 001–006
 
