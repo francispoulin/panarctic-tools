@@ -1,0 +1,27 @@
+From 11b067be0366f0a9a14cfe54bf0c839dfbe50c17 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 15 Nov 2026 22:48:42 -0500
+Subject: [PATCH] rivers_and_straits.jl: load the JRA55 read workaround, as
+ panarctic_nested.jl does
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AbhhvncDb1PnxFVHRBrPRS
+---
+ nested/rivers_and_straits.jl | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/nested/rivers_and_straits.jl b/nested/rivers_and_straits.jl
+index 84f0751..5322f8e 100644
+--- a/nested/rivers_and_straits.jl
++++ b/nested/rivers_and_straits.jl
+@@ -10,6 +10,7 @@
+ 
+ ENV["PANARCTIC_ARCHITECTURE"] = "CPU"
+ include("setup.jl")
++include("jra55_read_fix.jl")
+ 
+ using Oceananigans.Grids: inactive_node, λnode, φnode
+ using Oceananigans.Operators: Azᶜᶜᶜ, Δzᶜᶜᶜ
+-- 
+2.43.0
+

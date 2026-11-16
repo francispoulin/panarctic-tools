@@ -41,6 +41,7 @@ Numbered in the order to apply, across repositories. Each was checked to apply w
 | 033 | Oceananigans | `fjp/mass-consistent-bottom-advection` (PR #6533) | after 030 | the fix only for vector-invariant schemes whose kinetic-energy-gradient scheme has momentum fluxes (WENO, centred, upwind); `VectorInvariant()` (EnergyConserving) keeps the stock form (CI failure in `simulation/netcdf_writer`) |
 | 034 | PanArcticShenanigans | `fjp/nested` | after 032 | inflow/outflow and sections per 30 km stretch of the line and level (`binned` in `section_properties_common.jl`), not per staircase face; rerun `glorys_gateways_native.jl`, `section_properties.jl`, `plot_sections.jl` |
 | 035 | PanArcticShenanigans | `fjp/nested` | after 034 | `rivers_and_straits.jl` (CPU): does the Baltic connect to the Skagerrak, map of the Danish straits, JRA55 river discharge by region against what the routing delivers |
+| 036 | PanArcticShenanigans | `fjp/nested` | after 035 | `rivers_and_straits.jl` loads `jra55_read_fix.jl` (the river part failed in `jra55_read_data`) |
 
 ## Applying 001–006
 
