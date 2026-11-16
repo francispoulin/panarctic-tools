@@ -45,6 +45,7 @@ Numbered in the order to apply, across repositories. Each was checked to apply w
 | 037 | PanArcticShenanigans | `fjp/nested` | after 036 | `[grid] bathymetry = "GLORYS"` (`glorys_bathymetry.jl`, GLORYS's `deptho` regridded like `regrid_bathymetry`); `runs/tsubouchi-2005-15km-partial-hybridwet-nz50-glorysbathy-2mo.toml` |
 | 038 | PanArcticShenanigans | `fjp/nested` | after 037 | `coastal_salinity.jl`: top-20 m salinity at seven stations from the Baltic to the BSO coast, model (3-D output) against GLORYS (parent files), day by day |
 | 039 | PanArcticShenanigans | `fjp/nested` | after 038 | `plot_sections.jl` and `coastal_salinity.jl` average GLORYS over each model averaging window (needed for 2-day averages, e.g. the 10 km run) |
+| 040 | PanArcticShenanigans | `fjp/nested` | after 039 | `coastal_salinity.jl` also gives the freshwater content of the top 200 m at each station (m of fresh water relative to 34.8), model and GLORYS |
 
 ## Applying 001–006
 

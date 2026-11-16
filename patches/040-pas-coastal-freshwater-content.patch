@@ -1,0 +1,189 @@
+From 4278996b6b6a1c39b1014cf955345a11a29a63c2 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 16 Nov 2026 08:54:13 -0500
+Subject: [PATCH] coastal_salinity.jl: freshwater content of the top 200 m at
+ each station, model and GLORYS
+
+Tells fresh water mixed down (same content, saltier surface) from fresh water missing (less content).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AbhhvncDb1PnxFVHRBrPRS
+---
+ nested/coastal_salinity.jl | 90 +++++++++++++++++++++++++-------------
+ 1 file changed, 59 insertions(+), 31 deletions(-)
+
+diff --git a/nested/coastal_salinity.jl b/nested/coastal_salinity.jl
+index 7a7b298..d5f2785 100644
+--- a/nested/coastal_salinity.jl
++++ b/nested/coastal_salinity.jl
+@@ -3,14 +3,19 @@
+ #
+ #   julia --project=. coastal_salinity.jl runs/<run>.toml
+ #
+-# Stations from the Baltic to the coastal end of the Barents Sea Opening. At each, the mean salinity of the top 20 m in
+-# the nearest wet cell, for the model (from the 3-D averages in nested_ocean_3d.jld2) and for GLORYS (its daily means,
+-# the same files the run used as its parent). Prints a table every few days and writes coastal_salinity.csv.
++# Stations from the Baltic to the coastal end of the Barents Sea Opening. At each, in the nearest wet cell, for the model
++# (from the 3-D averages in nested_ocean_3d.jld2) and for GLORYS (its daily means, the files the run used as its parent):
++#   - the mean salinity of the top 20 m;
++#   - the freshwater content of the top 200 m (or of the whole column where shallower): ∫ (Sʳᵉᶠ − S) / Sʳᵉᶠ dz with
++#     Sʳᵉᶠ = 34.8, in metres of fresh water. A saltier surface with the same content means fresh water mixed down;
++#     less content means fresh water missing from the coastal band.
++# Prints both tables every few days and writes coastal_salinity.csv.
+ 
+ ENV["PANARCTIC_ARCHITECTURE"] = "CPU"
+ include("setup.jl")
+ 
+ using Oceananigans.Grids: inactive_node, znode, λnode, φnode
++using Oceananigans.Operators: Δzᶜᶜᶜ
+ using Oceananigans.OutputReaders: OnDisk
+ using NumericalEarth.DataWrangling: NCDatasets, BoundingBox, Metadatum, metadata_path, default_horizontal_padding
+ using NumericalEarth.DataWrangling.GLORYS: GLORYSDaily
+@@ -24,7 +29,9 @@ const stations = [("Baltic",      19.5, 57.5),
+                   ("mid-Norway",   8.0, 63.8),
+                   ("N Norway",    15.5, 69.4),
+                   ("BSO coast",   20.5, 70.6)]
+-const top_depth = 20   # m
++const top_depth   = 20    # m
++const fresh_depth = 200   # m
++const Sʳᵉᶠ = 34.8
+ 
+ # ## Model
+ 
+@@ -46,23 +53,29 @@ function nearest_wet_model_cell(λ, φ)
+     return best
+ end
+ 
++wet_levels_above(i, j, depth) = [k for k in 1:Nz if !inactive_node(i, j, k, model_grid, C, C, C) && znode(i, j, k, model_grid, C, C, C) > -depth]
++
+ model_cells = [nearest_wet_model_cell(λ, φ) for (_, λ, φ) in stations]
+-top_levels = [[k for k in 1:Nz if !inactive_node(i, j, k, model_grid, C, C, C) && znode(i, j, k, model_grid, C, C, C) > -top_depth]
+-              for (i, j) in model_cells]
++top_levels = [wet_levels_above(i, j, top_depth) for (i, j) in model_cells]
++fresh_levels = [wet_levels_above(i, j, fresh_depth) for (i, j) in model_cells]
+ for (n, (name, λ, φ)) in enumerate(stations)
+     i, j = model_cells[n]
+     isempty(top_levels[n]) && (top_levels[n] = [Nz])
+-    @info @sprintf("%-11s %.1f°E %.1f°N → model cell (%d, %d) at %.2f°E %.2f°N, %d level(s) in the top %d m", name, λ, φ, i, j,
+-                   λnode(i, j, 1, model_grid, C, C, C), φnode(i, j, 1, model_grid, C, C, C), length(top_levels[n]), top_depth)
++    @info @sprintf("%-11s %.1f°E %.1f°N → model cell (%d, %d) at %.2f°E %.2f°N, %d level(s) in the top %d m, %.0f m in the top %d m",
++                   name, λ, φ, i, j, λnode(i, j, 1, model_grid, C, C, C), φnode(i, j, 1, model_grid, C, C, C),
++                   length(top_levels[n]), top_depth, sum(Δzᶜᶜᶜ(i, j, k, model_grid) for k in fresh_levels[n]), fresh_depth)
+ end
+ 
+ model_hours = Float64[]
+ model_salinity = Vector{Vector{Float64}}()
++model_freshwater = Vector{Vector{Float64}}()
+ for n in eachindex(Sₜ.times)
+     Sₜ.times[n] == 0 && continue
+     S = Sₜ[n]
+     push!(model_hours, Sₜ.times[n] / 3600 - 12 * average_days)
+     push!(model_salinity, [sum(S[i, j, k] for k in levels) / length(levels) for ((i, j), levels) in zip(model_cells, top_levels)])
++    push!(model_freshwater, [sum((Sʳᵉᶠ - S[i, j, k]) / Sʳᵉᶠ * Δzᶜᶜᶜ(i, j, k, model_grid) for k in levels; init = 0.0)
++                             for ((i, j), levels) in zip(model_cells, fresh_levels)])
+ end
+ 
+ # ## GLORYS: the parent's daily files over the whole domain
+@@ -71,18 +84,22 @@ region = BoundingBox(grid.underlying_grid; padding = default_horizontal_padding(
+ glorys_dir = isempty(data_dir) ? NumericalEarth.DataWrangling.default_download_directory(GLORYSDaily()) : data_dir
+ glorys_dates = [start_date + Day(n) for n in 0:ceil(Int, run_days) - 1]
+ 
+-function glorys_surface_salinity(date)
++# Salinity of the levels down to `fresh_depth`, and their thicknesses (faces midway between level centres, the surface at 0)
++function glorys_upper_salinity(date)
+     meta = Metadatum(:salinity; dataset = GLORYSDaily(), date, region, dir = glorys_dir)
+     path = Downloads.download(meta)
+     ds = Dataset(path)
+     lon, lat, depth = Float64.(ds["longitude"][:]), Float64.(ds["latitude"][:]), Float64.(ds["depth"][:])
+-    levels = 1:findlast(<(top_depth), depth)
++    levels = 1:findlast(<(fresh_depth), depth)
+     S = Float64.(coalesce.(ds["so"][:, :, levels, 1], NaN))
+     close(ds)
+-    return lon, lat, S
++    faces = [0.0; (depth[1:end-1] .+ depth[2:end]) ./ 2]
++    thickness = diff(faces)[levels]
++    return lon, lat, depth[levels], thickness, S
+ end
+ 
+-lon, lat, S₁ = glorys_surface_salinity(glorys_dates[1])
++lon, lat, glorys_depth, glorys_thickness, S₁ = glorys_upper_salinity(glorys_dates[1])
++top = findall(<(top_depth), glorys_depth)
+ glorys_cells = map(stations) do (_, λ, φ)
+     best, distance = (0, 0), Inf
+     for j in eachindex(lat), i in eachindex(lon)
+@@ -93,42 +110,53 @@ glorys_cells = map(stations) do (_, λ, φ)
+     best
+ end
+ 
+-glorys_salinity = map(glorys_dates) do date
+-    _, _, S = glorys_surface_salinity(date)
+-    [(column = filter(isfinite, S[i, j, :]); sum(column) / length(column)) for (i, j) in glorys_cells]
++glorys_salinity = Vector{Vector{Float64}}()
++glorys_freshwater = Vector{Vector{Float64}}()
++for date in glorys_dates
++    _, _, _, _, S = glorys_upper_salinity(date)
++    push!(glorys_salinity, [(column = filter(isfinite, S[i, j, top]); sum(column) / length(column)) for (i, j) in glorys_cells])
++    push!(glorys_freshwater, [sum((Sʳᵉᶠ - S[i, j, k]) / Sʳᵉᶠ * glorys_thickness[k] for k in axes(S, 3) if isfinite(S[i, j, k]); init = 0.0)
++                              for (i, j) in glorys_cells])
+ end
+ glorys_hours = [24 * (n - 1) + 12 for n in eachindex(glorys_dates)]
+ 
+ # GLORYS averaged over the days of the model average centred at `hour`
+-function glorys_over_window(hour)
++function over_window(values, hour)
+     days = findall(h -> abs(h - hour) < 12 * average_days, glorys_hours)
+     isempty(days) && return nothing
+-    return sum(glorys_salinity[days]) / length(days)
++    return sum(values[days]) / length(days)
+ end
+ 
+-# ## Table and file
++# ## Tables and file
+ 
+ csv = joinpath(output_dir, "coastal_salinity.csv")
+ open(csv, "w") do io
+-    println(io, join(["hour"; [s[1] * suffix for s in stations for suffix in (" model", " GLORYS")]], ','))
++    println(io, join(["hour"; [s[1] * suffix for s in stations
++                               for suffix in (" S model", " S GLORYS", " freshwater model m", " freshwater GLORYS m")]], ','))
+     for (n, hour) in enumerate(model_hours)
+-        g = glorys_over_window(hour)
++        g, f = over_window(glorys_salinity, hour), over_window(glorys_freshwater, hour)
+         isnothing(g) && continue
+         println(io, join([@sprintf("%.1f", hour); [@sprintf("%.3f", x) for s in eachindex(stations)
+-                                                     for x in (model_salinity[n][s], g[s])]], ','))
++                                                     for x in (model_salinity[n][s], g[s], model_freshwater[n][s], f[s])]], ','))
+     end
+ end
+ 
+-@printf("\nMean salinity of the top %d m, model / GLORYS\n%-6s", top_depth, "day")
+-foreach(s -> @printf(" %15s", s[1]), stations)
+-println()
+-for (n, hour) in enumerate(model_hours)
+-    day = round(Int, hour / 24 + average_days / 2)
+-    (day == 1 || day % 5 == 0 || n == length(model_hours)) || continue
+-    g = glorys_over_window(hour)
+-    isnothing(g) && continue
+-    @printf("%-6d", day)
+-    foreach(s -> @printf("   %5.2f / %5.2f", model_salinity[n][s], g[s]), eachindex(stations))
++function print_table(title, model_values, glorys_values, format)
++    @printf("\n%s, model / GLORYS\n%-6s", title, "day")
++    foreach(s -> @printf(" %15s", s[1]), stations)
+     println()
++    for (n, hour) in enumerate(model_hours)
++        day = round(Int, hour / 24 + average_days / 2)
++        (day ≤ 2 || day % 5 == 0 || n == length(model_hours)) || continue
++        g = over_window(glorys_values, hour)
++        isnothing(g) && continue
++        @printf("%-6d", day)
++        foreach(s -> print("   ", format(model_values[n][s]), " / ", format(g[s])), eachindex(stations))
++        println()
++    end
+ end
++
++print_table("Mean salinity of the top $top_depth m", model_salinity, glorys_salinity, x -> @sprintf("%5.2f", x))
++print_table("Freshwater content of the top $fresh_depth m (m of fresh water, relative to $Sʳᵉᶠ)", model_freshwater, glorys_freshwater,
++            x -> @sprintf("%5.2f", x))
+ @info "Wrote $csv"
+-- 
+2.43.0
+
