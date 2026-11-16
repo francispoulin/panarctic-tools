@@ -15,7 +15,7 @@
 # model, e.g.
 #
 #     include("<panarctic-tools>/sandbox/lake_at_rest/curvature_check.jl")
-#     curvature_check(ocean.model)      # whatever panarctic_nested.jl calls the ocean model
+#     curvature_check(ocean)      # the ocean model, a simulation, or a nested model all work
 #
 # CPU loop over a copy of the state; a minute or two at 15 km.
 
@@ -52,7 +52,17 @@ stock_v(i, j, k, grid, s, U) = Advection.horizontal_advection_V(i, j, k, grid, s
 
 quantile_of(x, p) = isempty(x) ? NaN : sort(x)[clamp(ceil(Int, p * length(x)), 1, length(x))]
 
+# The ocean's own model inside a nested model or a simulation (follows .child and .model until there is a grid)
+function ocean_model_of(x)
+    while !(hasproperty(x, :grid) && hasproperty(x, :velocities))
+        x = hasproperty(x, :child) ? x.child : hasproperty(x, :model) ? x.model : error("no ocean model found in $(typeof(x))")
+    end
+    return x
+end
+
 function curvature_check(model; top = 10)
+    model = ocean_model_of(model)
+    @info "Checking $(nameof(typeof(model))) on a $(size(model.grid)) grid"
     (ke_fix_on() || symmetric_divergence_on()) &&
         @warn "ke/symdiv switches are on: the 'stock' column below is not stock. Run in the hybrid session."
     grid = on_architecture(CPU(), model.grid)
