@@ -1,0 +1,149 @@
+From 377103dc670f100e4552c9b3ca4e18569bc03526 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 15 Nov 2026 23:06:35 -0500
+Subject: [PATCH] coastal_salinity.jl: top-20 m salinity along the Norwegian
+ Coastal Current, model against GLORYS, day by day
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AbhhvncDb1PnxFVHRBrPRS
+---
+ nested/coastal_salinity.jl | 127 +++++++++++++++++++++++++++++++++++++
+ 1 file changed, 127 insertions(+)
+ create mode 100644 nested/coastal_salinity.jl
+
+diff --git a/nested/coastal_salinity.jl b/nested/coastal_salinity.jl
+new file mode 100644
+index 0000000..d40be3a
+--- /dev/null
++++ b/nested/coastal_salinity.jl
+@@ -0,0 +1,127 @@
++# Salinity along the path of the Norwegian Coastal Current, model against GLORYS, day by day: where does the model's
++# coastal water stop being as fresh as GLORYS's?
++#
++#   julia --project=. coastal_salinity.jl runs/<run>.toml
++#
++# Stations from the Baltic to the coastal end of the Barents Sea Opening. At each, the mean salinity of the top 20 m in
++# the nearest wet cell, for the model (from the 3-D averages in nested_ocean_3d.jld2) and for GLORYS (its daily means,
++# the same files the run used as its parent). Prints a table every few days and writes coastal_salinity.csv.
++
++ENV["PANARCTIC_ARCHITECTURE"] = "CPU"
++include("setup.jl")
++
++using Oceananigans.Grids: inactive_node, znode, λnode, φnode
++using Oceananigans.OutputReaders: OnDisk
++using NumericalEarth.DataWrangling: NCDatasets, BoundingBox, Metadatum, metadata_path, default_horizontal_padding
++using NumericalEarth.DataWrangling.GLORYS: GLORYSDaily
++using .NCDatasets: Dataset
++using Downloads
++
++const stations = [("Baltic",      19.5, 57.5),
++                  ("Kattegat",    11.5, 57.3),
++                  ("Skagerrak",    9.0, 58.2),
++                  ("W Norway",     4.5, 60.8),
++                  ("mid-Norway",   8.0, 63.8),
++                  ("N Norway",    15.5, 69.4),
++                  ("BSO coast",   20.5, 70.6)]
++const top_depth = 20   # m
++
++# ## Model
++
++file = joinpath(output_dir, "nested_ocean_3d.jld2")
++isfile(file) || error("$file not found: run with [output] ocean_3d_days")
++average_days = config["output"]["ocean_3d_days"]
++Sₜ = FieldTimeSeries(file, "S"; backend = OnDisk())
++model_grid = Sₜ.grid
++Nx, Ny, Nz = size(model_grid)
++C = Center()
++
++function nearest_wet_model_cell(λ, φ)
++    best, distance = (0, 0), Inf
++    for j in 1:Ny, i in 1:Nx
++        inactive_node(i, j, Nz, model_grid, C, C, C) && continue
++        d = ((mod(λnode(i, j, 1, model_grid, C, C, C) - λ + 180, 360) - 180) * cosd(φ))^2 + (φnode(i, j, 1, model_grid, C, C, C) - φ)^2
++        d < distance && ((best, distance) = ((i, j), d))
++    end
++    return best
++end
++
++model_cells = [nearest_wet_model_cell(λ, φ) for (_, λ, φ) in stations]
++top_levels = [[k for k in 1:Nz if !inactive_node(i, j, k, model_grid, C, C, C) && znode(i, j, k, model_grid, C, C, C) > -top_depth]
++              for (i, j) in model_cells]
++for (n, (name, λ, φ)) in enumerate(stations)
++    i, j = model_cells[n]
++    isempty(top_levels[n]) && (top_levels[n] = [Nz])
++    @info @sprintf("%-11s %.1f°E %.1f°N → model cell (%d, %d) at %.2f°E %.2f°N, %d level(s) in the top %d m", name, λ, φ, i, j,
++                   λnode(i, j, 1, model_grid, C, C, C), φnode(i, j, 1, model_grid, C, C, C), length(top_levels[n]), top_depth)
++end
++
++model_hours = Float64[]
++model_salinity = Vector{Vector{Float64}}()
++for n in eachindex(Sₜ.times)
++    Sₜ.times[n] == 0 && continue
++    S = Sₜ[n]
++    push!(model_hours, Sₜ.times[n] / 3600 - 12 * average_days)
++    push!(model_salinity, [sum(S[i, j, k] for k in levels) / length(levels) for ((i, j), levels) in zip(model_cells, top_levels)])
++end
++
++# ## GLORYS: the parent's daily files over the whole domain
++
++region = BoundingBox(grid.underlying_grid; padding = default_horizontal_padding(GLORYSDaily()))
++glorys_dir = isempty(data_dir) ? NumericalEarth.DataWrangling.default_download_directory(GLORYSDaily()) : data_dir
++glorys_dates = [start_date + Day(n) for n in 0:ceil(Int, run_days) - 1]
++
++function glorys_surface_salinity(date)
++    meta = Metadatum(:salinity; dataset = GLORYSDaily(), date, region, dir = glorys_dir)
++    path = Downloads.download(meta)
++    ds = Dataset(path)
++    lon, lat, depth = Float64.(ds["longitude"][:]), Float64.(ds["latitude"][:]), Float64.(ds["depth"][:])
++    levels = 1:findlast(<(top_depth), depth)
++    S = Float64.(coalesce.(ds["so"][:, :, levels, 1], NaN))
++    close(ds)
++    return lon, lat, S
++end
++
++lon, lat, S₁ = glorys_surface_salinity(glorys_dates[1])
++glorys_cells = map(stations) do (_, λ, φ)
++    best, distance = (0, 0), Inf
++    for j in eachindex(lat), i in eachindex(lon)
++        isfinite(S₁[i, j, 1]) || continue
++        d = ((mod(lon[i] - λ + 180, 360) - 180) * cosd(φ))^2 + (lat[j] - φ)^2
++        d < distance && ((best, distance) = ((i, j), d))
++    end
++    best
++end
++
++glorys_salinity = map(glorys_dates) do date
++    _, _, S = glorys_surface_salinity(date)
++    [(column = filter(isfinite, S[i, j, :]); sum(column) / length(column)) for (i, j) in glorys_cells]
++end
++glorys_hours = [24 * (n - 1) + 12 for n in eachindex(glorys_dates)]
++
++# ## Table and file
++
++csv = joinpath(output_dir, "coastal_salinity.csv")
++open(csv, "w") do io
++    println(io, join(["hour"; [s[1] * suffix for s in stations for suffix in (" model", " GLORYS")]], ','))
++    for (n, hour) in enumerate(model_hours)
++        g = findfirst(h -> abs(h - hour) < 1, glorys_hours)
++        isnothing(g) && continue
++        println(io, join([@sprintf("%.1f", hour); [@sprintf("%.3f", x) for s in eachindex(stations)
++                                                     for x in (model_salinity[n][s], glorys_salinity[g][s])]], ','))
++    end
++end
++
++@printf("\nMean salinity of the top %d m, model / GLORYS\n%-6s", top_depth, "day")
++foreach(s -> @printf(" %15s", s[1]), stations)
++println()
++for (n, hour) in enumerate(model_hours)
++    day = round(Int, (hour + 12) / 24)
++    (day == 1 || day % 5 == 0 || n == length(model_hours)) || continue
++    g = findfirst(h -> abs(h - hour) < 1, glorys_hours)
++    isnothing(g) && continue
++    @printf("%-6d", day)
++    foreach(s -> @printf("   %5.2f / %5.2f", model_salinity[n][s], glorys_salinity[g][s]), eachindex(stations))
++    println()
++end
++@info "Wrote $csv"
+-- 
+2.43.0
+
