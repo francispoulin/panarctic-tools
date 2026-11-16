@@ -1,0 +1,341 @@
+From a992bf5a9775669402defc192de070b93480db90 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 15 Nov 2026 19:49:07 -0500
+Subject: [PATCH] Inflow and outflow, and mean sections of velocity, T and S,
+ through the gateways: model and GLORYS
+
+section_properties.jl (model, from the daily 3-D output), the same in glorys_gateways_native.jl, shared helpers in
+section_properties_common.jl, and plot_sections.jl: the heat and freshwater errors split into a volume part and a
+property part, and the sections model beside GLORYS.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AbhhvncDb1PnxFVHRBrPRS
+---
+ nested/glorys_gateways_native.jl    | 42 +++++++++++++
+ nested/plot_sections.jl             | 96 +++++++++++++++++++++++++++++
+ nested/section_properties.jl        | 71 +++++++++++++++++++++
+ nested/section_properties_common.jl | 41 ++++++++++++
+ 4 files changed, 250 insertions(+)
+ create mode 100644 nested/plot_sections.jl
+ create mode 100644 nested/section_properties.jl
+ create mode 100644 nested/section_properties_common.jl
+
+diff --git a/nested/glorys_gateways_native.jl b/nested/glorys_gateways_native.jl
+index c7ec008..3df2e68 100644
+--- a/nested/glorys_gateways_native.jl
++++ b/nested/glorys_gateways_native.jl
+@@ -11,6 +11,8 @@
+ #   glorys_gateways_modelline.csv  through the model's staircase for that line (its cell corners at this resolution),
+ #                                  still on GLORYS's grid: the difference from the first file is what the model's
+ #                                  placement of the line alone changes
++#   glorys_gateways_inout.csv      inflow and outflow separately, and glorys_section_<name>.csv, the mean section of
++#                                  normal velocity, T and S (as section_properties.jl writes for the model)
+ #   glorys_arctic_budget.csv       GLORYS's Arctic volume budget: the four gateways plus Fury and Hecla Strait against
+ #                                  the change in its sea level inside them (the closure check of the reference)
+ # and prints a table per day plus the sum of the four.
+@@ -199,6 +201,31 @@ function native_transport(box::GatewayBox, faces, Tʳᵉᶠ, u, v, T, S)
+     return volume, heat, freshwater
+ end
+ 
++# Each wet face and level: position (the face's centre), depth, thickness, width, normal velocity, T and S, as
++# section_records in section_properties.jl does on the model grid
++function native_records(box::GatewayBox, faces, u, v, T, S)
++    records = []
++    c  = box.corners
++    Nk = length(box.zf) - 1
++    for (kind, I, J, sgn) in faces
++        (a, b), L = face_geometry(box, kind, I, J)
++        (inside(u, a) && inside(u, b)) || continue
++        floor = min(box.deptho[a...], box.deptho[b...])
++        wet_floor(floor) || continue
++        λ, φ = kind === :v ? (c.λ₀ + (I - 1/2) * c.Δλ, c.φ₀ + (J - 1) * c.Δφ) : (c.λ₀ + (I - 1) * c.Δλ, c.φ₀ + (J - 1/2) * c.Δφ)
++        velocity = kind === :v ? v : u
++        for k in 1:Nk
++            box.zf[k] ≥ floor && break
++            Δz = min(box.zf[k + 1], floor) - box.zf[k]
++            va, vb = velocity[a..., k], velocity[b..., k]
++            (isfinite(va) && isfinite(vb)) || continue
++            push!(records, (; key = (kind, I, J, k), λ, φ, z = -(box.zf[k] + Δz / 2), Δz, width = L,
++                              velocity = sgn * (va + vb) / 2, T = (T[a..., k] + T[b..., k]) / 2, S = (S[a..., k] + S[b..., k]) / 2))
++        end
++    end
++    return records
++end
++
+ # ## The model's staircase for each line, as (longitude, latitude) of its corners
+ 
+ model_grid = on_architecture(CPU(), grid)
+@@ -344,6 +371,11 @@ for _ in 1:length(boxes) + 1
+ end
+ println()
+ 
++include("section_properties_common.jl")
++inout_file = joinpath(output_dir, "glorys_gateways_inout.csv")
++open(io -> println(io, inout_header([b.name for b in boxes])), inout_file, "w")
++section_means = Dict(b.name => Dict() for b in boxes)
++
+ gateway_sum = Float64[]
+ budget_lines = [g for (g, l) in enumerate(gateway_lines) if l[1] in arctic_gateways]   # the four, not the CAA channels
+ fury_hecla  = Float64[]
+@@ -351,6 +383,7 @@ volume      = Float64[]
+ 
+ for (n, date) in enumerate(run_dates)
+     rows = (Float64[24 * (n - 1) + 12], Float64[24 * (n - 1) + 12])   # GLORYS daily means are centred at noon
++    inout_row = Float64[24 * (n - 1) + 12]
+     for b in boxes
+         uᴳ = read_variable(:u_velocity,  GLORYSDaily(), b.region; date).data
+         vᴳ = read_variable(:v_velocity,  GLORYSDaily(), b.region; date).data
+@@ -360,8 +393,12 @@ for (n, date) in enumerate(run_dates)
+             Q, H, F = native_transport(b.box, faces, b.Tʳᵉᶠ, uᴳ, vᴳ, Tᴳ, Sᴳ)
+             append!(row, (Q / 1e6, H / 1e12, F / 1e3))
+         end
++        records = native_records(b.box, b.faces, uᴳ, vᴳ, Tᴳ, Sᴳ)
++        append!(inout_row, inflow_outflow(records, b.Tʳᵉᶠ))
++        accumulate_section!(section_means[b.name], records)
+     end
+     foreach(write_gateway_row, files, rows)
++    write_gateway_row(inout_file, inout_row)
+ 
+     Qᶜ = 0.0
+     for b in closure_boxes
+@@ -382,6 +419,11 @@ end
+ println("\nvolume transport, Sv, positive into the Arctic; line = the gateway line, model = the model's staircase for it;")
+ println("F&H = Fury and Hecla Strait (positive into the Arctic)")
+ @info "Wrote $(files[1]) and $(files[2])"
++line_start = Dict(name => points[1] for (name, points, _) in gateway_lines)
++for b in boxes
++    write_section(joinpath(output_dir, "glorys_section_$(b.name).csv"), line_start[b.name], section_means[b.name])
++end
++@info "Wrote $inout_file and glorys_section_<name>.csv"
+ 
+ # ## The budget, between consecutive daily means (at midnight)
+ 
+diff --git a/nested/plot_sections.jl b/nested/plot_sections.jl
+new file mode 100644
+index 0000000..c8b2d19
+--- /dev/null
++++ b/nested/plot_sections.jl
+@@ -0,0 +1,96 @@
++# The water crossing the gateways, run against GLORYS: inflow and outflow, their transport-weighted temperature and
++# salinity, and the heat and freshwater errors split into a volume part (too much or too little water, carrying
++# GLORYS's temperature or salinity) and a property part (the same water, warmer or saltier than GLORYS's). Then the
++# mean sections of normal velocity, T and S, model beside GLORYS.
++#
++#   julia --project=.. plot_sections.jl <output_dir> [gateway ...] [depth=500]      (default gateways: bso fram)
++#
++# Needs gateways_inout.csv and section_<name>.csv (section_properties.jl) and glorys_gateways_inout.csv and
++# glorys_section_<name>.csv (glorys_gateways_native.jl). Writes sections_<name>.png.
++
++using CairoMakie, DelimitedFiles, Printf
++
++const ρ₀cₚ = 1026 * 3991.9
++const Sʳᵉᶠ = 34.8
++reference_temperature(name) = name == "bering" ? -1.9 : 0.0   # as gateway_lines in gateways.jl
++
++folder   = ARGS[1]
++options  = filter(a -> occursin('=', a), ARGS[2:end])
++gateways = filter(a -> !occursin('=', a), ARGS[2:end])
++isempty(gateways) && (gateways = ["bso", "fram"])
++maxdepth = any(startswith("depth="), options) ? parse(Float64, split(only(filter(startswith("depth="), options)), '=')[2]) : Inf
++
++function read_csv(path)
++    data, header = readdlm(path, ',', Float64; header = true)
++    return Dict(String(h) => data[:, c] for (c, h) in enumerate(vec(header)))
++end
++
++model  = read_csv(joinpath(folder, "gateways_inout.csv"))
++glorys = read_csv(joinpath(folder, "glorys_gateways_inout.csv"))
++common = intersect(round.(Int, model["hour"]), round.(Int, glorys["hour"]))
++isempty(common) && error("the model and GLORYS files have no day in common")
++average(d, column) = sum(d[column][i] for i in eachindex(d["hour"]) if round(Int, d["hour"][i]) in common) / length(common)
++
++#####
++##### Inflow and outflow, and where the heat and freshwater errors come from
++#####
++
++println("\n$folder: means over the $(length(common)) days with both model and GLORYS. Positive into the Arctic.")
++println("Heat relative to 0 °C (Bering −1.9 °C), freshwater to 34.8. θ, S: transport-weighted temperature and salinity.")
++println("Error split: volume part = (Q − Q_G) × GLORYS's heat or freshwater per Sv; property part = the rest.\n")
++@printf("%-7s %-4s %16s %14s %16s %21s %23s\n", "", "", "Q (Sv)", "θ (°C)", "S", "heat error (TW)", "freshwater error (mSv)")
++@printf("%-7s %-4s %16s %14s %16s %21s %23s\n", "", "", "model GLORYS", "model GLORYS", "model GLORYS", "total vol. prop.", "total vol. prop.")
++for name in gateways, direction in ("in", "out")
++    column(q) = "$(name)_$(direction)_$(q)"
++    Qm, Hm, Fm = (average(model,  column(q)) for q in ("volume_Sv", "heat_TW", "freshwater_mSv"))
++    Qg, Hg, Fg = (average(glorys, column(q)) for q in ("volume_Sv", "heat_TW", "freshwater_mSv"))
++    θ(H, Q) = reference_temperature(name) + H * 1e12 / (ρ₀cₚ * Q * 1e6)
++    S(F, Q) = Sʳᵉᶠ * (1 - F * 1e3 / (Q * 1e6))
++    heat_volume, freshwater_volume = (Qm - Qg) * Hg / Qg, (Qm - Qg) * Fg / Qg
++    @printf("%-7s %-4s %7.2f %8.2f %6.2f %7.2f %7.3f %8.3f %7.1f %6.1f %6.1f %7.1f %7.1f %7.1f\n",
++            name, direction, Qm, Qg, θ(Hm, Qm), θ(Hg, Qg), S(Fm, Qm), S(Fg, Qg),
++            Hm - Hg, heat_volume, Hm - Hg - heat_volume, Fm - Fg, freshwater_volume, Fm - Fg - freshwater_volume)
++end
++println()
++
++#####
++##### Mean sections
++#####
++
++# A rectangle per face and level: columns between the midpoints of neighbouring positions along the line
++function rectangles(section)
++    s = section["s_km"]
++    columns = sort(unique(s))
++    gap = length(columns) > 1 ? minimum(diff(columns)) : 1.0
++    edges = [columns[1] - gap / 2; (columns[1:end-1] .+ columns[2:end]) ./ 2; columns[end] + gap / 2]
++    column = Dict(c => n for (n, c) in enumerate(columns))
++    return [Rect2f(edges[column[s[i]]], section["z_m"][i] - section["dz_m"][i] / 2,
++                   edges[column[s[i]] + 1] - edges[column[s[i]]], section["dz_m"][i]) for i in eachindex(s)]
++end
++
++percentile(x, p) = sort(x)[clamp(round(Int, p * length(x)), 1, length(x))]
++
++for name in gateways
++    sections = [read_csv(joinpath(folder, file)) for file in ("section_$name.csv", "glorys_section_$name.csv")]
++    shapes = rectangles.(sections)
++    deepest = min(maxdepth, maximum(maximum(-sec["z_m"] .+ sec["dz_m"] ./ 2) for sec in sections))
++
++    fig = Figure(size = (1300, 1000))
++    variables = (("velocity_ms", "normal velocity (m/s, + into the Arctic)", :balance),
++                 ("T_C", "temperature (°C)", :thermal),
++                 ("S", "salinity", :haline))
++    for (row, (key, label, colormap)) in enumerate(variables)
++        values = vcat((sec[key] for sec in sections)...)
++        color_limits = key == "velocity_ms" ? (-1, 1) .* percentile(abs.(values), 0.98) :
++                                       (percentile(values, 0.02), percentile(values, 0.98))
++        for (col, title) in enumerate(("model", "GLORYS"))
++            ax = Axis(fig[row, col]; title = "$name: $title, $label", xlabel = "distance along the line (km)",
++                      ylabel = "z (m)", limits = (nothing, (-deepest, 0)))
++            poly!(ax, shapes[col]; color = sections[col][key], colormap, colorrange = color_limits, strokewidth = 0)
++        end
++        Colorbar(fig[row, 3]; colormap, limits = color_limits, label)
++    end
++    path = joinpath(folder, "sections_$name.png")
++    save(path, fig)
++    @info "Wrote $path"
++end
+diff --git a/nested/section_properties.jl b/nested/section_properties.jl
+new file mode 100644
+index 0000000..f35d94f
+--- /dev/null
++++ b/nested/section_properties.jl
+@@ -0,0 +1,71 @@
++# What the water crossing each gateway carries: inflow and outflow separately, and the mean section of normal velocity,
++# temperature and salinity, from the daily 3-D output of a run (nested_ocean_3d.jld2, [output] ocean_3d_days).
++#
++#   julia --project=. section_properties.jl runs/<run>.toml
++#
++# Writes in the run's output_dir:
++#   gateways_inout.csv     per average: volume (Sv), heat (TW) and freshwater (mSv) carried into the Arctic (inflow) and
++#                          out of it (outflow) through each gateway line of gateways.jl, references as in gateways.jl
++#   section_<name>.csv     the mean over the run, per face and level: distance along the line, position, depth,
++#                          thickness, width, normal velocity (positive into the Arctic), T, S
++# glorys_gateways_native.jl writes the same for GLORYS on its own grid (glorys_gateways_inout.csv,
++# glorys_section_<name>.csv); plot_sections.jl compares the two.
++
++ENV["PANARCTIC_ARCHITECTURE"] = "CPU"
++include("setup.jl")
++include("gateways.jl")
++include("section_properties_common.jl")
++
++using Oceananigans.Grids: znode
++
++file = joinpath(output_dir, "nested_ocean_3d.jld2")
++isfile(file) || error("$file not found: run with [output] ocean_3d_days")
++average_days = config["output"]["ocean_3d_days"]
++
++Tₜ, Sₜ, uₜ, vₜ = (FieldTimeSeries(file, name) for name in ("T", "S", "u", "v"))
++sections = gateway_sections(Tₜ.grid)
++line_start = Dict(name => points[1] for (name, points, _) in gateway_lines)
++
++# Each wet face and level of a section: position, depth, thickness, width, normal velocity, T and S on the face
++function section_records(section, u, v, T, S)
++    g = v.grid
++    records = []
++    for (kind, i, j, sgn) in section.faces, k in 1:size(g, 3)
++        wet_face(kind, i, j, k, g) || continue
++        ℓ = kind === :v ? (Center(), Face(), Center()) : (Face(), Center(), Center())
++        width, Δz = kind === :v ? (Δxᶜᶠᶜ(i, j, k, g), Δzᶜᶠᶜ(i, j, k, g)) : (Δyᶠᶜᶜ(i, j, k, g), Δzᶠᶜᶜ(i, j, k, g))
++        velocity = sgn * (kind === :v ? v[i, j, k] : u[i, j, k])
++        i₀, j₀ = kind === :v ? (i, j - 1) : (i - 1, j)
++        wet₀ = !inactive_node(i₀, j₀, k, g, Center(), Center(), Center())
++        wet₁ = !inactive_node(i, j, k, g, Center(), Center(), Center())
++        Tᶠ = (wet₀ * T[i₀, j₀, k] + wet₁ * T[i, j, k]) / (wet₀ + wet₁)
++        Sᶠ = (wet₀ * S[i₀, j₀, k] + wet₁ * S[i, j, k]) / (wet₀ + wet₁)
++        push!(records, (; key = (kind, i, j, k), λ = λnode(i, j, k, g, ℓ...), φ = φnode(i, j, k, g, ℓ...),
++                          z = znode(i, j, k, g, ℓ...), Δz, width, velocity, T = Tᶠ, S = Sᶠ))
++    end
++    return records
++end
++
++inout_file = joinpath(output_dir, "gateways_inout.csv")
++open(io -> println(io, inout_header([s.name for s in sections])), inout_file, "w")
++means = Dict(s.name => Dict() for s in sections)
++
++for n in eachindex(Tₜ.times)
++    Tₜ.times[n] == 0 && continue                                       # the initial state, not an average
++    hour = Tₜ.times[n] / 3600 - 12 * average_days                      # centre of the averaging window
++    row = Float64[hour]
++    u, v, T, S = uₜ[n], vₜ[n], Tₜ[n], Sₜ[n]
++    for s in sections
++        records = section_records(s, u, v, T, S)
++        append!(row, inflow_outflow(records, s.Tʳᵉᶠ))
++        accumulate_section!(means[s.name], records)
++    end
++    write_gateway_row(inout_file, row)
++    @info @sprintf("hour %6.1f: ", hour) *
++          join((@sprintf("%s in %+.2f out %+.2f Sv", s.name, row[6g - 4], row[6g - 1]) for (g, s) in enumerate(sections)), ", ")
++end
++
++for s in sections
++    write_section(joinpath(output_dir, "section_$(s.name).csv"), line_start[s.name], means[s.name])
++end
++@info "Wrote $inout_file and section_<name>.csv for $(join((s.name for s in sections), ", "))"
+diff --git a/nested/section_properties_common.jl b/nested/section_properties_common.jl
+new file mode 100644
+index 0000000..2bbf49c
+--- /dev/null
++++ b/nested/section_properties_common.jl
+@@ -0,0 +1,41 @@
++# Shared by section_properties.jl (model) and glorys_gateways_native.jl (GLORYS): inflow and outflow through a section,
++# and its mean section, from per-face-and-level records (λ, φ, z, Δz, width, velocity, T, S). Needs gateways.jl.
++
++# Volume (Sv), heat (TW) and freshwater (mSv) carried by the inflow (velocity > 0, into the Arctic) and by the outflow
++function inflow_outflow(records, Tʳᵉᶠ)
++    sums = zeros(6)
++    for r in records
++        q = r.velocity * r.width * r.Δz
++        isfinite(q) && isfinite(r.T) && isfinite(r.S) || continue
++        n = q > 0 ? 0 : 3
++        sums[n + 1] += q / 1e6
++        sums[n + 2] += ρ₀cₚ * q * (r.T - Tʳᵉᶠ) / 1e12
++        sums[n + 3] += q * (1 - r.S / Sʳᵉᶠ) / 1e3
++    end
++    return sums
++end
++
++inout_header(names) = join(["hour"; [n * "_" * d * "_" * q for n in names for d in ("in", "out")
++                                     for q in ("volume_Sv", "heat_TW", "freshwater_mSv")]], ',')
++
++# Add one day's records to the running sums per face and level
++function accumulate_section!(means, records)
++    for r in records
++        isfinite(r.velocity) && isfinite(r.T) && isfinite(r.S) || continue
++        m = get!(means, r.key, (; r.λ, r.φ, r.z, r.Δz, r.width, velocity = 0.0, T = 0.0, S = 0.0, n = 0))
++        means[r.key] = merge(m, (; velocity = m.velocity + r.velocity, T = m.T + r.T, S = m.S + r.S, n = m.n + 1))
++    end
++    return means
++end
++
++# The means, with the distance along the line from its first point
++function write_section(path, start, means)
++    open(path, "w") do io
++        println(io, "s_km,lon,lat,z_m,dz_m,width_m,velocity_ms,T_C,S")
++        for m in values(means)
++            s = 6371 * deg2rad(great_circle(start..., m.λ, m.φ))
++            println(io, join((@sprintf("%.6g", x) for x in (s, m.λ, m.φ, m.z, m.Δz, m.width,
++                                                            m.velocity / m.n, m.T / m.n, m.S / m.n)), ','))
++        end
++    end
++end
+-- 
+2.43.0
+
