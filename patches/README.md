@@ -39,6 +39,7 @@ Numbered in the order to apply, across repositories. Each was checked to apply w
 | 031 | PanArcticShenanigans | `fjp/nested` | after 028 | `[output] ocean_3d_days` (daily averages of 3-D T, S, u, v in `nested_ocean_3d.jld2`); `runs/tsubouchi-2005-15km-partial-hybridwet-2mo.toml` (production settings, 61 days, fix with wet cells only) |
 | 032 | PanArcticShenanigans | `fjp/nested` | after 031 | `section_properties.jl` (model inflow/outflow and mean sections from the 3-D output), the same for GLORYS in `glorys_gateways_native.jl`, `section_properties_common.jl`, `plot_sections.jl` (heat and freshwater errors split into volume and property parts; sections model vs GLORYS) |
 | 033 | Oceananigans | `fjp/mass-consistent-bottom-advection` (PR #6533) | after 030 | the fix only for vector-invariant schemes whose kinetic-energy-gradient scheme has momentum fluxes (WENO, centred, upwind); `VectorInvariant()` (EnergyConserving) keeps the stock form (CI failure in `simulation/netcdf_writer`) |
+| 034 | PanArcticShenanigans | `fjp/nested` | after 032 | inflow/outflow and sections per 30 km stretch of the line and level (`binned` in `section_properties_common.jl`), not per staircase face; rerun `glorys_gateways_native.jl`, `section_properties.jl`, `plot_sections.jl` |
 
 ## Applying 001–006
 
