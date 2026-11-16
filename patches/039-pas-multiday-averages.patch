@@ -1,0 +1,95 @@
+From f616b5109d3f16ca057133cad22e4bc969ceca85 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 16 Nov 2026 08:50:12 -0500
+Subject: [PATCH] plot_sections.jl, coastal_salinity.jl: compare with GLORYS
+ averaged over each model averaging window
+
+Runs with [output] ocean_3d_days = 2 have averages centred between GLORYS's daily means, so
+matching single days found none.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AbhhvncDb1PnxFVHRBrPRS
+---
+ nested/coastal_salinity.jl | 17 ++++++++++++-----
+ nested/plot_sections.jl    | 14 ++++++++++----
+ 2 files changed, 22 insertions(+), 9 deletions(-)
+
+diff --git a/nested/coastal_salinity.jl b/nested/coastal_salinity.jl
+index d40be3a..7a7b298 100644
+--- a/nested/coastal_salinity.jl
++++ b/nested/coastal_salinity.jl
+@@ -99,16 +99,23 @@ glorys_salinity = map(glorys_dates) do date
+ end
+ glorys_hours = [24 * (n - 1) + 12 for n in eachindex(glorys_dates)]
+ 
++# GLORYS averaged over the days of the model average centred at `hour`
++function glorys_over_window(hour)
++    days = findall(h -> abs(h - hour) < 12 * average_days, glorys_hours)
++    isempty(days) && return nothing
++    return sum(glorys_salinity[days]) / length(days)
++end
++
+ # ## Table and file
+ 
+ csv = joinpath(output_dir, "coastal_salinity.csv")
+ open(csv, "w") do io
+     println(io, join(["hour"; [s[1] * suffix for s in stations for suffix in (" model", " GLORYS")]], ','))
+     for (n, hour) in enumerate(model_hours)
+-        g = findfirst(h -> abs(h - hour) < 1, glorys_hours)
++        g = glorys_over_window(hour)
+         isnothing(g) && continue
+         println(io, join([@sprintf("%.1f", hour); [@sprintf("%.3f", x) for s in eachindex(stations)
+-                                                     for x in (model_salinity[n][s], glorys_salinity[g][s])]], ','))
++                                                     for x in (model_salinity[n][s], g[s])]], ','))
+     end
+ end
+ 
+@@ -116,12 +123,12 @@ end
+ foreach(s -> @printf(" %15s", s[1]), stations)
+ println()
+ for (n, hour) in enumerate(model_hours)
+-    day = round(Int, (hour + 12) / 24)
++    day = round(Int, hour / 24 + average_days / 2)
+     (day == 1 || day % 5 == 0 || n == length(model_hours)) || continue
+-    g = findfirst(h -> abs(h - hour) < 1, glorys_hours)
++    g = glorys_over_window(hour)
+     isnothing(g) && continue
+     @printf("%-6d", day)
+-    foreach(s -> @printf("   %5.2f / %5.2f", model_salinity[n][s], glorys_salinity[g][s]), eachindex(stations))
++    foreach(s -> @printf("   %5.2f / %5.2f", model_salinity[n][s], g[s]), eachindex(stations))
+     println()
+ end
+ @info "Wrote $csv"
+diff --git a/nested/plot_sections.jl b/nested/plot_sections.jl
+index c8b2d19..5058ad6 100644
+--- a/nested/plot_sections.jl
++++ b/nested/plot_sections.jl
+@@ -27,15 +27,21 @@ end
+ 
+ model  = read_csv(joinpath(folder, "gateways_inout.csv"))
+ glorys = read_csv(joinpath(folder, "glorys_gateways_inout.csv"))
+-common = intersect(round.(Int, model["hour"]), round.(Int, glorys["hour"]))
+-isempty(common) && error("the model and GLORYS files have no day in common")
+-average(d, column) = sum(d[column][i] for i in eachindex(d["hour"]) if round(Int, d["hour"][i]) in common) / length(common)
++# The model's averages may cover several days each (centred hours 24, 72, … for 2-day averages); GLORYS's are daily.
++# Both are averaged over the days the model's averages cover.
++model_hours = model["hour"]
++window = length(model_hours) > 1 ? model_hours[2] - model_hours[1] : 24.0
++covered(hour) = model_hours[1] - window / 2 < hour < model_hours[end] + window / 2
++glorys_rows = findall(covered, glorys["hour"])
++isempty(glorys_rows) && error("no GLORYS day falls within the model's averages")
++days_covered = round(Int, length(model_hours) * window / 24)
++average(d, column) = d === model ? sum(d[column]) / length(d[column]) : sum(d[column][glorys_rows]) / length(glorys_rows)
+ 
+ #####
+ ##### Inflow and outflow, and where the heat and freshwater errors come from
+ #####
+ 
+-println("\n$folder: means over the $(length(common)) days with both model and GLORYS. Positive into the Arctic.")
++println("\n$folder: means over the $days_covered days of the model's averages. Positive into the Arctic.")
+ println("Heat relative to 0 °C (Bering −1.9 °C), freshwater to 34.8. θ, S: transport-weighted temperature and salinity.")
+ println("Error split: volume part = (Q − Q_G) × GLORYS's heat or freshwater per Sv; property part = the rest.\n")
+ @printf("%-7s %-4s %16s %14s %16s %21s %23s\n", "", "", "Q (Sv)", "θ (°C)", "S", "heat error (TW)", "freshwater error (mSv)")
+-- 
+2.43.0
+
