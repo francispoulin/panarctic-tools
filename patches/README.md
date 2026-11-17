@@ -53,6 +53,7 @@ Numbered in the order to apply, across repositories. Each was checked to apply w
 | 045 | PanArcticShenanigans | `fjp/merge-nested` | after 043 (on top of 044) | volume control on by default (`volume_control.jl`, from `glorys_volume_target.jl`): net inflow follows GLORYS's domain-mean η, relaxation 1 day, pin ∝ H^½; `net_inflow_Sv` or Flather alone as alternatives; hourly volume log line |
 | 046 | PanArcticShenanigans | `fjp/merge-nested` | after 045 | hourly `monitor.csv` (`[output] monitor_hours = 1`): open-side transports, mean η vs GLORYS, volume budget, fastest point; `plotting/volume_budget.jl`, `plotting/max_speed.jl` (from fjp/nested, without the dropped volume-control diagnostics) |
 | 047 | PanArcticShenanigans | `fjp/merge-nested` | after 046 | `[atmosphere] inverse_barometer = true` (default; #676 option, issue #37); `jra55_read_fix.jl` (runs can start on any date); `config_smoke_test_sep2005.toml` |
+| 048 | PanArcticShenanigans | `fjp/merge-nested` | after 047 | `partial_cell_fix.jl` (Oceananigans #6533 as run-time override, `[grid] partial_cell_fix = true`); `[grid] bathymetry` GEBCO2026/ETOPO/GLORYS (`glorys_bathymetry.jl`), `[grid] bottom` partial/full |
 
 ## Applying 001–006
 

@@ -1,0 +1,285 @@
+From 650445dd9d7a59dfbf51f7e76f4aa4e5a91ce3d0 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 17 Nov 2026 12:02:30 -0500
+Subject: [PATCH] Partial-cell fix on by default (Oceananigans.jl#6533);
+ bathymetry and bottom-cell options
+
+partial_cell_fix.jl: Oceananigans.jl PR #6533 (issue #6532) as a run-time override until it is released
+(it is on Oceananigans 0.118; NumericalEarth is on 0.117). With partial bottom cells, WENOVectorInvariant lets
+jets grow in thin bottom cells next to thicker ones: the 100 km smoke test had 0.9 m/s at 2450 m in the
+partial bottom cell of the Atlantic open side (Labrador Sea). Where the wet thickness of the bottom cells
+around a velocity face changes by more than 1 %, momentum is advected in flux form; elsewhere nothing
+changes, and whole-cell grids are untouched. [grid] partial_cell_fix = true (default).
+
+[grid] bathymetry = "GEBCO2026" (default, as before) | "ETOPO" | "GLORYS" (GLORYS's own sea floor,
+glorys_bathymetry.jl from fjp/nested), and [grid] bottom = "partial" (default, as before) | "full".
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Abhhvkp8Pai9cvvctGUDX5
+---
+ config.toml                    |  4 ++
+ config_smoke_test.toml         |  4 ++
+ config_smoke_test_sep2005.toml |  4 ++
+ glorys_bathymetry.jl           | 54 +++++++++++++++++++++++++++
+ panarctic.jl                   |  3 ++
+ partial_cell_fix.jl            | 67 ++++++++++++++++++++++++++++++++++
+ setup.jl                       | 40 ++++++++++++++------
+ 7 files changed, 165 insertions(+), 11 deletions(-)
+ create mode 100644 glorys_bathymetry.jl
+ create mode 100644 partial_cell_fix.jl
+
+diff --git a/config.toml b/config.toml
+index 12ffdf4..608eea7 100644
+--- a/config.toml
++++ b/config.toml
+@@ -13,6 +13,10 @@ experiment   = "test"  # name of the run: output and figures go to output_dir/<e
+ spacing_km = 15     # largest horizontal grid spacing [km] (at the pole; ~15% finer near the Atlantic edge)
+ Nz         = 20     # vertical levels
+ depth      = 5000   # maximum depth (m)
++bathymetry       = "GEBCO2026"   # "GEBCO2026" (15″, with IBCAO), "ETOPO" (ETOPO 2022, 60″) or "GLORYS" (GLORYS's own sea floor)
++bottom           = "partial"     # "partial": bottom cells cut at the sea floor; "full": whole cells
++partial_cell_fix = true          # with partial cells: flux-form momentum advection at bottom-cell thickness jumps
++                                 # (Oceananigans.jl#6533), which removes the bottom jets of issue #6532
+ 
+ [time]
+ start_date = 1993-01-01   # initial condition (GLORYS); the run starts at 00:00 on this date
+diff --git a/config_smoke_test.toml b/config_smoke_test.toml
+index e1b5cf9..64ea840 100644
+--- a/config_smoke_test.toml
++++ b/config_smoke_test.toml
+@@ -15,6 +15,10 @@ experiment   = "smoke_test"  # name of the run: output and figures go to output_
+ spacing_km = 100    # largest horizontal grid spacing [km] (at the pole; ~15% finer near the Atlantic edge)
+ Nz         = 20     # vertical levels
+ depth      = 5000   # maximum depth (m)
++bathymetry       = "GEBCO2026"   # "GEBCO2026" (15″, with IBCAO), "ETOPO" (ETOPO 2022, 60″) or "GLORYS" (GLORYS's own sea floor)
++bottom           = "partial"     # "partial": bottom cells cut at the sea floor; "full": whole cells
++partial_cell_fix = true          # with partial cells: flux-form momentum advection at bottom-cell thickness jumps
++                                 # (Oceananigans.jl#6533), which removes the bottom jets of issue #6532
+ 
+ [time]
+ start_date = 1993-01-01   # initial condition (GLORYS); the run starts at 00:00 on this date
+diff --git a/config_smoke_test_sep2005.toml b/config_smoke_test_sep2005.toml
+index 81f6f1a..a59c65f 100644
+--- a/config_smoke_test_sep2005.toml
++++ b/config_smoke_test_sep2005.toml
+@@ -14,6 +14,10 @@ experiment   = "smoke_test_sep2005"  # name of the run: output and figures go to
+ spacing_km = 100    # largest horizontal grid spacing [km] (at the pole; ~15% finer near the Atlantic edge)
+ Nz         = 20     # vertical levels
+ depth      = 5000   # maximum depth (m)
++bathymetry       = "GEBCO2026"   # "GEBCO2026" (15″, with IBCAO), "ETOPO" (ETOPO 2022, 60″) or "GLORYS" (GLORYS's own sea floor)
++bottom           = "partial"     # "partial": bottom cells cut at the sea floor; "full": whole cells
++partial_cell_fix = true          # with partial cells: flux-form momentum advection at bottom-cell thickness jumps
++                                 # (Oceananigans.jl#6533), which removes the bottom jets of issue #6532
+ 
+ [time]
+ start_date = 2005-09-01   # initial condition (GLORYS); the run starts at 00:00 on this date
+diff --git a/glorys_bathymetry.jl b/glorys_bathymetry.jl
+new file mode 100644
+index 0000000..fb55dbb
+--- /dev/null
++++ b/glorys_bathymetry.jl
+@@ -0,0 +1,54 @@
++# GLORYS's own sea floor (`deptho`, static file) regridded onto the model grid, for [grid] bathymetry = "GLORYS", so the
++# gateways and sills have the depths GLORYS's transports were computed over. Same steps as NumericalEarth's
++# regrid_bathymetry (interpolation passes, minimum depth, removal of minor basins). NumericalEarth cannot read `deptho`
++# as a bathymetry (it has no value on land), so the file is read here and land is set to `land_height` first, as
++# `height_above_water` does in regrid_bathymetry. Taken from fjp/nested (adapted from the port, fjp/hybrid-obc).
++
++using NumericalEarth.DataWrangling: NCDatasets, metadata_path, BoundingBox, Metadatum
++using NumericalEarth.DataWrangling: default_horizontal_padding
++using NumericalEarth.DataWrangling.GLORYS: GLORYSStatic, GLORYSDaily
++using .NCDatasets: Dataset, dimnames
++using Oceananigans.BoundaryConditions: fill_halo_regions!
++using Oceananigans.Utils: launch!
++using Downloads, Printf
++
++function glorys_bottom_height(target_grid; minimum_depth = 15, interpolation_passes = 2, major_basins = 1, land_height = 50)
++    region = BoundingBox(target_grid; padding = default_horizontal_padding(GLORYSDaily()))
++    metadatum = Metadatum(:depth; dataset = GLORYSStatic(), region, dir_kw...)
++    Downloads.download(metadatum)
++    path = metadata_path(metadatum)
++    ds = Dataset(path)
++    var = ds["deptho"]
++    names = dimnames(var)
++    lon = Float64.(ds["longitude"][:])
++    lat = Float64.(ds["latitude"][:])
++    depth = Float64.(coalesce.(var[:, :], NaN))                    # positive down; missing on land
++    close(ds)
++    names[1] == "longitude" || (depth = permutedims(depth))
++    size(depth) == (length(lon), length(lat)) || error("unexpected shape $(size(depth)) of deptho in $path")
++
++    z = ifelse.(isnan.(depth) .| (depth .≤ 0), Float64(land_height), -depth)
++
++    Δλ, Δφ = lon[2] - lon[1], lat[2] - lat[1]
++    periodic = isapprox(length(lon) * Δλ, 360; atol = Δλ / 2)
++    TX = periodic ? Periodic : Bounded
++    west = lon[1] - Δλ / 2
++    east = periodic ? west + 360 : lon[end] + Δλ / 2
++    native_grid = LatitudeLongitudeGrid(CPU(); size = (length(lon), length(lat), 1),
++                                        longitude = (west, east),
++                                        latitude  = (lat[1] - Δφ / 2, min(90, lat[end] + Δφ / 2)),
++                                        z = (0, 1), topology = (TX, Bounded, Bounded), halo = (10, 10, 1))
++    native_z = Field{Center, Center, Nothing}(native_grid)
++    set!(native_z, z)
++    fill_halo_regions!(native_z)
++
++    target_z = NumericalEarth.Bathymetry.interpolate_bathymetry_in_passes(native_z, target_grid; passes = interpolation_passes)
++    minimum_depth > 0 &&
++        launch!(CPU(), target_grid, :xy, NumericalEarth.Bathymetry._enforce_minimum_depth!, target_z, minimum_depth)
++    NumericalEarth.Bathymetry.remove_minor_basins!(target_z, major_basins)
++    fill_halo_regions!(target_z)
++
++    @info @sprintf("GLORYS bathymetry from %s: %d of %d columns wet, deepest %.0f m", path,
++                   count(<(0), interior(target_z)), length(interior(target_z)), -minimum(interior(target_z)))
++    return target_z
++end
+diff --git a/panarctic.jl b/panarctic.jl
+index 8166f8a..fa2054b 100644
+--- a/panarctic.jl
++++ b/panarctic.jl
+@@ -4,6 +4,9 @@
+ 
+ include("setup.jl")
+ include("jra55_read_fix.jl")
++
++# Mass-consistent momentum advection at partial bottom cells (Oceananigans.jl#6533), before the model is built
++get(config["grid"], "partial_cell_fix", false) && grid.immersed_boundary isa PartialCellBottom && include("partial_cell_fix.jl")
+ include("transports.jl")
+ include("volume_control.jl")
+ include("monitor.jl")
+diff --git a/partial_cell_fix.jl b/partial_cell_fix.jl
+new file mode 100644
+index 0000000..831d1d1
+--- /dev/null
++++ b/partial_cell_fix.jl
+@@ -0,0 +1,67 @@
++# Mass-consistent momentum advection at bottom-cell thickness jumps: Oceananigans.jl PR #6533 (issue #6532), as a
++# run-time override until it is released (it is on Oceananigans 0.118, and NumericalEarth is on 0.117).
++#
++# With partial bottom cells, WENOVectorInvariant lets a jet grow in a thin bottom cell next to a thicker one (deep
++# currents of ~1 m/s, in the interior and at the open sides): its kinetic-energy gradient and vertical term do not use
++# the transports that carry the u-cell's mass. Where the wet thickness of the bottom cells around a velocity face
++# changes by more than 1 %, momentum is advected in flux form (with the scheme's own kinetic-energy-gradient scheme
++# and the curvature terms); everywhere else the vector-invariant form is unchanged. Immersed cells are ignored, so a
++# whole-cell grid (and every face away from a partial bottom cell) is exactly as before. Only partial-cell grids
++# (PCBIBG) are affected.
++#
++# [grid] partial_cell_fix = true (default) includes this file in panarctic.jl, before the model is built.
++# Remove this file once the Oceananigans that NumericalEarth uses contains PR #6533.
++
++@eval Oceananigans.Advection begin
++    using Oceananigans.Grids: inactive_node, topology
++    using Oceananigans.Operators: Δrᶜᶜᶜ
++    using Oceananigans.ImmersedBoundaries: PCBIBG
++
++    @inline mass_consistent_wet_thickness(i, j, k, grid) =
++        ifelse(inactive_node(i, j, k, grid, Center(), Center(), Center()), zero(grid), Δrᶜᶜᶜ(i, j, k, grid))
++
++    # immersed cells (thickness 0) are ignored
++    @inline function mass_consistent_wet_thickness_changes(a, b, c, d)
++        hi = max(a, b, c, d)
++        lo = min(ifelse(a == 0, hi, a), ifelse(b == 0, hi, b), ifelse(c == 0, hi, c), ifelse(d == 0, hi, d))
++        return 100 * (hi - lo) > hi
++    end
++
++    # T-cells i-2 … i+1 enter the transports of the flux-form tendency at u-face i
++    @inline mass_consistent_jump_x(i, j, k, grid) =
++        mass_consistent_wet_thickness_changes(mass_consistent_wet_thickness(i-2, j, k, grid), mass_consistent_wet_thickness(i-1, j, k, grid),
++                                              mass_consistent_wet_thickness(i,   j, k, grid), mass_consistent_wet_thickness(i+1, j, k, grid))
++
++    @inline mass_consistent_jump_y(i, j, k, grid) =
++        mass_consistent_wet_thickness_changes(mass_consistent_wet_thickness(i, j-2, k, grid), mass_consistent_wet_thickness(i, j-1, k, grid),
++                                              mass_consistent_wet_thickness(i, j,   k, grid), mass_consistent_wet_thickness(i, j+1, k, grid))
++
++    # vector-invariant schemes whose kinetic-energy gradient uses a reconstruction scheme that also has momentum fluxes
++    const VectorInvariantWithFluxScheme = VectorInvariant{<:Any, <:Any, <:Any, <:Any, <:Any, <:Any,
++                                                          <:Union{AbstractCenteredAdvectionScheme, AbstractUpwindBiasedAdvectionScheme}}
++
++    # `if`, not `ifelse`: only one of the two advection forms is computed at each face
++    @inline function U_dot_∇u(i, j, k, grid::PCBIBG, scheme::VectorInvariantWithFluxScheme, U)
++        if topology(grid, 1) !== Flat && mass_consistent_jump_x(i, j, k, grid)
++            flux_form = scheme.kinetic_energy_gradient_scheme
++            return div_𝐯u(i, j, k, grid, flux_form, U, U.u) + U_dot_∇u_hydrostatic_metric(i, j, k, grid, flux_form, U, U)
++        else
++            return horizontal_advection_U(i, j, k, grid, scheme, U.u, U.v) +
++                   vertical_advection_U(i, j, k, grid, scheme, U) +
++                   bernoulli_head_U(i, j, k, grid, scheme, U.u, U.v)
++        end
++    end
++
++    @inline function U_dot_∇v(i, j, k, grid::PCBIBG, scheme::VectorInvariantWithFluxScheme, U)
++        if topology(grid, 2) !== Flat && mass_consistent_jump_y(i, j, k, grid)
++            flux_form = scheme.kinetic_energy_gradient_scheme
++            return div_𝐯v(i, j, k, grid, flux_form, U, U.v) + U_dot_∇v_hydrostatic_metric(i, j, k, grid, flux_form, U, U)
++        else
++            return horizontal_advection_V(i, j, k, grid, scheme, U.u, U.v) +
++                   vertical_advection_V(i, j, k, grid, scheme, U) +
++                   bernoulli_head_V(i, j, k, grid, scheme, U.u, U.v)
++        end
++    end
++end
++
++@info "Partial-cell fix on: flux-form momentum advection at bottom-cell thickness jumps (Oceananigans.jl#6533)"
+diff --git a/setup.jl b/setup.jl
+index 3c24533..7206344 100644
+--- a/setup.jl
++++ b/setup.jl
+@@ -6,7 +6,7 @@ include("config.jl")
+ using NumericalEarth, Oceananigans, Oceananigans.Units
+ using Oceananigans.OrthogonalSphericalShellGrids: ConformalConicGrid
+ using Oceananigans.Architectures: on_architecture
+-using NumericalEarth.DataWrangling: GEBCO2026   # not exported by NumericalEarth
++using NumericalEarth.DataWrangling: GEBCO2026, ETOPO2022   # not exported by NumericalEarth
+ using Dates, CUDA
+ using CopernicusMarine   # enables the GLORYS download extension
+ 
+@@ -39,18 +39,36 @@ underlying_grid = ConformalConicGrid(arch;
+ Nx, Ny = size(underlying_grid)[1:2]
+ @info "Grid: $Nx × $Ny × $Nz, largest spacing $(spacing / 1e3) km"
+ 
+-# GEBCO 2026 (15″; includes IBCAO for the Arctic). First run downloads ~7.5 GB, and regridding a new grid
+-# needs ~55 GB of memory (the global file is read in full); the result is cached, so later runs are quick.
+-# Regrid on a CPU copy of the grid: the whole file would otherwise go to the GPU (~28 GB, too much for 40 GB cards).
++# Bathymetry ([grid] bathymetry), regridded on a CPU copy of the grid (the global file would otherwise go to the GPU:
++# ~28 GB for GEBCO, too much for 40 GB cards):
++# - "GEBCO2026" (default): 15″, includes IBCAO for the Arctic. First run downloads ~7.5 GB, and regridding a new grid
++#   needs ~55 GB of memory (the global file is read in full); the result is cached, so later runs are quick.
++# - "ETOPO": ETOPO 2022 (60″, NumericalEarth's default); cached.
++# - "GLORYS": GLORYS's own sea floor (glorys_bathymetry.jl), so the gateways and sills have the depths GLORYS's
++#   transports were computed over; recomputed each run.
+ # The cache does not depend on the architecture, so CPU and GPU runs share it.
+-bathymetry = Metadatum(:bottom_height; dataset = GEBCO2026(), dir_kw...)
+-bottom_height = regrid_bathymetry(on_architecture(CPU(), underlying_grid), bathymetry;
+-                                  minimum_depth = 15,
+-                                  interpolation_passes = 2,
+-                                  major_basins = 1)
++include("glorys_bathymetry.jl")   # glorys_bottom_height; included here, not in the `if` below (world age)
++bathymetry_kw = (; minimum_depth = 15, interpolation_passes = 2, major_basins = 1)
++cpu_grid      = on_architecture(CPU(), underlying_grid)
++bathymetry    = get(config["grid"], "bathymetry", "GEBCO2026")
++bottom_height = if bathymetry == "GEBCO2026"
++    regrid_bathymetry(cpu_grid, Metadatum(:bottom_height; dataset = GEBCO2026(), dir_kw...); bathymetry_kw...)
++elseif bathymetry == "ETOPO"
++    regrid_bathymetry(cpu_grid, Metadatum(:bottom_height; dataset = ETOPO2022(), dir_kw...); bathymetry_kw...)
++elseif bathymetry == "GLORYS"
++    glorys_bottom_height(cpu_grid; bathymetry_kw...)
++else
++    error("[grid] bathymetry must be \"GEBCO2026\", \"ETOPO\" or \"GLORYS\", not \"$bathymetry\"")
++end
+ 
+-grid = ImmersedBoundaryGrid(underlying_grid, PartialCellBottom(Array(interior(bottom_height, :, :, 1)));
+-                            active_cells_map = true)
++# Bottom cells ([grid] bottom): "partial" (default) cuts the bottom cell at the sea floor; "full" uses whole cells
++# (the sea floor moves to the nearest cell face). With partial cells, [grid] partial_cell_fix (panarctic.jl) removes
++# the bottom jets they otherwise allow (Oceananigans issue #6532).
++bottom_kind = get(config["grid"], "bottom", "partial")
++bottom_kind in ("partial", "full") || error("[grid] bottom must be \"partial\" or \"full\", not \"$bottom_kind\"")
++Bottom = bottom_kind == "full" ? GridFittedBottom : PartialCellBottom
++grid = ImmersedBoundaryGrid(underlying_grid, Bottom(Array(interior(bottom_height, :, :, 1))); active_cells_map = true)
++@info "Bathymetry: $bathymetry, $bottom_kind bottom cells"
+ 
+ # ## Dates
+ #
+-- 
+2.43.0
+
