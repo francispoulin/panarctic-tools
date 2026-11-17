@@ -1,0 +1,193 @@
+From 98d072c8bd306e809cb6f937b539faef1d840a3b Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 17 Nov 2026 11:49:11 -0500
+Subject: [PATCH] Inverse barometer on by default; JRA55 runs can start on any
+ date
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+[atmosphere] inverse_barometer = true (default) passes #676's inverse_barometer option: GLORYS's η carries
+no response to the atmospheric pressure that JRA55 applies to the model (issue #37), so the inverse-
+barometer sea level is added to GLORYS's η at the open sides (Flather) and to the initial free surface.
+Its domain mean is removed, so it moves no volume and leaves the volume control alone. false: as before.
+
+jra55_read_fix.jl works around NumericalEarth's jra55_read_data, which splits the wrapped record indices
+where the index equals 1, so that a JRA55 run starting on any day but 1 January fails while building the
+river routing (MethodError: -(::Nothing, ::Int64)). Taken from fjp/nested; to be fixed upstream.
+
+config_smoke_test_sep2005.toml: the smoke test from 1 to 5 September 2005, the validation year (Tsubouchi
+et al. 2018), which exercises the JRA55 fix.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Abhhvkp8Pai9cvvctGUDX5
+---
+ config.toml                    |  4 ++
+ config_smoke_test.toml         |  6 +++
+ config_smoke_test_sep2005.toml | 74 ++++++++++++++++++++++++++++++++++
+ jra55_read_fix.jl              | 14 +++++++
+ panarctic.jl                   |  2 +
+ 5 files changed, 100 insertions(+)
+ create mode 100644 config_smoke_test_sep2005.toml
+ create mode 100644 jra55_read_fix.jl
+
+diff --git a/config.toml b/config.toml
+index c604bf6..12ffdf4 100644
+--- a/config.toml
++++ b/config.toml
+@@ -21,6 +21,10 @@ dt_minutes = 10           # time step
+ 
+ [atmosphere]
+ jra55 = "multi_year"   # "multi_year": JRA55 for the run's own dates; "repeat_year": the 1990–91 repeat year
++inverse_barometer = true   # GLORYS's η carries no response to the atmospheric pressure that JRA55 applies to the model
++                           # (issue #37): add the inverse-barometer sea level −(pᵃ − ⟨pᵃ⟩)/(ρ₀g) to GLORYS's η at the
++                           # open sides (Flather) and to the initial free surface; its domain mean is removed, so the
++                           # volume is unchanged. false: GLORYS's η as it is, out of balance with the pressure
+ 
+ [output]
+ average_hours   = 24      # time-averaged output (3D ocean, free surface, sea ice), written to output_dir
+diff --git a/config_smoke_test.toml b/config_smoke_test.toml
+index 69262bc..e1b5cf9 100644
+--- a/config_smoke_test.toml
++++ b/config_smoke_test.toml
+@@ -1,4 +1,6 @@
+ # Smoke test: config.toml on a ~100 km grid for four days, to check that the model builds and runs after a change.
++# config_smoke_test_sep2005.toml is the same from 1 to 5 September 2005 (the validation year, and a start that is not
++# 1 January, which exercises jra55_read_fix.jl).
+ # Run it before and after the change (with different `experiment` names, or renaming the output folder in between)
+ # and compare the two with analysis/compare_transports.jl. With all defaults unchanged, the transports should agree.
+ #
+@@ -21,6 +23,10 @@ dt_minutes = 10           # time step
+ 
+ [atmosphere]
+ jra55 = "multi_year"   # "multi_year": JRA55 for the run's own dates; "repeat_year": the 1990–91 repeat year
++inverse_barometer = true   # GLORYS's η carries no response to the atmospheric pressure that JRA55 applies to the model
++                           # (issue #37): add the inverse-barometer sea level −(pᵃ − ⟨pᵃ⟩)/(ρ₀g) to GLORYS's η at the
++                           # open sides (Flather) and to the initial free surface; its domain mean is removed, so the
++                           # volume is unchanged. false: GLORYS's η as it is, out of balance with the pressure
+ 
+ [output]
+ average_hours   = 24      # time-averaged output (3D ocean, free surface, sea ice), written to output_dir
+diff --git a/config_smoke_test_sep2005.toml b/config_smoke_test_sep2005.toml
+new file mode 100644
+index 0000000..81f6f1a
+--- /dev/null
++++ b/config_smoke_test_sep2005.toml
+@@ -0,0 +1,74 @@
++# Smoke test from 1 to 5 September 2005: config_smoke_test.toml in the validation year (Tsubouchi et al. 2018 moorings),
++# with a start that is not 1 January, which exercises jra55_read_fix.jl.
++# Run it before and after the change (with different `experiment` names, or renaming the output folder in between)
++# and compare the two with analysis/compare_transports.jl. With all defaults unchanged, the transports should agree.
++#
++# Run with:  julia +1.13 --project=. panarctic.jl config_smoke_test_sep2005.toml
++#
++# Note: a grid spacing that has not been run before needs the GEBCO regridding once (~55 GB of memory; cached after).
++
++architecture = "GPU"   # "GPU" or "CPU"
++experiment   = "smoke_test_sep2005"  # name of the run: output and figures go to output_dir/<experiment> and figure_dir/<experiment>
++
++[grid]
++spacing_km = 100    # largest horizontal grid spacing [km] (at the pole; ~15% finer near the Atlantic edge)
++Nz         = 20     # vertical levels
++depth      = 5000   # maximum depth (m)
++
++[time]
++start_date = 2005-09-01   # initial condition (GLORYS); the run starts at 00:00 on this date
++end_date   = 2005-09-05   # the run ends at 00:00 on this date; for short tests a date and time, e.g. 1993-01-01T03:00
++dt_minutes = 10           # time step
++
++[atmosphere]
++jra55 = "multi_year"   # "multi_year": JRA55 for the run's own dates; "repeat_year": the 1990–91 repeat year
++inverse_barometer = true   # GLORYS's η carries no response to the atmospheric pressure that JRA55 applies to the model
++                           # (issue #37): add the inverse-barometer sea level −(pᵃ − ⟨pᵃ⟩)/(ρ₀g) to GLORYS's η at the
++                           # open sides (Flather) and to the initial free surface; its domain mean is removed, so the
++                           # volume is unchanged. false: GLORYS's η as it is, out of balance with the pressure
++
++[output]
++average_hours   = 24      # time-averaged output (3D ocean, free surface, sea ice), written to output_dir
++checkpoint_days = 30      # how often the full model state is saved for restarts
++restart         = false   # true: continue from the latest checkpoint in output_dir
++monitor_hours   = 1       # monitor.csv: transports through the open sides, mean η against GLORYS's, volume budget,
++                          # fastest point (plotting/volume_budget.jl, plotting/max_speed.jl); 0 = off
++
++[transports]
++# Volume, heat, salt and freshwater transports through the sections below and the open boundaries (see transports.jl).
++online                = true   # true: computed every time step and averaged over average_hours, written to arctic_transports.jld2
++reference_temperature = 0      # heat transport relative to this temperature (°C)
++reference_salinity    = 34.8   # freshwater transport relative to this salinity (g/kg)
++
++# Each section is a great-circle path through (longitude, latitude) waypoints. Positive transport flows to the right,
++# walking from the first waypoint to the last; these are ordered so that positive is into the Arctic. Both ends should
++# be on land, so the section spans the whole strait on any grid. Check with plotting/transport_sections.jl.
++[transports.sections]
++# Fram Strait follows the mooring array at 78°50′N; intermediate waypoints keep the great circles on that latitude.
++fram_strait         = { lon = [15.0, 10.0, 5.0, 0.0, -5.0, -10.0, -15.0, -20.0],
++                        lat = [78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333] }
++# Barents Sea Opening follows the mooring line from Norway (Fugløya) via Bjørnøya to Sørkapp, Svalbard.
++barents_sea_opening = { lon = [20.0, 19.0, 16.5],  lat = [70.0, 74.45, 77.0] }
++bering_strait       = { lon = [-166.0, -171.0], lat = [66.0, 66.0] }
++davis_strait        = { lon = [-53.0, -63.0],   lat = [67.0, 66.5] }
++
++[paths]
++data_dir   = ""   # where downloads are stored; "" = each dataset's default cache
++output_dir = "output"    # model output: time averages (.jld2), checkpoints and the config; one folder per experiment
++figure_dir = "figures"   # figures and movies from the plotting/ scripts; one folder per experiment
++
++[boundaries]
++velocity_inflow_days = 1   # oblique radiation on u, v: nudging timescale toward GLORYS on inflow
++tracer_inflow_km     = 20  # T, S reservoir inflow relaxation length, both open sides
++relaxation_hours     = 0   # T, S and baroclinic u, v relax toward GLORYS in a ~2/3° band along the open sides
++                           # over this timescale; 0 = off (nested_ocean_model's default is 6)
++
++# Volume control (volume_control.jl): the net inflow through the two open sides together is pinned at every barotropic
++# substep, as NEMO and ROMS do; Flather splits it between the sides. Without it the domain's volume drifts from GLORYS's.
++follow_glorys_volume      = true   # true: the net inflow follows GLORYS's domain-mean η, with the surface freshwater handed back
++volume_relaxation_days    = 1      # with follow_glorys_volume: time over which the remaining drift from GLORYS's mean η is removed
++follow_glorys_tendency    = false  # with follow_glorys_volume: true also follows GLORYS's rate of change exactly
++# net_inflow_Sv           = 0.0    # with follow_glorys_volume = false: a constant net inflow instead (Sv, positive into the domain);
++                                   # with neither, Flather alone (no volume control)
++net_inflow_depth_exponent = 0.5    # the pin's correction to each boundary column ∝ Hᵖ: 0 uniform per length, 1 uniform velocity
++                                   # (NEMO, ROMS), 0.5 a uniform shift of GLORYS's η in Flather
+diff --git a/jra55_read_fix.jl b/jra55_read_fix.jl
+new file mode 100644
+index 0000000..d853700
+--- /dev/null
++++ b/jra55_read_fix.jl
+@@ -0,0 +1,14 @@
++# Workaround for NumericalEarth's `jra55_read_data` (DataWrangling/JRA55/JRA55_field_time_series.jl): with
++# `Cyclical()` time indexing, the records held in memory wrap from the end of the run back to its start, so the
++# indices into the year's JRA55 file are not sorted. NumericalEarth splits them where the index equals 1, which
++# exists only when the run starts on the first record of the file (1 January). Any other start date (such as
++# 1 September 2005) fails with `MethodError: no method matching -(::Nothing, ::Int64)` while building the river
++# routing, or later when a reload wraps. Read the indices in sorted order and put them back in the requested order.
++# To be fixed upstream (still present in NumericalEarth main, 17 November 2026); remove this file then.
++
++@eval NumericalEarth.DataWrangling.JRA55 function jra55_read_data(ds, name, i, j, nn)
++    issorted(nn) && return ds[name][i, j, nn]
++    order = sortperm(nn)
++    data  = ds[name][i, j, nn[order]]
++    return data[:, :, invperm(order)]
++end
+diff --git a/panarctic.jl b/panarctic.jl
+index 6f41794..8166f8a 100644
+--- a/panarctic.jl
++++ b/panarctic.jl
+@@ -3,6 +3,7 @@
+ # Figures and movies: scripts in plotting/ (one per figure).
+ 
+ include("setup.jl")
++include("jra55_read_fix.jl")
+ include("transports.jl")
+ include("volume_control.jl")
+ include("monitor.jl")
+@@ -45,6 +46,7 @@ ocean = nested_ocean_simulation(grid, dataset;
+                                 tracer_scheme = TracerReservoir(inflow_length_scale = bc["tracer_inflow_km"] * kilometers),
+                                 relaxation_rate = bc["relaxation_hours"] > 0 ? 1 / (bc["relaxation_hours"] * hours) : nothing,
+                                 net_inflow, net_inflow_depth_exponent,
++                                inverse_barometer = get(config["atmosphere"], "inverse_barometer", false),
+                                 free_surface = SplitExplicitFreeSurface(grid; cfl = 0.7, fixed_Δt = Δt),
+                                 momentum_advection = WENOVectorInvariant(; order=5, time_discretization),
+                                 tracer_advection = WENO(; order=7, time_discretization, minimum_buffer_upwind_order=1),
+-- 
+2.43.0
+

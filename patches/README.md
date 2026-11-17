@@ -52,6 +52,7 @@ Numbered in the order to apply, across repositories. Each was checked to apply w
 | 044 | PanArcticShenanigans | `fjp/fix-online-transports` (new, from `main` 14427af; own PR to main) | first | online transports after #43: child tracers, child grid, writer on the child (was `ocean.model.tracers`: FieldError, every run stopped); `$(λ)°E` in the section-end warning. `fjp/merge-nested` is rebased on top of it |
 | 045 | PanArcticShenanigans | `fjp/merge-nested` | after 043 (on top of 044) | volume control on by default (`volume_control.jl`, from `glorys_volume_target.jl`): net inflow follows GLORYS's domain-mean η, relaxation 1 day, pin ∝ H^½; `net_inflow_Sv` or Flather alone as alternatives; hourly volume log line |
 | 046 | PanArcticShenanigans | `fjp/merge-nested` | after 045 | hourly `monitor.csv` (`[output] monitor_hours = 1`): open-side transports, mean η vs GLORYS, volume budget, fastest point; `plotting/volume_budget.jl`, `plotting/max_speed.jl` (from fjp/nested, without the dropped volume-control diagnostics) |
+| 047 | PanArcticShenanigans | `fjp/merge-nested` | after 046 | `[atmosphere] inverse_barometer = true` (default; #676 option, issue #37); `jra55_read_fix.jl` (runs can start on any date); `config_smoke_test_sep2005.toml` |
 
 ## Applying 001–006
 
