@@ -49,6 +49,7 @@ Numbered in the order to apply, across repositories. Each was checked to apply w
 | 041 | Oceananigans | `fjp/net-inflow-target` (PR #6524) | after 53efe85 | net-inflow pin: no local variable across `@synchronize` (CPU `UndefVarError: Ny`); GPU unaffected |
 | 042 | PanArcticShenanigans | `fjp/merge-nested` (new, from `main` 14427af) | first | `config_smoke_test.toml` (~100 km, 1–5 Jan 1993) and `analysis/compare_transports.jl` (largest difference of every transport between two experiments) |
 | 043 | PanArcticShenanigans | `fjp/merge-nested` | after 042 | pins NumericalEarth → `fjp/net-inflow` e22c1bfd (#938 on #676 head b2eb617d) and Oceananigans → `fjp/net-inflow-target` 705b9e7c (#6524); defaults unchanged, so the smoke test should match 042 |
+| 044 | PanArcticShenanigans | `fjp/fix-online-transports` (new, from `main` 14427af; own PR to main) | first | online transports after #43: child tracers, child grid, writer on the child (was `ocean.model.tracers`: FieldError, every run stopped); `$(λ)°E` in the section-end warning. `fjp/merge-nested` is rebased on top of it |
 
 ## Applying 001–006
 
