@@ -47,6 +47,8 @@ Numbered in the order to apply, across repositories. Each was checked to apply w
 | 039 | PanArcticShenanigans | `fjp/nested` | after 038 | `plot_sections.jl` and `coastal_salinity.jl` average GLORYS over each model averaging window (needed for 2-day averages, e.g. the 10 km run) |
 | 040 | PanArcticShenanigans | `fjp/nested` | after 039 | `coastal_salinity.jl` also gives the freshwater content of the top 200 m at each station (m of fresh water relative to 34.8), model and GLORYS |
 | 041 | Oceananigans | `fjp/net-inflow-target` (PR #6524) | after 53efe85 | net-inflow pin: no local variable across `@synchronize` (CPU `UndefVarError: Ny`); GPU unaffected |
+| 042 | PanArcticShenanigans | `fjp/merge-nested` (new, from `main` 14427af) | first | `config_smoke_test.toml` (~100 km, 1–5 Jan 1993) and `analysis/compare_transports.jl` (largest difference of every transport between two experiments) |
+| 043 | PanArcticShenanigans | `fjp/merge-nested` | after 042 | pins NumericalEarth → `fjp/net-inflow` e22c1bfd (#938 on #676 head b2eb617d) and Oceananigans → `fjp/net-inflow-target` 705b9e7c (#6524); defaults unchanged, so the smoke test should match 042 |
 
 ## Applying 001–006
 
