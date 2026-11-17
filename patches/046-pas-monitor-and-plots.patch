@@ -1,0 +1,348 @@
+From 94b6447d6f177df92d81577a5523ab84bfee047a Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 17 Nov 2026 08:21:00 -0500
+Subject: [PATCH] =?UTF-8?q?Hourly=20monitor:=20open-side=20transports,=20m?=
+ =?UTF-8?q?ean=20=CE=B7=20against=20GLORYS's,=20volume=20budget,=20fastest?=
+ =?UTF-8?q?=20point;=20two=20plots?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+monitor.jl writes monitor.csv to the experiment's output folder every [output] monitor_hours (default 1;
+0 = off): the net transport through the Atlantic and Pacific sides, the domain-mean η of the model and
+of GLORYS, the change in η over the shelf and the deep ocean, a volume budget accumulated every time
+step (through the open sides, across the surface, and the residual, which should be zero), the net
+inflow implied by the change in volume, and where the fastest velocity is.
+
+plotting/volume_budget.jl checks that the volume control does what it should (the budget closes and the
+model's mean η follows GLORYS's); plotting/max_speed.jl shows where and when the fastest flow is, to
+catch boundary or bottom jets early. Both read the config like the other plotting scripts.
+
+Taken from fjp/nested (monitor.jl, plot_budget.jl, plot_max_speed.jl), without the diagnostics of the
+volume-control approaches that were dropped (edge η offsets, Flather η inflow, pin correction) and the
+gateway monitor, which the online transports of #41 replace.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Abhhvkp8Pai9cvvctGUDX5
+---
+ config.toml               |   2 +
+ config_smoke_test.toml    |   2 +
+ monitor.jl                | 122 ++++++++++++++++++++++++++++++++++++++
+ monitor_file.jl           |  13 ++++
+ panarctic.jl              |  12 +++-
+ plotting/max_speed.jl     |  45 ++++++++++++++
+ plotting/volume_budget.jl |  39 ++++++++++++
+ 7 files changed, 234 insertions(+), 1 deletion(-)
+ create mode 100644 monitor.jl
+ create mode 100644 monitor_file.jl
+ create mode 100644 plotting/max_speed.jl
+ create mode 100644 plotting/volume_budget.jl
+
+diff --git a/config.toml b/config.toml
+index 969b193..c604bf6 100644
+--- a/config.toml
++++ b/config.toml
+@@ -26,6 +26,8 @@ jra55 = "multi_year"   # "multi_year": JRA55 for the run's own dates; "repeat_ye
+ average_hours   = 24      # time-averaged output (3D ocean, free surface, sea ice), written to output_dir
+ checkpoint_days = 30      # how often the full model state is saved for restarts
+ restart         = false   # true: continue from the latest checkpoint in output_dir
++monitor_hours   = 1       # monitor.csv: transports through the open sides, mean η against GLORYS's, volume budget,
++                          # fastest point (plotting/volume_budget.jl, plotting/max_speed.jl); 0 = off
+ 
+ [transports]
+ # Volume, heat, salt and freshwater transports through the sections below and the open boundaries (see transports.jl).
+diff --git a/config_smoke_test.toml b/config_smoke_test.toml
+index 3c50dd2..69262bc 100644
+--- a/config_smoke_test.toml
++++ b/config_smoke_test.toml
+@@ -26,6 +26,8 @@ jra55 = "multi_year"   # "multi_year": JRA55 for the run's own dates; "repeat_ye
+ average_hours   = 24      # time-averaged output (3D ocean, free surface, sea ice), written to output_dir
+ checkpoint_days = 30      # how often the full model state is saved for restarts
+ restart         = false   # true: continue from the latest checkpoint in output_dir
++monitor_hours   = 1       # monitor.csv: transports through the open sides, mean η against GLORYS's, volume budget,
++                          # fastest point (plotting/volume_budget.jl, plotting/max_speed.jl); 0 = off
+ 
+ [transports]
+ # Volume, heat, salt and freshwater transports through the sections below and the open boundaries (see transports.jl).
+diff --git a/monitor.jl b/monitor.jl
+new file mode 100644
+index 0000000..d8c9c29
+--- /dev/null
++++ b/monitor.jl
+@@ -0,0 +1,122 @@
++# Hourly monitor of the nested ocean (panarctic.jl, `[output] monitor_hours`), written to monitor.csv in the
++# experiment's output folder and read by plotting/volume_budget.jl and plotting/max_speed.jl:
++#
++# - net transport through the Atlantic (south, j = 1) and Pacific (north, j = Ny + 1) sides, positive into the domain;
++# - domain-mean η, model and GLORYS, and the change in η since the start over the shelf (H < 200 m) and the deep ocean
++#   (H > 1000 m);
++# - a volume budget accumulated every time step: the volume through the open sides (from the barotropic transport the
++#   tracers see) and across the surface (the freshwater volume flux added to η), each as a change in domain-mean η, and
++#   the residual (the change in mean η minus both), which should be zero; and the net inflow implied by the change in
++#   volume over the last interval;
++# - the largest |u| and |v| and where the larger one is (grid indices, longitude, latitude, depth).
++#
++# Also writes depth.csv (seafloor depth, m, 0 on land, one row per j) for the maps of plotting/max_speed.jl.
++
++using Oceananigans.Architectures: on_architecture
++using Oceananigans.Grids: λnode, φnode, znode, static_column_depthᶜᶠᵃ
++using Oceananigans.Operators: Δxᶜᶠᶜ, Δzᶜᶠᶜ, Azᶜᶜᶜ
++using Oceananigans.ImmersedBoundaries: bottom_height_field
++using NumericalEarth.NestedModels: boundary_location, sample_parent!
++using Printf
++
++include("monitor_file.jl")
++
++# Net transport through the Atlantic and Pacific sides, positive into the domain (Sv), from the velocities at the
++# boundary faces (the ones that carry T and S)
++function open_side_transports(child)
++    Nx, Ny, Nz = size(child.grid)
++    v = on_architecture(CPU(), child.velocities.v)       # with a CPU copy of the grid in its current z★ state
++    Q(j) = sum(v[i, j, k] * Δxᶜᶠᶜ(i, j, k, v.grid) * Δzᶜᶠᶜ(i, j, k, v.grid) for i in 1:Nx, k in 1:Nz)
++    return (atlantic = Q(1) / 1e6, pacific = -Q(Ny + 1) / 1e6)
++end
++
++function add_monitor!(simulation, child, output_dir, parent_η; schedule = TimeInterval(1hours))
++    Nx, Ny, Nz = size(child.grid)
++    bottom = Array(interior(bottom_height_field(child.grid)))[:, :, 1]
++    wet    = bottom .< 0
++    shelf  = wet .& (bottom .> -200)
++    deep   = wet .& (bottom .< -1000)
++
++    function area_mean(a, mask, g)
++        A = [Azᶜᶜᶜ(i, j, 1, g) for i in 1:Nx, j in 1:Ny]
++        return sum(a[mask] .* A[mask]) / sum(A[mask])
++    end
++
++    open(depth_file(output_dir), "w") do io
++        foreach(j -> println(io, join(-min.(bottom[:, j], 0), ',')), 1:Ny)
++    end
++
++    file = monitor_file(output_dir)
++    open(io -> println(io, "hour,atlantic_in_Sv,pacific_in_Sv,net_in_Sv,eta_mean_cm,parent_eta_mean_cm,",
++                       "shelf_change_cm,deep_change_cm,edge_volume_cm,surface_volume_cm,budget_residual_cm,",
++                       "edge_inflow_from_volume_Sv,max_u,max_v,",
++                       "fastest_component,fastest_i,fastest_j,fastest_k,fastest_longitude,fastest_latitude,fastest_z"), file, "w")
++
++    # Volume budget, accumulated every time step
++    arch      = Oceananigans.Architectures.architecture(child.grid)
++    cpu_grid  = on_architecture(CPU(), child.grid)
++    wet_area  = sum(Azᶜᶜᶜ(i, j, 1, cpu_grid) for i in 1:Nx, j in 1:Ny if wet[i, j])
++    cell_area = on_architecture(arch, [wet[i, j] ? Azᶜᶜᶜ(i, j, 1, cpu_grid) : 0.0 for i in 1:Nx, j in 1:Ny])
++    face_width(j) = on_architecture(arch, [static_column_depthᶜᶠᵃ(i, j, cpu_grid) > 0 ? Δxᶜᶠᶜ(i, j, 1, cpu_grid) : 0.0
++                                           for i in 1:Nx])
++    south_width, north_width = face_width(1), face_width(Ny + 1)
++    Ṽ  = child.free_surface.filtered_state.Ṽ   # barotropic transport per unit width that the tracers see
++    Jʷ = child.forcing.η.parameters            # freshwater volume flux, m s⁻¹, positive into the ocean
++    edge_volume    = Ref(0.0)
++    surface_volume = Ref(0.0)
++
++    function accumulate_volume(sim)
++        Q = sum(view(Ṽ.data, 1:Nx, 1, 1) .* south_width) - sum(view(Ṽ.data, 1:Nx, Ny + 1, 1) .* north_width)
++        S = sum(view(Jʷ.data, 1:Nx, 1:Ny, 1) .* cell_area)
++        edge_volume[]    += Q * sim.Δt
++        surface_volume[] += S * sim.Δt
++        return nothing
++    end
++    add_callback!(simulation, accumulate_volume, IterationInterval(1); name = :volume_budget)
++
++    η̄₀       = Ref(NaN)
++    η₀       = Ref{Matrix{Float64}}()
++    previous = Ref((time = 0.0, η̄ = NaN, surface = 0.0))   # for the net inflow over the last interval, from the volume
++    ηᵖ       = Field{Center, Center, Nothing}(child.grid)
++
++    function monitor(sim)
++        v = on_architecture(CPU(), child.velocities.v)      # for the grid metrics in the current z★ state
++        η = Array(interior(on_architecture(CPU(), child.free_surface.displacement)))[:, :, 1]
++        isassigned(η₀) || (η₀[] = copy(η))
++        δη = η .- η₀[]
++        t  = time(sim)
++
++        atlantic, pacific = open_side_transports(child)
++        η̄ = 100 * area_mean(η, wet, v.grid)
++        isnan(η̄₀[]) && (η̄₀[] = η̄)
++        sample_parent!(ηᵖ, boundary_location(:η), parent_η, t)
++        η̄ᵖ = 100 * area_mean(Array(interior(on_architecture(CPU(), ηᵖ)))[:, :, 1], wet, v.grid)
++
++        edge_cm     = 100 * edge_volume[] / wet_area
++        surface_cm  = 100 * surface_volume[] / wet_area
++        residual    = (η̄ - η̄₀[]) - edge_cm - surface_cm
++        Δt          = t - previous[].time
++        from_volume = Δt > 0 ? (wet_area * (η̄ - previous[].η̄) / 100 - (surface_volume[] - previous[].surface)) / Δt / 1e6 : NaN
++        previous[]  = (time = t, η̄ = η̄, surface = surface_volume[])
++
++        u = on_architecture(CPU(), child.velocities.u)
++        umax, iᵘ = findmax(abs, interior(u))
++        vmax, iᵛ = findmax(abs, interior(v))
++        # Where the faster component peaks: 1 = u (at x faces), 2 = v (at y faces)
++        component, (i, j, k), location = umax ≥ vmax ? (1, Tuple(iᵘ), (Face(), Center(), Center())) :
++                                                      (2, Tuple(iᵛ), (Center(), Face(), Center()))
++        fastest = (component, i, j, k, λnode(i, j, k, v.grid, location...), φnode(i, j, k, v.grid, location...),
++                   znode(i, j, k, v.grid, location...))
++
++        open(io -> @printf(io, "%.2f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%d,%d,%d,%d,%.3f,%.3f,%.1f\n",
++                           t / hours, atlantic, pacific, atlantic + pacific, η̄, η̄ᵖ,
++                           100 * area_mean(δη, shelf, v.grid), 100 * area_mean(δη, deep, v.grid),
++                           edge_cm, surface_cm, residual, from_volume, umax, vmax, fastest...),
++             file, "a")
++        return nothing
++    end
++
++    add_callback!(simulation, monitor, schedule; name = :monitor)
++    @info "Hourly monitor written to $file"
++    return file
++end
+diff --git a/monitor_file.jl b/monitor_file.jl
+new file mode 100644
+index 0000000..68ec794
+--- /dev/null
++++ b/monitor_file.jl
+@@ -0,0 +1,13 @@
++# Files of the monitor (monitor.jl), and reading them back for the plotting scripts without loading the model.
++
++monitor_file(output_dir) = joinpath(output_dir, "monitor.csv")
++depth_file(output_dir)   = joinpath(output_dir, "depth.csv")
++
++# The header of monitor.csv and a function returning a column by name
++function read_monitor(output_dir)
++    text   = readlines(monitor_file(output_dir))
++    header = split(text[1], ',')
++    rows   = [parse.(Float64, split(line, ',')) for line in text[2:end] if !isempty(line)]
++    column(name) = [row[findfirst(==(name), header)] for row in rows]
++    return header, column
++end
+diff --git a/panarctic.jl b/panarctic.jl
+index e754212..6f41794 100644
+--- a/panarctic.jl
++++ b/panarctic.jl
+@@ -5,6 +5,7 @@
+ include("setup.jl")
+ include("transports.jl")
+ include("volume_control.jl")
++include("monitor.jl")
+ 
+ # Keep the config of this run with its output (replacing that of an earlier run of the same experiment)
+ isfile(run_config_file) && samefile(config_file, run_config_file) || cp(config_file, run_config_file; force = true)
+@@ -141,13 +142,22 @@ function ice_progress(sim)
+ end
+ add_callback!(simulation, ice_progress, TimeInterval(1hours))
+ 
++# GLORYS's free surface over the whole domain (2D, small), for the volume control and the monitor; the run itself
++# holds GLORYS only on strips along the open sides
++monitor_hours = get(config["output"], "monitor_hours", 0)
++if net_inflow isa Ref || monitor_hours > 0
++    parent_η = parent_free_surface(grid, dataset, (start_date, end_date + Day(1)); dir_kw...)
++end
++
+ # The net inflow follows GLORYS's domain-mean η: set before every time step (volume_control.jl)
+ if net_inflow isa Ref
+-    parent_η = parent_free_surface(grid, dataset, (start_date, end_date + Day(1)); dir_kw...)
+     add_glorys_volume_target!(simulation, net_inflow, child, parent_η, bc["volume_relaxation_days"] * days;
+                               tendency = get(bc, "follow_glorys_tendency", false))
+ end
+ 
++# Transports through the open sides, mean η against GLORYS's, the volume budget and the fastest point (monitor.jl)
++monitor_hours > 0 && add_monitor!(simulation, child, output_dir, parent_η; schedule = TimeInterval(monitor_hours * hours))
++
+ # ## Output: time averages and checkpoints
+ #
+ # Averages over `average_hours` (daily by default) of the 3D ocean state, the free surface and the sea ice,
+diff --git a/plotting/max_speed.jl b/plotting/max_speed.jl
+new file mode 100644
+index 0000000..24126de
+--- /dev/null
++++ b/plotting/max_speed.jl
+@@ -0,0 +1,45 @@
++# Where the fastest velocity of a run is, from its monitor (monitor.jl, which records the grid point of the larger of
++# max |u| and max |v| every hour): the largest speed and its model level against time (top), and the hourly locations
++# of the fastest point on the seafloor depth, in grid indices, with the overall maximum marked (bottom).
++# Writes max_speed.png to `figure_dir`.
++#
++#   julia +1.13 --project=. plotting/max_speed.jl [config.toml]
++#
++# Uses the same config as panarctic.jl.
++
++include("../config.jl")
++include("../monitor_file.jl")
++
++using CairoMakie, Printf
++
++header, column = read_monitor(output_dir)
++hours = column("hour")
++speed = max.(column("max_u"), column("max_v"))
++level = column("fastest_k")
++i, j  = column("fastest_i"), column("fastest_j")
++n     = argmax(speed)
++@info @sprintf("Fastest: %s = %.2f m/s at hour %.0f, (i, j, k) = (%d, %d, %d), %.1f°E %.1f°N, z = %.0f m",
++               column("fastest_component")[n] == 1 ? "u" : "v", speed[n], hours[n], i[n], j[n], level[n],
++               column("fastest_longitude")[n], column("fastest_latitude")[n], column("fastest_z")[n])
++
++depth = reduce(hcat, [parse.(Float64, split(line, ',')) for line in readlines(depth_file(output_dir))])   # (i, j)
++depth[depth .== 0] .= NaN
++
++fig = Figure(size = (800, 1000))
++ax₁ = Axis(fig[1, 1]; xlabel = "days", ylabel = "largest |u|, |v| (m/s)", title = experiment)
++lines!(ax₁, hours ./ 24, speed; color = :black)
++ax₂ = Axis(fig[1, 1]; ylabel = "model level k (red)", yaxisposition = :right, ygridvisible = false)
++scatter!(ax₂, hours ./ 24, level; color = :red, markersize = 3)
++hidexdecorations!(ax₂)
++
++ax₃ = Axis(fig[2, 1]; xlabel = "i", ylabel = "j", aspect = DataAspect(),
++           title = "seafloor depth (m); dots: hourly location of the fastest point, colored by speed; ×: the maximum")
++hm = heatmap!(ax₃, depth; colormap = :deep)
++sc = scatter!(ax₃, i, j; color = speed, colormap = :hot, markersize = 6)
++scatter!(ax₃, [i[n]], [j[n]]; color = :cyan, marker = :xcross, markersize = 18)
++Colorbar(fig[2, 2], hm; label = "depth (m)")
++Colorbar(fig[2, 3], sc; label = "speed (m/s)")
++
++file = joinpath(figure_dir, "max_speed.png")
++save(file, fig)
++@info "Wrote $file"
+diff --git a/plotting/volume_budget.jl b/plotting/volume_budget.jl
+new file mode 100644
+index 0000000..b606baf
+--- /dev/null
++++ b/plotting/volume_budget.jl
+@@ -0,0 +1,39 @@
++# Volume budget of a run, from its monitor (monitor.jl): the change in domain-mean η, the parts that came through the
++# open sides and across the surface (freshwater), the residual (should be zero), and GLORYS's change in mean η (top);
++# the net inflow through the open sides carried by the velocities at the boundary faces (the ones that carry T and S)
++# against the inflow that actually changed the volume (bottom). The bottom panel starts after the first sample, which
++# holds the interpolated initial velocities. Writes volume_budget.png to `figure_dir`.
++#
++#   julia +1.13 --project=. plotting/volume_budget.jl [config.toml]
++#
++# Uses the same config as panarctic.jl.
++
++include("../config.jl")
++include("../monitor_file.jl")
++
++using CairoMakie
++
++header, column = read_monitor(output_dir)
++days = column("hour") ./ 24
++η, parent = column("eta_mean_cm"), column("parent_eta_mean_cm")
++
++fig = Figure(size = (800, 800))
++ax  = Axis(fig[1, 1]; xlabel = "days", ylabel = "change in domain-mean η (cm)", title = experiment)
++hlines!(ax, 0; color = :black, linewidth = 0.5)
++lines!(ax, days, parent .- parent[1]; color = :black, linewidth = 3, label = "GLORYS")
++lines!(ax, days, η .- η[1]; color = :red, linestyle = :dash, label = "model")
++lines!(ax, days, column("edge_volume_cm"); label = "through the open sides")
++lines!(ax, days, column("surface_volume_cm"); label = "across the surface (freshwater)")
++lines!(ax, days, column("budget_residual_cm"); linestyle = :dash, label = "residual")
++axislegend(ax; position = :lb, framevisible = false)
++
++ax₂ = Axis(fig[2, 1]; xlabel = "days", ylabel = "net inflow through the open sides (Sv)")
++hlines!(ax₂, 0; color = :black, linewidth = 0.5)
++stepped = 2:length(days)
++lines!(ax₂, days[stepped], column("net_in_Sv")[stepped]; label = "velocities at the boundary faces (carry T, S)")
++lines!(ax₂, days[stepped], column("edge_inflow_from_volume_Sv")[stepped]; label = "from the volume (moves η)")
++axislegend(ax₂; position = :lb, framevisible = false)
++
++file = joinpath(figure_dir, "volume_budget.png")
++save(file, fig)
++@info "Wrote $file"
+-- 
+2.43.0
+
