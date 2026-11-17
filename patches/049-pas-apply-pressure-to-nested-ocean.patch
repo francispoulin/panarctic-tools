@@ -1,0 +1,54 @@
+From af4af60f56910fc655b12757408fbf428400b2bd Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 17 Nov 2026 15:49:09 -0500
+Subject: [PATCH] Apply the atmospheric pressure to the nested ocean
+ (workaround for #676)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The coupled model sets the ocean's barotropic potential (atmospheric pressure / ρ₀) through
+forcing_barotropic_potential(coupled_model.ocean), which has no method for a NestedModel and falls
+back to nothing: since #43 no nested run has had the atmospheric pressure, and #676's inverse-
+barometer sea level, read from the same field, stayed zero (the smoke test with inverse_barometer
+= true was bit-for-bit identical to the one without). nested_pressure_fix.jl forwards the call to
+the child, which holds the pressure forcing. This changes results: the JRA55 pressure now acts on
+the ocean, with the inverse barometer on GLORYS's η at the open sides and in the initial state.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Abhhvkp8Pai9cvvctGUDX5
+---
+ nested_pressure_fix.jl | 8 ++++++++
+ panarctic.jl           | 1 +
+ 2 files changed, 9 insertions(+)
+ create mode 100644 nested_pressure_fix.jl
+
+diff --git a/nested_pressure_fix.jl b/nested_pressure_fix.jl
+new file mode 100644
+index 0000000..879baf3
+--- /dev/null
++++ b/nested_pressure_fix.jl
+@@ -0,0 +1,8 @@
++# Workaround for NumericalEarth #676 (nested_ocean_model): the coupled model applies the atmosphere's pressure to the
++# ocean through `forcing_barotropic_potential(coupled_model.ocean)`, which has no method for a NestedModel, so it falls
++# back to `nothing` and the pressure is never applied to a nested ocean. The child's barotropic potential then stays
++# zero, and so does #676's inverse-barometer sea level (`inverse_barometer = true` changes nothing). Forward the call
++# to the child, which holds the pressure forcing. To be fixed in #676; remove this file then.
++
++NumericalEarth.Oceans.forcing_barotropic_potential(model::NumericalEarth.NestedModels.NestedModel) =
++    NumericalEarth.Oceans.forcing_barotropic_potential(model.child)
+diff --git a/panarctic.jl b/panarctic.jl
+index fa2054b..cd72d01 100644
+--- a/panarctic.jl
++++ b/panarctic.jl
+@@ -4,6 +4,7 @@
+ 
+ include("setup.jl")
+ include("jra55_read_fix.jl")
++include("nested_pressure_fix.jl")
+ 
+ # Mass-consistent momentum advection at partial bottom cells (Oceananigans.jl#6533), before the model is built
+ get(config["grid"], "partial_cell_fix", false) && grid.immersed_boundary isa PartialCellBottom && include("partial_cell_fix.jl")
+-- 
+2.43.0
+
