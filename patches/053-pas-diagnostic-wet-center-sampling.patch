@@ -1,0 +1,235 @@
+From 0e92ccaea06afafe52c8513761e933f981bb79aa Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 17 Nov 2026 20:32:49 -0500
+Subject: [PATCH] Diagnostic: sample GLORYS at the wet centre of partial bottom
+ cells on the open sides (not for the merge)
+
+nested_ocean_model (NumericalEarth.jl#676) samples the parent at rnode, the centre of the whole cell, which for a
+partial bottom cell lies below the model's sea floor. boundary_wet_center_fix.jl samples at the centre of the wet
+part instead (on with [boundaries] sample_wet_center = true); config_smoke_test_wet_center.toml is the smoke test
+with it. analysis/boundary_bottom_cells.jl lists, for every open side, the partial bottom cells of the boundary row
+where GLORYS at the two depths differs most, with the model's value there.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Abhhvkp8Pai9cvvctGUDX5
+---
+ analysis/boundary_bottom_cells.jl | 84 +++++++++++++++++++++++++++++++
+ boundary_wet_center_fix.jl        | 15 ++++++
+ config_smoke_test_wet_center.toml | 78 ++++++++++++++++++++++++++++
+ panarctic.jl                      |  2 +
+ 4 files changed, 179 insertions(+)
+ create mode 100644 analysis/boundary_bottom_cells.jl
+ create mode 100644 boundary_wet_center_fix.jl
+ create mode 100644 config_smoke_test_wet_center.toml
+
+diff --git a/analysis/boundary_bottom_cells.jl b/analysis/boundary_bottom_cells.jl
+new file mode 100644
+index 0000000..c0e3ff8
+--- /dev/null
++++ b/analysis/boundary_bottom_cells.jl
+@@ -0,0 +1,84 @@
++# Diagnostic (patch 053, not for the merge): what GLORYS gives the partial bottom cells of the open sides.
++#
++# nested_ocean_model (NumericalEarth.jl#676) samples GLORYS at the centre of the whole (reference) cell. For a partial
++# bottom cell that point lies below the model's sea floor. For every open side, this samples the boundary-normal
++# velocity, T and S at the boundary row twice, at the whole-cell centre and at the centre of the wet part, at the parent
++# time the boundary bands hold now, and lists the partial bottom cells where the two differ most, with the model's own
++# value there now.
++#
++# Run in the REPL after a run (it uses `ocean` and `child` from panarctic.jl):
++#     include("analysis/boundary_bottom_cells.jl")
++
++using Oceananigans.Architectures: architecture, on_architecture
++using Oceananigans.Grids: ξnode, ηnode, rnode, inactive_node
++using Oceananigans.Operators: Δr
++using Oceananigans.Utils: launch!, KernelParameters
++using KernelAbstractions: @kernel, @index
++using Printf
++
++const NM = NumericalEarth.NestedModels
++
++@kernel function _sample_at_depth!(field, grid, loc, bounds, source, source_grid, source_loc, time, wet_center)
++    i, j, k = @index(Global, NTuple)
++    i′ = clamp(i, bounds[1]...)
++    j′ = clamp(j, bounds[2]...)
++    k′ = clamp(k, bounds[3]...)
++    ℓx, ℓy, ℓz = loc
++    r_whole = rnode(i′, j′, k′, grid, ℓx, ℓy, ℓz)
++    r_wet   = rnode(i′, j′, k′+1, grid, ℓx, ℓy, Face()) - Δr(i′, j′, k′, grid, ℓx, ℓy, ℓz) / 2
++    X = (ξnode(i′, j′, k′, grid, ℓx, ℓy, ℓz), ηnode(i′, j′, k′, grid, ℓx, ℓy, ℓz), ifelse(wet_center, r_wet, r_whole))
++    @inbounds field[i, j, k] = NM.parent_value(source, X, source_loc, source_grid, time, i′, j′, grid, ℓx, ℓy)
++end
++
++# The parent `source` sampled onto a copy of `band` (whole-cell or wet-part centre), on the CPU
++function sample_band(band, loc, source, time, wet_center)
++    field = NM.band_field(band.grid, loc, band.indices)
++    ranges = axes(field.data)[1:3]
++    params = KernelParameters(length.(ranges), first.(ranges) .- 1)
++    launch!(architecture(field), field.grid, params, _sample_at_depth!, field, field.grid, loc,
++            NM.parent_index_bounds(field, loc), source, NM.parent_grid(source), NM.parent_location(source),
++            time, wet_center)
++    return on_architecture(CPU(), field)
++end
++
++boundary_exchanger = ocean.model.exchanger
++parent_time = Oceananigans.Units.Time(boundary_exchanger.times.current)
++child_grid_cpu = on_architecture(CPU(), child.grid)
++child_fields = merge(child.velocities, child.tracers)
++
++for side in keys(boundary_exchanger.bands)
++    dim = NM.boundary_dimension(side)
++    for name in (NM.normal_velocity_name(side), :T, :S)
++        loc = NM.boundary_location(name)
++        band = boundary_exchanger.bands[side][name]
++        source = boundary_exchanger.sources[side][name]
++        whole = sample_band(band.current, loc, source, parent_time, false)
++        wet   = sample_band(band.current, loc, source, parent_time, true)
++        model_now = on_architecture(CPU(), child_fields[name])
++        b = NM.boundary_index(loc[dim], side, size(child_grid_cpu, dim))
++
++        rows = []
++        for s in 1:(dim == 1 ? Ny : Nx), k in 1:Nz
++            i, j = dim == 1 ? (b, s) : (s, b)
++            inactive_node(i, j, k, child_grid_cpu, loc...) && continue
++            Δ = Δr(i, j, k, child_grid_cpu, loc...)
++            Δ_whole = Δr(i, j, k, child_grid_cpu.underlying_grid, loc...)
++            Δ < Δ_whole || continue   # partial bottom cells only
++            push!(rows, (; i, j, k, r_whole = rnode(i, j, k, child_grid_cpu, loc...),
++                           r_wet = rnode(i, j, k+1, child_grid_cpu, loc[1], loc[2], Face()) - Δ / 2,
++                           fraction = Δ / Δ_whole, whole = whole[i, j, k], wet = wet[i, j, k], now = model_now[i, j, k]))
++        end
++
++        isempty(rows) && (println("$side $name: no partial bottom cells on the boundary row"); continue)
++        sort!(rows, by = r -> -abs(r.whole - r.wet))
++        @printf("\n%s side, %s at the boundary row (%d partial bottom cells): GLORYS at the whole-cell centre vs the wet centre\n",
++                side, name, length(rows))
++        @printf("max |whole − wet| = %.3g, mean |whole − wet| = %.3g\n",
++                abs(rows[1].whole - rows[1].wet), sum(r -> abs(r.whole - r.wet), rows) / length(rows))
++        @printf("%5s %5s %3s %9s %9s %6s %10s %10s %10s\n", "i", "j", "k", "z whole", "z wet", "wet %", "whole", "wet", "model now")
++        for r in rows[1:min(8, end)]
++            @printf("%5d %5d %3d %9.1f %9.1f %6.0f %10.4f %10.4f %10.4f\n",
++                    r.i, r.j, r.k, r.r_whole, r.r_wet, 100r.fraction, r.whole, r.wet, r.now)
++        end
++    end
++end
+diff --git a/boundary_wet_center_fix.jl b/boundary_wet_center_fix.jl
+new file mode 100644
+index 0000000..5a00ceb
+--- /dev/null
++++ b/boundary_wet_center_fix.jl
+@@ -0,0 +1,15 @@
++# Candidate fix for NumericalEarth.jl#676 (patch 053, not for the merge): sample GLORYS at the centre of the wet part
++# of a partial bottom cell, not at the centre of the whole cell.
++#
++# nested_ocean_model samples the parent at `rnode`, the centre of the reference (whole) cell. A partial bottom cell is
++# wet only from its top face down to the sea floor, so its whole-cell centre lies below the sea floor, where GLORYS
++# holds inpainted values. This samples at the top face minus half the wet thickness `Δr` instead; for every other
++# cell that is `rnode` itself. It changes the boundary bands (open boundary conditions, relaxation) and the initial
++# state, which both sample through `parent_node`. Only right for bottom partial cells (PartialCellBottom), which is
++# what this model uses. Included before nested_ocean_simulation is called.
++
++@eval NumericalEarth.NestedModels begin
++    @inline parent_node(i, j, k, grid, ℓx, ℓy, ℓz::Center) =
++        (ξnode(i, j, k, grid, ℓx, ℓy, ℓz), ηnode(i, j, k, grid, ℓx, ℓy, ℓz),
++         rnode(i, j, k+1, grid, ℓx, ℓy, Face()) - Oceananigans.Operators.Δr(i, j, k, grid, ℓx, ℓy, ℓz) / 2)
++end
+diff --git a/config_smoke_test_wet_center.toml b/config_smoke_test_wet_center.toml
+new file mode 100644
+index 0000000..192edc0
+--- /dev/null
++++ b/config_smoke_test_wet_center.toml
+@@ -0,0 +1,78 @@
++# Diagnostic (patch 053, not for the merge): config_smoke_test.toml with GLORYS sampled at the centre of the wet part of
++# partial bottom cells ([boundaries] sample_wet_center = true, boundary_wet_center_fix.jl), a candidate fix for
++# NumericalEarth.jl#676. The partial-cell smoke test has v ≈ 0.9 m/s at (i, j, k) = (25, 1, 4) in the partial bottom
++# cell of the Atlantic open side; it is gone with whole cells (patch 050). If it is also gone here, the cause is where
++# the open side samples GLORYS in that cell.
++#
++# Run with:  julia +1.13 --project=. panarctic.jl config_smoke_test_wet_center.toml
++
++architecture = "GPU"   # "GPU" or "CPU"
++experiment   = "smoke_test_wet_center"  # name of the run: output and figures go to output_dir/<experiment> and figure_dir/<experiment>
++
++[grid]
++spacing_km = 100    # largest horizontal grid spacing [km] (at the pole; ~15% finer near the Atlantic edge)
++Nz         = 20     # vertical levels
++depth      = 5000   # maximum depth (m)
++bathymetry       = "GEBCO2026"   # "GEBCO2026" (15″, with IBCAO), "ETOPO" (ETOPO 2022, 60″) or "GLORYS" (GLORYS's own sea floor)
++bottom           = "partial"     # "partial": bottom cells cut at the sea floor; "full": whole cells
++partial_cell_fix = true          # with partial cells: flux-form momentum advection at bottom-cell thickness jumps
++                                 # (Oceananigans.jl#6533), which removes the bottom jets of issue #6532
++
++[time]
++start_date = 1993-01-01   # initial condition (GLORYS); the run starts at 00:00 on this date
++end_date   = 1993-01-05   # the run ends at 00:00 on this date; for short tests a date and time, e.g. 1993-01-01T03:00
++dt_minutes = 10           # time step
++
++[atmosphere]
++jra55 = "multi_year"   # "multi_year": JRA55 for the run's own dates; "repeat_year": the 1990–91 repeat year
++inverse_barometer = true   # GLORYS's η carries no response to the atmospheric pressure that JRA55 applies to the model
++                           # (issue #37): add the inverse-barometer sea level −(pᵃ − ⟨pᵃ⟩)/(ρ₀g) to GLORYS's η at the
++                           # open sides (Flather) and to the initial free surface; its domain mean is removed, so the
++                           # volume is unchanged. false: GLORYS's η as it is, out of balance with the pressure
++
++[output]
++average_hours   = 24      # time-averaged output (3D ocean, free surface, sea ice), written to output_dir
++checkpoint_days = 30      # how often the full model state is saved for restarts
++restart         = false   # true: continue from the latest checkpoint in output_dir
++monitor_hours   = 1       # monitor.csv: transports through the open sides, mean η against GLORYS's, volume budget,
++                          # fastest point (plotting/volume_budget.jl, plotting/max_speed.jl); 0 = off
++
++[transports]
++# Volume, heat, salt and freshwater transports through the sections below and the open boundaries (see transports.jl).
++online                = true   # true: computed every time step and averaged over average_hours, written to arctic_transports.jld2
++reference_temperature = 0      # heat transport relative to this temperature (°C)
++reference_salinity    = 34.8   # freshwater transport relative to this salinity (g/kg)
++
++# Each section is a great-circle path through (longitude, latitude) waypoints. Positive transport flows to the right,
++# walking from the first waypoint to the last; these are ordered so that positive is into the Arctic. Both ends should
++# be on land, so the section spans the whole strait on any grid. Check with plotting/transport_sections.jl.
++[transports.sections]
++# Fram Strait follows the mooring array at 78°50′N; intermediate waypoints keep the great circles on that latitude.
++fram_strait         = { lon = [15.0, 10.0, 5.0, 0.0, -5.0, -10.0, -15.0, -20.0],
++                        lat = [78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333] }
++# Barents Sea Opening follows the mooring line from Norway (Fugløya) via Bjørnøya to Sørkapp, Svalbard.
++barents_sea_opening = { lon = [20.0, 19.0, 16.5],  lat = [70.0, 74.45, 77.0] }
++bering_strait       = { lon = [-166.0, -171.0], lat = [66.0, 66.0] }
++davis_strait        = { lon = [-53.0, -63.0],   lat = [67.0, 66.5] }
++
++[paths]
++data_dir   = ""   # where downloads are stored; "" = each dataset's default cache
++output_dir = "output"    # model output: time averages (.jld2), checkpoints and the config; one folder per experiment
++figure_dir = "figures"   # figures and movies from the plotting/ scripts; one folder per experiment
++
++[boundaries]
++velocity_inflow_days = 1   # oblique radiation on u, v: nudging timescale toward GLORYS on inflow
++tracer_inflow_km     = 20  # T, S reservoir inflow relaxation length, both open sides
++relaxation_hours     = 0   # T, S and baroclinic u, v relax toward GLORYS in a ~2/3° band along the open sides
++                           # over this timescale; 0 = off (nested_ocean_model's default is 6)
++
++# Volume control (volume_control.jl): the net inflow through the two open sides together is pinned at every barotropic
++# substep, as NEMO and ROMS do; Flather splits it between the sides. Without it the domain's volume drifts from GLORYS's.
++follow_glorys_volume      = true   # true: the net inflow follows GLORYS's domain-mean η, with the surface freshwater handed back
++volume_relaxation_days    = 1      # with follow_glorys_volume: time over which the remaining drift from GLORYS's mean η is removed
++follow_glorys_tendency    = false  # with follow_glorys_volume: true also follows GLORYS's rate of change exactly
++# net_inflow_Sv           = 0.0    # with follow_glorys_volume = false: a constant net inflow instead (Sv, positive into the domain);
++                                   # with neither, Flather alone (no volume control)
++net_inflow_depth_exponent = 0.5    # the pin's correction to each boundary column ∝ Hᵖ: 0 uniform per length, 1 uniform velocity
++                                   # (NEMO, ROMS), 0.5 a uniform shift of GLORYS's η in Flather
++sample_wet_center         = true   # patch 053: GLORYS at the centre of the wet part of partial bottom cells (boundary_wet_center_fix.jl)
+diff --git a/panarctic.jl b/panarctic.jl
+index cd72d01..1c98038 100644
+--- a/panarctic.jl
++++ b/panarctic.jl
+@@ -8,6 +8,8 @@ include("nested_pressure_fix.jl")
+ 
+ # Mass-consistent momentum advection at partial bottom cells (Oceananigans.jl#6533), before the model is built
+ get(config["grid"], "partial_cell_fix", false) && grid.immersed_boundary isa PartialCellBottom && include("partial_cell_fix.jl")
++# Patch 053 (diagnostic): GLORYS sampled at the centre of the wet part of partial bottom cells, before the model is built
++get(config["boundaries"], "sample_wet_center", false) && include("boundary_wet_center_fix.jl")
+ include("transports.jl")
+ include("volume_control.jl")
+ include("monitor.jl")
+-- 
+2.43.0
+

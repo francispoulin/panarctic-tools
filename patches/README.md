@@ -88,3 +88,5 @@ Plots, from `nested/`: `julia --project=.. plot_budget.jl <folder>` and `julia -
   annual means over many years and the run is four days of one January, so look for sign and order of magnitude.
 - `nested_monitor.csv`: `pin_correction_Sv`, `pin_max_velocity` (how hard the pin pushes) and the Atlantic/Pacific
   split.
+| 053 | PanArcticShenanigans | `fjp/test-053` only (diagnostic, not for the merge) | after 051 | `boundary_wet_center_fix.jl` (candidate #676 fix: GLORYS sampled at the centre of the wet part of partial bottom cells; `[boundaries] sample_wet_center = true`), `config_smoke_test_wet_center.toml`, `analysis/boundary_bottom_cells.jl` (GLORYS at the whole-cell vs wet centre on the boundary rows, with the model's value) |
+| 054 | PanArcticShenanigans | `fjp/test-054` only (diagnostic, not for the merge) | after 051 | `[atmosphere] pressure = false` skips `nested_pressure_fix.jl`; `config_pressure_on.toml`, `config_pressure_off.toml` (15 km, 4 days from 1 Jan 1993, pressure + inverse barometer both on / both off) to compare with GLORYS |
