@@ -1,0 +1,28 @@
+From 42bd15816d6614f03a8842ffb2a5772b72007776 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 17 Nov 2026 21:31:20 -0500
+Subject: [PATCH] boundary_bottom_cells.jl: KernelAbstractions through
+ Oceananigans (not a dependency of this project)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Abhhvkp8Pai9cvvctGUDX5
+---
+ analysis/boundary_bottom_cells.jl | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/analysis/boundary_bottom_cells.jl b/analysis/boundary_bottom_cells.jl
+index c0e3ff8..d12480a 100644
+--- a/analysis/boundary_bottom_cells.jl
++++ b/analysis/boundary_bottom_cells.jl
+@@ -13,7 +13,7 @@ using Oceananigans.Architectures: architecture, on_architecture
+ using Oceananigans.Grids: ξnode, ηnode, rnode, inactive_node
+ using Oceananigans.Operators: Δr
+ using Oceananigans.Utils: launch!, KernelParameters
+-using KernelAbstractions: @kernel, @index
++using Oceananigans.Utils.KernelAbstractions: @kernel, @index   # KernelAbstractions is not a dependency of this project
+ using Printf
+ 
+ const NM = NumericalEarth.NestedModels
+-- 
+2.43.0
+

@@ -60,6 +60,7 @@ Numbered in the order to apply, across repositories. Each was checked to apply w
 | 052 | PanArcticShenanigans | `fjp/test-052` only (diagnostic, not for the merge) | after 051 | `config_cost_fix_on.toml`, `config_cost_fix_off.toml`: 15 km, 1 day, partial-cell fix on/off, monitor and online transports off, for the cost question on Oceananigans #6533 |
 | 053 | PanArcticShenanigans | `fjp/test-053` only (diagnostic, not for the merge) | after 051 | `boundary_wet_center_fix.jl` (candidate #676 fix: GLORYS sampled at the centre of the wet part of partial bottom cells; `[boundaries] sample_wet_center = true`), `config_smoke_test_wet_center.toml`, `analysis/boundary_bottom_cells.jl` (GLORYS at the whole-cell vs wet centre on the boundary rows, with the model's value) |
 | 054 | PanArcticShenanigans | `fjp/test-054` only (diagnostic, not for the merge) | after 051 | `[atmosphere] pressure = false` skips `nested_pressure_fix.jl`; `config_pressure_on.toml`, `config_pressure_off.toml` (15 km, 4 days from 1 Jan 1993, pressure + inverse barometer both on / both off) to compare with GLORYS |
+| 055 | PanArcticShenanigans | `fjp/test-053` only (diagnostic) | after 053 | `analysis/boundary_bottom_cells.jl`: KernelAbstractions through Oceananigans (it is not a dependency of the project) |
 
 ## Applying 001–006
 
