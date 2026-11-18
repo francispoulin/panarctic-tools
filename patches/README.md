@@ -58,6 +58,8 @@ Numbered in the order to apply, across repositories. Each was checked to apply w
 | 050 | PanArcticShenanigans | `fjp/test-050` only (diagnostic, not for the merge) | after 049 | `config_smoke_test_full_cells.toml`: smoke test with whole bottom cells, for the fast v at (25, 1, 4) in the partial bottom cell of the Atlantic open side |
 | 051 | PanArcticShenanigans | `fjp/merge-nested` | after 049 | `analysis/glorys_transports.jl` (GLORYS's daily transports through the [transports] sections on GLORYS's own grid, with transports.jl's own code), `plotting/gateway_transports.jl` (model vs GLORYS) |
 | 052 | PanArcticShenanigans | `fjp/test-052` only (diagnostic, not for the merge) | after 051 | `config_cost_fix_on.toml`, `config_cost_fix_off.toml`: 15 km, 1 day, partial-cell fix on/off, monitor and online transports off, for the cost question on Oceananigans #6533 |
+| 053 | PanArcticShenanigans | `fjp/test-053` only (diagnostic, not for the merge) | after 051 | `boundary_wet_center_fix.jl` (candidate #676 fix: GLORYS sampled at the centre of the wet part of partial bottom cells; `[boundaries] sample_wet_center = true`), `config_smoke_test_wet_center.toml`, `analysis/boundary_bottom_cells.jl` (GLORYS at the whole-cell vs wet centre on the boundary rows, with the model's value) |
+| 054 | PanArcticShenanigans | `fjp/test-054` only (diagnostic, not for the merge) | after 051 | `[atmosphere] pressure = false` skips `nested_pressure_fix.jl`; `config_pressure_on.toml`, `config_pressure_off.toml` (15 km, 4 days from 1 Jan 1993, pressure + inverse barometer both on / both off) to compare with GLORYS |
 
 ## Applying 001–006
 
@@ -88,5 +90,3 @@ Plots, from `nested/`: `julia --project=.. plot_budget.jl <folder>` and `julia -
   annual means over many years and the run is four days of one January, so look for sign and order of magnitude.
 - `nested_monitor.csv`: `pin_correction_Sv`, `pin_max_velocity` (how hard the pin pushes) and the Atlantic/Pacific
   split.
-| 053 | PanArcticShenanigans | `fjp/test-053` only (diagnostic, not for the merge) | after 051 | `boundary_wet_center_fix.jl` (candidate #676 fix: GLORYS sampled at the centre of the wet part of partial bottom cells; `[boundaries] sample_wet_center = true`), `config_smoke_test_wet_center.toml`, `analysis/boundary_bottom_cells.jl` (GLORYS at the whole-cell vs wet centre on the boundary rows, with the model's value) |
-| 054 | PanArcticShenanigans | `fjp/test-054` only (diagnostic, not for the merge) | after 051 | `[atmosphere] pressure = false` skips `nested_pressure_fix.jl`; `config_pressure_on.toml`, `config_pressure_off.toml` (15 km, 4 days from 1 Jan 1993, pressure + inverse barometer both on / both off) to compare with GLORYS |
