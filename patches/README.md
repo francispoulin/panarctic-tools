@@ -57,6 +57,7 @@ Numbered in the order to apply, across repositories. Each was checked to apply w
 | 049 | PanArcticShenanigans | `fjp/merge-nested` | after 048 | `nested_pressure_fix.jl`: `forcing_barotropic_potential(::NestedModel)` → child; without it no nested run (main since #43) gets the JRA55 pressure, and the inverse barometer is zero |
 | 050 | PanArcticShenanigans | `fjp/test-050` only (diagnostic, not for the merge) | after 049 | `config_smoke_test_full_cells.toml`: smoke test with whole bottom cells, for the fast v at (25, 1, 4) in the partial bottom cell of the Atlantic open side |
 | 051 | PanArcticShenanigans | `fjp/merge-nested` | after 049 | `analysis/glorys_transports.jl` (GLORYS's daily transports through the [transports] sections on GLORYS's own grid, with transports.jl's own code), `plotting/gateway_transports.jl` (model vs GLORYS) |
+| 052 | PanArcticShenanigans | `fjp/test-052` only (diagnostic, not for the merge) | after 051 | `config_cost_fix_on.toml`, `config_cost_fix_off.toml`: 15 km, 1 day, partial-cell fix on/off, monitor and online transports off, for the cost question on Oceananigans #6533 |
 
 ## Applying 001–006
 
