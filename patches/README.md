@@ -62,6 +62,7 @@ Numbered in the order to apply, across repositories. Each was checked to apply w
 | 054 | PanArcticShenanigans | `fjp/test-054` only (diagnostic, not for the merge) | after 051 | `[atmosphere] pressure = false` skips `nested_pressure_fix.jl`; `config_pressure_on.toml`, `config_pressure_off.toml` (15 km, 4 days from 1 Jan 1993, pressure + inverse barometer both on / both off) to compare with GLORYS |
 | 055 | PanArcticShenanigans | `fjp/test-053` only (diagnostic) | after 053 | `analysis/boundary_bottom_cells.jl`: KernelAbstractions through Oceananigans (it is not a dependency of the project) |
 | 056 | PanArcticShenanigans | `fjp/test-053` only (diagnostic) | after 055 | the Atlantic face jet at (25, 1, 4): `config_smoke_test_inflow_1h.toml` (inflow nudging 1 h) and `config_smoke_test_face_direction.toml` + `radiation_face_direction.jl` (radiation decides inflow/outflow on the boundary face, not the first interior face) |
+| 057 | PanArcticShenanigans | `fjp/merge-nested` | after 051 | `[atmosphere] pressure = false` (default; skips `nested_pressure_fix.jl`) and `inverse_barometer = false` in config.toml and the smoke configs: with the pressure on, Fram drifts far from GLORYS (054) |
 
 ## Applying 001–006
 

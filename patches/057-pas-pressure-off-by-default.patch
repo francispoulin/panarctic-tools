@@ -1,0 +1,109 @@
+From 9b4a2a0365a84dcb0843027053bd806f8d1153c7 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 17 Nov 2026 22:23:33 -0500
+Subject: [PATCH] Atmospheric pressure on the ocean off by default, and the
+ inverse barometer with it
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+[atmosphere] pressure = false skips nested_pressure_fix.jl. With the pressure on, Fram Strait drifts far from
+GLORYS (1–5 Jan 1993: day 4 −12.4 Sv at 15 km and −11.4 at 100 km, against GLORYS's −2.1 and −5.6 without the
+pressure), which looks like an error in the pressure path rather than physics. Without the pressure the inverse
+barometer is off too, so neither the model nor GLORYS feels the pressure. Main has had no pressure since #43.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Abhhvkp8Pai9cvvctGUDX5
+---
+ config.toml                    | 12 ++++++++----
+ config_smoke_test.toml         | 12 ++++++++----
+ config_smoke_test_sep2005.toml | 12 ++++++++----
+ panarctic.jl                   |  3 ++-
+ 4 files changed, 26 insertions(+), 13 deletions(-)
+
+diff --git a/config.toml b/config.toml
+index 608eea7..511baf1 100644
+--- a/config.toml
++++ b/config.toml
+@@ -25,10 +25,14 @@ dt_minutes = 10           # time step
+ 
+ [atmosphere]
+ jra55 = "multi_year"   # "multi_year": JRA55 for the run's own dates; "repeat_year": the 1990–91 repeat year
+-inverse_barometer = true   # GLORYS's η carries no response to the atmospheric pressure that JRA55 applies to the model
+-                           # (issue #37): add the inverse-barometer sea level −(pᵃ − ⟨pᵃ⟩)/(ρ₀g) to GLORYS's η at the
+-                           # open sides (Flather) and to the initial free surface; its domain mean is removed, so the
+-                           # volume is unchanged. false: GLORYS's η as it is, out of balance with the pressure
++pressure = false           # true: JRA55's sea-level pressure acts on the ocean (nested_pressure_fix.jl). Off for now: with it,
++                           # Fram Strait drifts far from GLORYS (1–5 Jan 1993, 15 km: day 4 −12.4 Sv, GLORYS −2.1, −5.6
++                           # without pressure; the same at 100 km), which looks like an error in the pressure path, not
++                           # physics. Main has had no pressure on the ocean since #43.
++inverse_barometer = false  # with pressure = true: GLORYS's η carries no response to the pressure (issue #37), so add the
++                           # inverse-barometer sea level −(pᵃ − ⟨pᵃ⟩)/(ρ₀g) to GLORYS's η at the open sides (Flather) and
++                           # to the initial free surface; its domain mean is removed, so the volume is unchanged.
++                           # Keep false with pressure = false: then neither the model nor GLORYS feels the pressure
+ 
+ [output]
+ average_hours   = 24      # time-averaged output (3D ocean, free surface, sea ice), written to output_dir
+diff --git a/config_smoke_test.toml b/config_smoke_test.toml
+index 64ea840..5699a0f 100644
+--- a/config_smoke_test.toml
++++ b/config_smoke_test.toml
+@@ -27,10 +27,14 @@ dt_minutes = 10           # time step
+ 
+ [atmosphere]
+ jra55 = "multi_year"   # "multi_year": JRA55 for the run's own dates; "repeat_year": the 1990–91 repeat year
+-inverse_barometer = true   # GLORYS's η carries no response to the atmospheric pressure that JRA55 applies to the model
+-                           # (issue #37): add the inverse-barometer sea level −(pᵃ − ⟨pᵃ⟩)/(ρ₀g) to GLORYS's η at the
+-                           # open sides (Flather) and to the initial free surface; its domain mean is removed, so the
+-                           # volume is unchanged. false: GLORYS's η as it is, out of balance with the pressure
++pressure = false           # true: JRA55's sea-level pressure acts on the ocean (nested_pressure_fix.jl). Off for now: with it,
++                           # Fram Strait drifts far from GLORYS (1–5 Jan 1993, 15 km: day 4 −12.4 Sv, GLORYS −2.1, −5.6
++                           # without pressure; the same at 100 km), which looks like an error in the pressure path, not
++                           # physics. Main has had no pressure on the ocean since #43.
++inverse_barometer = false  # with pressure = true: GLORYS's η carries no response to the pressure (issue #37), so add the
++                           # inverse-barometer sea level −(pᵃ − ⟨pᵃ⟩)/(ρ₀g) to GLORYS's η at the open sides (Flather) and
++                           # to the initial free surface; its domain mean is removed, so the volume is unchanged.
++                           # Keep false with pressure = false: then neither the model nor GLORYS feels the pressure
+ 
+ [output]
+ average_hours   = 24      # time-averaged output (3D ocean, free surface, sea ice), written to output_dir
+diff --git a/config_smoke_test_sep2005.toml b/config_smoke_test_sep2005.toml
+index a59c65f..0ce61cc 100644
+--- a/config_smoke_test_sep2005.toml
++++ b/config_smoke_test_sep2005.toml
+@@ -26,10 +26,14 @@ dt_minutes = 10           # time step
+ 
+ [atmosphere]
+ jra55 = "multi_year"   # "multi_year": JRA55 for the run's own dates; "repeat_year": the 1990–91 repeat year
+-inverse_barometer = true   # GLORYS's η carries no response to the atmospheric pressure that JRA55 applies to the model
+-                           # (issue #37): add the inverse-barometer sea level −(pᵃ − ⟨pᵃ⟩)/(ρ₀g) to GLORYS's η at the
+-                           # open sides (Flather) and to the initial free surface; its domain mean is removed, so the
+-                           # volume is unchanged. false: GLORYS's η as it is, out of balance with the pressure
++pressure = false           # true: JRA55's sea-level pressure acts on the ocean (nested_pressure_fix.jl). Off for now: with it,
++                           # Fram Strait drifts far from GLORYS (1–5 Jan 1993, 15 km: day 4 −12.4 Sv, GLORYS −2.1, −5.6
++                           # without pressure; the same at 100 km), which looks like an error in the pressure path, not
++                           # physics. Main has had no pressure on the ocean since #43.
++inverse_barometer = false  # with pressure = true: GLORYS's η carries no response to the pressure (issue #37), so add the
++                           # inverse-barometer sea level −(pᵃ − ⟨pᵃ⟩)/(ρ₀g) to GLORYS's η at the open sides (Flather) and
++                           # to the initial free surface; its domain mean is removed, so the volume is unchanged.
++                           # Keep false with pressure = false: then neither the model nor GLORYS feels the pressure
+ 
+ [output]
+ average_hours   = 24      # time-averaged output (3D ocean, free surface, sea ice), written to output_dir
+diff --git a/panarctic.jl b/panarctic.jl
+index cd72d01..ca851ff 100644
+--- a/panarctic.jl
++++ b/panarctic.jl
+@@ -4,7 +4,8 @@
+ 
+ include("setup.jl")
+ include("jra55_read_fix.jl")
+-include("nested_pressure_fix.jl")
++# The atmospheric pressure on the nested ocean ([atmosphere] pressure, off by default; see config.toml)
++get(config["atmosphere"], "pressure", false) && include("nested_pressure_fix.jl")
+ 
+ # Mass-consistent momentum advection at partial bottom cells (Oceananigans.jl#6533), before the model is built
+ get(config["grid"], "partial_cell_fix", false) && grid.immersed_boundary isa PartialCellBottom && include("partial_cell_fix.jl")
+-- 
+2.43.0
+
