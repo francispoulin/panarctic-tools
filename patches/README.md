@@ -64,6 +64,7 @@ Numbered in the order to apply, across repositories. Each was checked to apply w
 | 056 | PanArcticShenanigans | `fjp/test-053` only (diagnostic) | after 055 | the Atlantic face jet at (25, 1, 4): `config_smoke_test_inflow_1h.toml` (inflow nudging 1 h) and `config_smoke_test_face_direction.toml` + `radiation_face_direction.jl` (radiation decides inflow/outflow on the boundary face, not the first interior face) |
 | 057 | PanArcticShenanigans | `fjp/merge-nested` | after 051 | `[atmosphere] pressure = false` (default; skips `nested_pressure_fix.jl`) and `inverse_barometer = false` in config.toml and the smoke configs: with the pressure on, Fram drifts far from GLORYS (054) |
 | 058 | PanArcticShenanigans | `fjp/merge-nested` | after 057 | `velocity_inflow_days = 0.0417` (1 hour) in config.toml and the smoke configs: removes the open-face jet in partial bottom cells; sections move < 0.1 Sv (056) |
+| 060 | PanArcticShenanigans | `fjp/merge-nested` (or the first PR after it) | after 058 | `analysis/tsubouchi_comparison.jl`: calendar-month means of volume, heat, freshwater, model vs GLORYS, and means over Tsubouchi et al.'s (2018) 30-day blocks on their reference values (1.01 °C, 34.67), model and GLORYS vs Tsubouchi; tables in `output_dir/tsubouchi_comparison.md`, figure `tsubouchi_comparison.png`; reference CSVs in `analysis/references/` |
 
 ## Applying 001–006
 
