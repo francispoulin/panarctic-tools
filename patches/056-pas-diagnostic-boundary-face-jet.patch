@@ -1,0 +1,233 @@
+From a6c4964b913fed9f7890d5fe4e80f983184f230d Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 17 Nov 2026 21:50:45 -0500
+Subject: [PATCH] Diagnostic: the Atlantic face jet against the inflow nudging
+ and the radiation direction (not for the merge)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The face (25, 1, 4), a partial bottom cell on the Atlantic open side, holds v = −0.90 m/s while GLORYS gives
+−0.26 there and the first interior face +0.28. ObliqueRadiation decides inflow versus outflow of a NormalFlow
+condition from the first interior face, so this face counts as inflow: no radiation, 1-day nudging only.
+config_smoke_test_inflow_1h.toml nudges over 1 hour instead; config_smoke_test_face_direction.toml decides the
+direction on the boundary face (radiation_face_direction.jl, [boundaries] classify_by_boundary_velocity = true).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Abhhvkp8Pai9cvvctGUDX5
+---
+ config_smoke_test_face_direction.toml | 82 +++++++++++++++++++++++++++
+ config_smoke_test_inflow_1h.toml      | 79 ++++++++++++++++++++++++++
+ panarctic.jl                          |  2 +
+ radiation_face_direction.jl           | 11 ++++
+ 4 files changed, 174 insertions(+)
+ create mode 100644 config_smoke_test_face_direction.toml
+ create mode 100644 config_smoke_test_inflow_1h.toml
+ create mode 100644 radiation_face_direction.jl
+
+diff --git a/config_smoke_test_face_direction.toml b/config_smoke_test_face_direction.toml
+new file mode 100644
+index 0000000..506ac4a
+--- /dev/null
++++ b/config_smoke_test_face_direction.toml
+@@ -0,0 +1,82 @@
++# Diagnostic (patch 056, not for the merge): config_smoke_test_wet_center.toml with inflow versus outflow of the
++# boundary-normal velocity decided on the boundary face ([boundaries] classify_by_boundary_velocity = true,
++# radiation_face_direction.jl).
++# The smoke test with GLORYS at the wet centre of partial bottom cells (patch 053) has v = −0.90 m/s on the Atlantic
++# open face (25, 1, 4), a partial bottom cell, against GLORYS's −0.26 and +0.28 on the first interior face. The open
++# boundary condition treats that face as inflow (direction from the interior face): no radiation, 1-day nudging.
++# Compare the fastest deep points with smoke_test_wet_center (monitor.csv).
++# Run after config_smoke_test_inflow_1h.toml in the same REPL (the override cannot be unloaded).
++#
++# Run with:  julia --project=. panarctic.jl config_smoke_test_face_direction.toml
++
++architecture = "GPU"   # "GPU" or "CPU"
++experiment   = "smoke_test_face_direction"  # name of the run: output and figures go to output_dir/<experiment> and figure_dir/<experiment>
++
++[grid]
++spacing_km = 100    # largest horizontal grid spacing [km] (at the pole; ~15% finer near the Atlantic edge)
++Nz         = 20     # vertical levels
++depth      = 5000   # maximum depth (m)
++bathymetry       = "GEBCO2026"   # "GEBCO2026" (15″, with IBCAO), "ETOPO" (ETOPO 2022, 60″) or "GLORYS" (GLORYS's own sea floor)
++bottom           = "partial"     # "partial": bottom cells cut at the sea floor; "full": whole cells
++partial_cell_fix = true          # with partial cells: flux-form momentum advection at bottom-cell thickness jumps
++                                 # (Oceananigans.jl#6533), which removes the bottom jets of issue #6532
++
++[time]
++start_date = 1993-01-01   # initial condition (GLORYS); the run starts at 00:00 on this date
++end_date   = 1993-01-05   # the run ends at 00:00 on this date; for short tests a date and time, e.g. 1993-01-01T03:00
++dt_minutes = 10           # time step
++
++[atmosphere]
++jra55 = "multi_year"   # "multi_year": JRA55 for the run's own dates; "repeat_year": the 1990–91 repeat year
++inverse_barometer = true   # GLORYS's η carries no response to the atmospheric pressure that JRA55 applies to the model
++                           # (issue #37): add the inverse-barometer sea level −(pᵃ − ⟨pᵃ⟩)/(ρ₀g) to GLORYS's η at the
++                           # open sides (Flather) and to the initial free surface; its domain mean is removed, so the
++                           # volume is unchanged. false: GLORYS's η as it is, out of balance with the pressure
++
++[output]
++average_hours   = 24      # time-averaged output (3D ocean, free surface, sea ice), written to output_dir
++checkpoint_days = 30      # how often the full model state is saved for restarts
++restart         = false   # true: continue from the latest checkpoint in output_dir
++monitor_hours   = 1       # monitor.csv: transports through the open sides, mean η against GLORYS's, volume budget,
++                          # fastest point (plotting/volume_budget.jl, plotting/max_speed.jl); 0 = off
++
++[transports]
++# Volume, heat, salt and freshwater transports through the sections below and the open boundaries (see transports.jl).
++online                = true   # true: computed every time step and averaged over average_hours, written to arctic_transports.jld2
++reference_temperature = 0      # heat transport relative to this temperature (°C)
++reference_salinity    = 34.8   # freshwater transport relative to this salinity (g/kg)
++
++# Each section is a great-circle path through (longitude, latitude) waypoints. Positive transport flows to the right,
++# walking from the first waypoint to the last; these are ordered so that positive is into the Arctic. Both ends should
++# be on land, so the section spans the whole strait on any grid. Check with plotting/transport_sections.jl.
++[transports.sections]
++# Fram Strait follows the mooring array at 78°50′N; intermediate waypoints keep the great circles on that latitude.
++fram_strait         = { lon = [15.0, 10.0, 5.0, 0.0, -5.0, -10.0, -15.0, -20.0],
++                        lat = [78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333] }
++# Barents Sea Opening follows the mooring line from Norway (Fugløya) via Bjørnøya to Sørkapp, Svalbard.
++barents_sea_opening = { lon = [20.0, 19.0, 16.5],  lat = [70.0, 74.45, 77.0] }
++bering_strait       = { lon = [-166.0, -171.0], lat = [66.0, 66.0] }
++davis_strait        = { lon = [-53.0, -63.0],   lat = [67.0, 66.5] }
++
++[paths]
++data_dir   = ""   # where downloads are stored; "" = each dataset's default cache
++output_dir = "output"    # model output: time averages (.jld2), checkpoints and the config; one folder per experiment
++figure_dir = "figures"   # figures and movies from the plotting/ scripts; one folder per experiment
++
++[boundaries]
++velocity_inflow_days = 1   # oblique radiation on u, v: nudging timescale toward GLORYS on inflow
++tracer_inflow_km     = 20  # T, S reservoir inflow relaxation length, both open sides
++relaxation_hours     = 0   # T, S and baroclinic u, v relax toward GLORYS in a ~2/3° band along the open sides
++                           # over this timescale; 0 = off (nested_ocean_model's default is 6)
++
++# Volume control (volume_control.jl): the net inflow through the two open sides together is pinned at every barotropic
++# substep, as NEMO and ROMS do; Flather splits it between the sides. Without it the domain's volume drifts from GLORYS's.
++follow_glorys_volume      = true   # true: the net inflow follows GLORYS's domain-mean η, with the surface freshwater handed back
++volume_relaxation_days    = 1      # with follow_glorys_volume: time over which the remaining drift from GLORYS's mean η is removed
++follow_glorys_tendency    = false  # with follow_glorys_volume: true also follows GLORYS's rate of change exactly
++# net_inflow_Sv           = 0.0    # with follow_glorys_volume = false: a constant net inflow instead (Sv, positive into the domain);
++                                   # with neither, Flather alone (no volume control)
++net_inflow_depth_exponent = 0.5    # the pin's correction to each boundary column ∝ Hᵖ: 0 uniform per length, 1 uniform velocity
++                                   # (NEMO, ROMS), 0.5 a uniform shift of GLORYS's η in Flather
++sample_wet_center         = true   # patch 053: GLORYS at the centre of the wet part of partial bottom cells (boundary_wet_center_fix.jl)
++classify_by_boundary_velocity = true   # patch 056: inflow/outflow of the boundary-normal velocity from the boundary face (radiation_face_direction.jl)
+diff --git a/config_smoke_test_inflow_1h.toml b/config_smoke_test_inflow_1h.toml
+new file mode 100644
+index 0000000..9d27a72
+--- /dev/null
++++ b/config_smoke_test_inflow_1h.toml
+@@ -0,0 +1,79 @@
++# Diagnostic (patch 056, not for the merge): config_smoke_test_wet_center.toml with the boundary velocities nudged
++# toward GLORYS on inflow over 1 hour instead of 1 day ([boundaries] velocity_inflow_days).
++# The smoke test with GLORYS at the wet centre of partial bottom cells (patch 053) has v = −0.90 m/s on the Atlantic
++# open face (25, 1, 4), a partial bottom cell, against GLORYS's −0.26 and +0.28 on the first interior face. The open
++# boundary condition treats that face as inflow (direction from the interior face): no radiation, 1-day nudging.
++# Compare the fastest deep points with smoke_test_wet_center (monitor.csv).
++#
++# Run with:  julia --project=. panarctic.jl config_smoke_test_inflow_1h.toml
++
++architecture = "GPU"   # "GPU" or "CPU"
++experiment   = "smoke_test_inflow_1h"  # name of the run: output and figures go to output_dir/<experiment> and figure_dir/<experiment>
++
++[grid]
++spacing_km = 100    # largest horizontal grid spacing [km] (at the pole; ~15% finer near the Atlantic edge)
++Nz         = 20     # vertical levels
++depth      = 5000   # maximum depth (m)
++bathymetry       = "GEBCO2026"   # "GEBCO2026" (15″, with IBCAO), "ETOPO" (ETOPO 2022, 60″) or "GLORYS" (GLORYS's own sea floor)
++bottom           = "partial"     # "partial": bottom cells cut at the sea floor; "full": whole cells
++partial_cell_fix = true          # with partial cells: flux-form momentum advection at bottom-cell thickness jumps
++                                 # (Oceananigans.jl#6533), which removes the bottom jets of issue #6532
++
++[time]
++start_date = 1993-01-01   # initial condition (GLORYS); the run starts at 00:00 on this date
++end_date   = 1993-01-05   # the run ends at 00:00 on this date; for short tests a date and time, e.g. 1993-01-01T03:00
++dt_minutes = 10           # time step
++
++[atmosphere]
++jra55 = "multi_year"   # "multi_year": JRA55 for the run's own dates; "repeat_year": the 1990–91 repeat year
++inverse_barometer = true   # GLORYS's η carries no response to the atmospheric pressure that JRA55 applies to the model
++                           # (issue #37): add the inverse-barometer sea level −(pᵃ − ⟨pᵃ⟩)/(ρ₀g) to GLORYS's η at the
++                           # open sides (Flather) and to the initial free surface; its domain mean is removed, so the
++                           # volume is unchanged. false: GLORYS's η as it is, out of balance with the pressure
++
++[output]
++average_hours   = 24      # time-averaged output (3D ocean, free surface, sea ice), written to output_dir
++checkpoint_days = 30      # how often the full model state is saved for restarts
++restart         = false   # true: continue from the latest checkpoint in output_dir
++monitor_hours   = 1       # monitor.csv: transports through the open sides, mean η against GLORYS's, volume budget,
++                          # fastest point (plotting/volume_budget.jl, plotting/max_speed.jl); 0 = off
++
++[transports]
++# Volume, heat, salt and freshwater transports through the sections below and the open boundaries (see transports.jl).
++online                = true   # true: computed every time step and averaged over average_hours, written to arctic_transports.jld2
++reference_temperature = 0      # heat transport relative to this temperature (°C)
++reference_salinity    = 34.8   # freshwater transport relative to this salinity (g/kg)
++
++# Each section is a great-circle path through (longitude, latitude) waypoints. Positive transport flows to the right,
++# walking from the first waypoint to the last; these are ordered so that positive is into the Arctic. Both ends should
++# be on land, so the section spans the whole strait on any grid. Check with plotting/transport_sections.jl.
++[transports.sections]
++# Fram Strait follows the mooring array at 78°50′N; intermediate waypoints keep the great circles on that latitude.
++fram_strait         = { lon = [15.0, 10.0, 5.0, 0.0, -5.0, -10.0, -15.0, -20.0],
++                        lat = [78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333] }
++# Barents Sea Opening follows the mooring line from Norway (Fugløya) via Bjørnøya to Sørkapp, Svalbard.
++barents_sea_opening = { lon = [20.0, 19.0, 16.5],  lat = [70.0, 74.45, 77.0] }
++bering_strait       = { lon = [-166.0, -171.0], lat = [66.0, 66.0] }
++davis_strait        = { lon = [-53.0, -63.0],   lat = [67.0, 66.5] }
++
++[paths]
++data_dir   = ""   # where downloads are stored; "" = each dataset's default cache
++output_dir = "output"    # model output: time averages (.jld2), checkpoints and the config; one folder per experiment
++figure_dir = "figures"   # figures and movies from the plotting/ scripts; one folder per experiment
++
++[boundaries]
++velocity_inflow_days = 0.041667   # oblique radiation on u, v: nudging timescale toward GLORYS on inflow
++tracer_inflow_km     = 20  # T, S reservoir inflow relaxation length, both open sides
++relaxation_hours     = 0   # T, S and baroclinic u, v relax toward GLORYS in a ~2/3° band along the open sides
++                           # over this timescale; 0 = off (nested_ocean_model's default is 6)
++
++# Volume control (volume_control.jl): the net inflow through the two open sides together is pinned at every barotropic
++# substep, as NEMO and ROMS do; Flather splits it between the sides. Without it the domain's volume drifts from GLORYS's.
++follow_glorys_volume      = true   # true: the net inflow follows GLORYS's domain-mean η, with the surface freshwater handed back
++volume_relaxation_days    = 1      # with follow_glorys_volume: time over which the remaining drift from GLORYS's mean η is removed
++follow_glorys_tendency    = false  # with follow_glorys_volume: true also follows GLORYS's rate of change exactly
++# net_inflow_Sv           = 0.0    # with follow_glorys_volume = false: a constant net inflow instead (Sv, positive into the domain);
++                                   # with neither, Flather alone (no volume control)
++net_inflow_depth_exponent = 0.5    # the pin's correction to each boundary column ∝ Hᵖ: 0 uniform per length, 1 uniform velocity
++                                   # (NEMO, ROMS), 0.5 a uniform shift of GLORYS's η in Flather
++sample_wet_center         = true   # patch 053: GLORYS at the centre of the wet part of partial bottom cells (boundary_wet_center_fix.jl)
+diff --git a/panarctic.jl b/panarctic.jl
+index 1c98038..e991eb3 100644
+--- a/panarctic.jl
++++ b/panarctic.jl
+@@ -10,6 +10,8 @@ include("nested_pressure_fix.jl")
+ get(config["grid"], "partial_cell_fix", false) && grid.immersed_boundary isa PartialCellBottom && include("partial_cell_fix.jl")
+ # Patch 053 (diagnostic): GLORYS sampled at the centre of the wet part of partial bottom cells, before the model is built
+ get(config["boundaries"], "sample_wet_center", false) && include("boundary_wet_center_fix.jl")
++# Patch 056 (diagnostic): inflow/outflow of the boundary-normal velocity decided on the boundary face
++get(config["boundaries"], "classify_by_boundary_velocity", false) && include("radiation_face_direction.jl")
+ include("transports.jl")
+ include("volume_control.jl")
+ include("monitor.jl")
+diff --git a/radiation_face_direction.jl b/radiation_face_direction.jl
+new file mode 100644
+index 0000000..a3096c8
+--- /dev/null
++++ b/radiation_face_direction.jl
+@@ -0,0 +1,11 @@
++# Diagnostic (patch 056, not for the merge): the radiation condition on the boundary-normal velocity decides inflow
++# versus outflow from the velocity on the boundary face, not on the first interior face.
++#
++# Oceananigans's ObliqueRadiation takes the direction of a NormalFlow boundary condition from the first interior value
++# (`advecting_velocity(::NFBC, …) = ψ`). In the smoke test the Atlantic face (25, 1, 4) holds v = −0.90 m/s (outflow)
++# while the first interior face holds +0.28 m/s (inflow), so the face is treated as inflow: no radiation, and only the
++# 1-day nudging toward GLORYS (−0.26 m/s). Included before the model is built.
++
++@eval Oceananigans.BoundaryConditions begin
++    @inline advecting_velocity(::NFBC, side, model_fields, grid, n, i, j, ψ) = normal_velocity(side, model_fields, grid, 0, i, j)
++end
+-- 
+2.43.0
+

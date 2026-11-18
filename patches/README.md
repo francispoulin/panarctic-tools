@@ -61,6 +61,7 @@ Numbered in the order to apply, across repositories. Each was checked to apply w
 | 053 | PanArcticShenanigans | `fjp/test-053` only (diagnostic, not for the merge) | after 051 | `boundary_wet_center_fix.jl` (candidate #676 fix: GLORYS sampled at the centre of the wet part of partial bottom cells; `[boundaries] sample_wet_center = true`), `config_smoke_test_wet_center.toml`, `analysis/boundary_bottom_cells.jl` (GLORYS at the whole-cell vs wet centre on the boundary rows, with the model's value) |
 | 054 | PanArcticShenanigans | `fjp/test-054` only (diagnostic, not for the merge) | after 051 | `[atmosphere] pressure = false` skips `nested_pressure_fix.jl`; `config_pressure_on.toml`, `config_pressure_off.toml` (15 km, 4 days from 1 Jan 1993, pressure + inverse barometer both on / both off) to compare with GLORYS |
 | 055 | PanArcticShenanigans | `fjp/test-053` only (diagnostic) | after 053 | `analysis/boundary_bottom_cells.jl`: KernelAbstractions through Oceananigans (it is not a dependency of the project) |
+| 056 | PanArcticShenanigans | `fjp/test-053` only (diagnostic) | after 055 | the Atlantic face jet at (25, 1, 4): `config_smoke_test_inflow_1h.toml` (inflow nudging 1 h) and `config_smoke_test_face_direction.toml` + `radiation_face_direction.jl` (radiation decides inflow/outflow on the boundary face, not the first interior face) |
 
 ## Applying 001–006
 
