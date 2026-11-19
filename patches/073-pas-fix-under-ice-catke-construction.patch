@@ -1,0 +1,140 @@
+From 3a96a43dff43e4b3000546d482a46e280ecd44be Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 19 Nov 2026 18:26:02 -0500
+Subject: [PATCH] Under-ice CATKE: install the TKE flux when the ocean is built
+ (fixes the convert error in 072)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+072 replaced CATKE's TKE top boundary condition after the model was built, but a FieldBoundaryConditions side has a
+fixed type, so the new condition (with the ice concentration in its parameters) could not be assigned:
+"Cannot convert an object of type BoundaryCondition{...}". Now catke_under_ice! redefines CATKE's
+add_closure_specific_boundary_conditions before the ocean is built, so the model is constructed with the under-ice
+flux. Its ice concentration field is the ocean's own, filled from the sea ice before the first step and after every
+step (copy_ice_concentration!, a callback every iteration). The drag-based u★ is unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AbhhvmYEBvTrBMFfuX35Ju
+---
+ panarctic.jl          | 15 +++++++++-----
+ under_ice_coupling.jl | 46 +++++++++++++++++++++++++++++++++----------
+ 2 files changed, 46 insertions(+), 15 deletions(-)
+
+diff --git a/panarctic.jl b/panarctic.jl
+index 2426017..ef56bcc 100644
+--- a/panarctic.jl
++++ b/panarctic.jl
+@@ -80,6 +80,12 @@ net_inflow = net_inflow_setting(bc)
+ net_inflow_depth_exponent = get(bc, "net_inflow_depth_exponent", 0)
+ @info "Open boundaries: net inflow $(net_inflow isa Ref ? "follows GLORYS's volume" : something(net_inflow, "free (Flather only)")) (m³/s), pin ∝ H^$net_inflow_depth_exponent"
+ 
++# [ocean] catke_under_ice (issue #48; under_ice_coupling.jl): CATKE's surface shear-driven TKE flux scaled by the open
++# water under sea ice. Set up before the ocean is built.
++include("under_ice_coupling.jl")
++catke_under_ice = get(ocean_settings, "catke_under_ice", "none")
++catke_under_ice == "none" || catke_under_ice!(catke_under_ice)
++
+ ocean = nested_ocean_simulation(grid, dataset;
+                                 dates = (start_date, end_date),
+                                 dir_kw...,
+@@ -120,11 +126,9 @@ h[no_ice] .= 0
+ ℵ[no_ice] .= 0
+ set!(sea_ice.model, h = h, ℵ = ℵ)
+ 
+-# Under-ice options (issue #48; under_ice_coupling.jl): [ocean] catke_under_ice scales CATKE's surface shear-driven TKE
+-# flux by the open-water fraction; [sea_ice] ice_ocean_friction_velocity sets the u★ of the ice–ocean heat exchange.
+-include("under_ice_coupling.jl")
+-catke_under_ice = get(ocean_settings, "catke_under_ice", "none")
+-catke_under_ice == "none" || attenuate_catke_under_ice!(child, sea_ice.model.ice_concentration, catke_under_ice)
++# Under-ice options (issue #48; under_ice_coupling.jl): the ice concentration seen by CATKE's under-ice TKE flux, and
++# [sea_ice] ice_ocean_friction_velocity, the u★ of the ice–ocean heat exchange.
++catke_under_ice == "none" || copy_ice_concentration!(child, sea_ice)
+ 
+ sea_ice_settings = get(config, "sea_ice", Dict{String, Any}())
+ ice_ocean_friction_velocity = get(sea_ice_settings, "ice_ocean_friction_velocity", "constant")
+@@ -191,6 +195,7 @@ function progress(sim)
+ end
+ 
+ add_callback!(simulation, progress, TimeInterval(1hours))
++catke_under_ice == "none" || add_callback!(simulation, sim -> copy_ice_concentration!(child, sea_ice), IterationInterval(1))
+ 
+ function ice_progress(sim)
+     uᵢ, vᵢ = sim.model.sea_ice.model.velocities
+diff --git a/under_ice_coupling.jl b/under_ice_coupling.jl
+index f54c6e1..1adbed3 100644
+--- a/under_ice_coupling.jl
++++ b/under_ice_coupling.jl
+@@ -9,9 +9,12 @@
+ #   the ice–ocean drag coefficient, as LIM2 (McPhee), never below 0.002 m/s.
+ 
+ using Oceananigans.Architectures: Adapt
+-using Oceananigans.BoundaryConditions: FluxBoundaryCondition
++using Oceananigans.BoundaryConditions: FluxBoundaryCondition, FieldBoundaryConditions
++using Oceananigans.Fields: interior
++using Oceananigans.TurbulenceClosures: TurbulenceClosures
+ using Oceananigans.TurbulenceClosures.TKEBasedVerticalDiffusivities: TKETopBoundaryConditionParameters,
+-    CATKEVerticalDiffusivity, top_tke_flux, friction_velocity
++    CATKEVerticalDiffusivity, FlavorOfCATKE, top_tke_flux, friction_velocity,
++    top_tracer_boundary_conditions, top_velocity_boundary_conditions
+ using NumericalEarth.EarthSystemModels: ThreeEquationHeatFlux
+ using NumericalEarth.EarthSystemModels: InterfaceComputations
+ 
+@@ -34,23 +37,46 @@ struct TanhAttenuation end
+     return J + (1 - f) * closure.turbulent_kinetic_energy_equation.Cᵂu★ * u★^3
+ end
+ 
+-function attenuate_catke_under_ice!(ocean_model, ice_concentration, choice)
++# The TKE top boundary condition's type is fixed when the model is built, so the under-ice flux replaces CATKE's
++# boundary-condition hook before the ocean is built (redefining Oceananigans' method). It gets its own ice
++# concentration field, filled from the sea ice by copy_ice_concentration! every time step.
++function catke_under_ice!(choice)
+     attenuation = choice == "open_water" ? OpenWaterFraction() :
+                   choice == "tanh"       ? TanhAttenuation() :
+                   error("[ocean] catke_under_ice must be \"none\", \"open_water\" or \"tanh\", not \"$choice\"")
+-    ocean_model.closure isa CATKEVerticalDiffusivity ||
+-        error("[ocean] catke_under_ice needs closure = \"CATKE\"")
+ 
+-    e_bcs = ocean_model.tracers.e.boundary_conditions
+-    stock = e_bcs.top.condition.parameters
+-    tracer_bcs = merge(stock.top_tracer_boundary_conditions, (; ice_concentration, attenuation))
+-    parameters = TKETopBoundaryConditionParameters(tracer_bcs, stock.top_velocity_boundary_conditions)
+-    e_bcs.top = FluxBoundaryCondition(under_ice_top_tke_flux; discrete_form = true, parameters)
++    @eval function TurbulenceClosures.add_closure_specific_boundary_conditions(closure::FlavorOfCATKE, user_bcs, grid,
++                                                                              tracer_names, buoyancy)
++        ice_concentration = Field{Center, Center, Nothing}(grid)
++        top_tracer_bcs = merge(top_tracer_boundary_conditions(grid, tracer_names, user_bcs),
++                               (; ice_concentration, attenuation = $attenuation))
++        top_velocity_bcs = top_velocity_boundary_conditions(grid, user_bcs)
++        parameters = TKETopBoundaryConditionParameters(top_tracer_bcs, top_velocity_bcs)
++        top_tke_bc = FluxBoundaryCondition(under_ice_top_tke_flux, discrete_form=true, parameters=parameters)
++
++        tke_bcs = if :e ∈ keys(user_bcs)
++            e_bcs = user_bcs[:e]
++            FieldBoundaryConditions(grid, (Center(), Center(), Center()), top = top_tke_bc, bottom = e_bcs.bottom,
++                                    north = e_bcs.north, south = e_bcs.south, east = e_bcs.east, west = e_bcs.west)
++        else
++            FieldBoundaryConditions(grid, (Center(), Center(), Center()), top = top_tke_bc)
++        end
++
++        return merge(user_bcs, (; e = tke_bcs))
++    end
+ 
+     @info "CATKE surface shear-driven TKE flux under ice × " * (choice == "tanh" ? "(1 − tanh(10ℵ))" : "(1 − ℵ)")
+     return nothing
+ end
+ 
++function copy_ice_concentration!(ocean_model, sea_ice)
++    ocean_model.closure isa CATKEVerticalDiffusivity || error("[ocean] catke_under_ice needs closure = \"CATKE\"")
++    ℵᵒ = ocean_model.tracers.e.boundary_conditions.top.condition.parameters.top_tracer_boundary_conditions.ice_concentration
++    ℵⁱ = sea_ice.model.ice_concentration
++    interior(ℵᵒ) .= interior(ℵⁱ)
++    return nothing
++end
++
+ #####
+ ##### Ice–ocean friction velocity from the drag
+ #####
+-- 
+2.43.0
+
