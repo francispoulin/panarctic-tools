@@ -1,0 +1,534 @@
+From 3d6f4f64c34834b968bd764b808b2858e01d8313 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 19 Nov 2026 12:41:05 -0500
+Subject: [PATCH] =?UTF-8?q?Under-ice=20coupling=20tests=20(issue=20#48):?=
+ =?UTF-8?q?=20CATKE's=20surface=20TKE=20flux=20scaled=20by=20the=20open=20?=
+ =?UTF-8?q?water;=20drag-based=20ice=E2=80=93ocean=20u=E2=98=85?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+[ocean] catke_under_ice multiplies CATKE's surface shear-driven TKE flux, Cᵂu★ u★³, by 1 − ℵ ("open_water") or
+1 − tanh(10ℵ) ("tanh"), as NEMO 4 attenuates its surface TKE input under ice (nn_eice; Allende et al. 2024). It
+replaces CATKE's TKE top boundary condition after the model is built, passing the sea-ice concentration in its
+parameters.
+
+[sea_ice] ice_ocean_friction_velocity = "drag" uses u★ = max(√Cᴰ |uⁱ − uᵒ|, 0.002 m/s) in the three-equation ice–ocean
+heat and salt exchange instead of NumericalEarth's constant 0.002 m/s, as LIM2 (McPhee). NumericalEarth's
+MomentumBasedFrictionVelocity is not used: it sees only the explicit part of the drag, −λ uⁱ, so its u★² is
+Cᴰ |Δu| |uⁱ| rather than Cᴰ |Δu|².
+
+Configs: config_smoke_test_under_ice.toml (100 km, 4 days, both options), and 30-day runs at 15 km
+config_sep2005_30d_catke_ice_openwater.toml, config_sep2005_30d_catke_ice_tanh.toml,
+config_sep2005_30d_ice_ustar_drag.toml.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AbhhvmYEBvTrBMFfuX35Ju
+---
+ config_sep2005_30d_catke_ice_openwater.toml | 84 +++++++++++++++++++
+ config_sep2005_30d_catke_ice_tanh.toml      | 84 +++++++++++++++++++
+ config_sep2005_30d_ice_ustar_drag.toml      | 86 ++++++++++++++++++++
+ config_smoke_test_under_ice.toml            | 86 ++++++++++++++++++++
+ panarctic.jl                                | 14 +++-
+ under_ice_coupling.jl                       | 89 +++++++++++++++++++++
+ 6 files changed, 442 insertions(+), 1 deletion(-)
+ create mode 100644 config_sep2005_30d_catke_ice_openwater.toml
+ create mode 100644 config_sep2005_30d_catke_ice_tanh.toml
+ create mode 100644 config_sep2005_30d_ice_ustar_drag.toml
+ create mode 100644 config_smoke_test_under_ice.toml
+ create mode 100644 under_ice_coupling.jl
+
+diff --git a/config_sep2005_30d_catke_ice_openwater.toml b/config_sep2005_30d_catke_ice_openwater.toml
+new file mode 100644
+index 0000000..f1ce0c4
+--- /dev/null
++++ b/config_sep2005_30d_catke_ice_openwater.toml
+@@ -0,0 +1,84 @@
++# September 2005 only (30 days) at 15 km, otherwise as config_sep2005_15km_nz50.toml: a test of what makes the
++# Arctic surface layer too salty (patch 065). Compare its September mean with the 61-day run's, and with GLORYS, using
++#   julia +1.13 --project=. analysis/salinity_drift.jl <this config>
++# CATKE with its surface shear-driven TKE flux scaled under sea ice, as NEMO 4 (nn_eice) does: catke_under_ice below.
++
++architecture = "GPU"   # "GPU" or "CPU"
++experiment   = "sep2005_30d_catke_ice_openwater"  # name of the run: output and figures go to output_dir/<experiment> and figure_dir/<experiment>
++
++[grid]
++spacing_km = 15     # largest horizontal grid spacing [km] (at the pole; ~15% finer near the Atlantic edge)
++Nz         = 50     # vertical levels
++depth      = 5000   # maximum depth (m)
++bathymetry       = "GEBCO2026"   # "GEBCO2026" (15″, with IBCAO), "ETOPO" (ETOPO 2022, 60″) or "GLORYS" (GLORYS's own sea floor)
++bottom           = "partial"     # "partial": bottom cells cut at the sea floor; "full": whole cells
++partial_cell_fix = true          # with partial cells: flux-form momentum advection at bottom-cell thickness jumps
++                                 # (Oceananigans.jl#6533), which removes the bottom jets of issue #6532
++
++[time]
++start_date = 2005-09-01   # initial condition (GLORYS); the run starts at 00:00 on this date
++end_date   = 2005-10-01   # the run ends at 00:00 on this date; for short tests a date and time, e.g. 1993-01-01T03:00
++dt_minutes = 10           # time step
++
++[atmosphere]
++jra55 = "multi_year"   # "multi_year": JRA55 for the run's own dates; "repeat_year": the 1990–91 repeat year
++pressure = false           # true: JRA55's sea-level pressure acts on the ocean (nested_pressure_fix.jl). Off for now: with it,
++                           # Fram Strait drifts far from GLORYS (1–5 Jan 1993, 15 km: day 4 −12.4 Sv, GLORYS −2.1, −5.6
++                           # without pressure; the same at 100 km), which looks like an error in the pressure path, not
++                           # physics. Main has had no pressure on the ocean since #43.
++inverse_barometer = false  # with pressure = true: GLORYS's η carries no response to the pressure (issue #37), so add the
++                           # inverse-barometer sea level −(pᵃ − ⟨pᵃ⟩)/(ρ₀g) to GLORYS's η at the open sides (Flather) and
++                           # to the initial free surface; its domain mean is removed, so the volume is unchanged.
++                           # Keep false with pressure = false: then neither the model nor GLORYS feels the pressure
++
++[output]
++average_hours   = 24      # time-averaged output (3D ocean, free surface, sea ice), written to output_dir
++checkpoint_days = 30      # how often the full model state is saved for restarts
++restart         = false   # true: continue from the latest checkpoint in output_dir
++monitor_hours   = 1       # monitor.csv: transports through the open sides, mean η against GLORYS's, volume budget,
++                          # fastest point (plotting/volume_budget.jl, plotting/max_speed.jl); 0 = off
++
++[transports]
++# Volume, heat, salt and freshwater transports through the sections below and the open boundaries (see transports.jl).
++online                = true   # true: computed every time step and averaged over average_hours, written to arctic_transports.jld2
++reference_temperature = 0      # heat transport relative to this temperature (°C)
++reference_salinity    = 34.8   # freshwater transport relative to this salinity (g/kg)
++
++# Each section is a great-circle path through (longitude, latitude) waypoints. Positive transport flows to the right,
++# walking from the first waypoint to the last; these are ordered so that positive is into the Arctic. Both ends should
++# be on land, so the section spans the whole strait on any grid. Check with plotting/transport_sections.jl.
++[transports.sections]
++# Fram Strait follows the mooring array at 78°50′N; intermediate waypoints keep the great circles on that latitude.
++fram_strait         = { lon = [15.0, 10.0, 5.0, 0.0, -5.0, -10.0, -15.0, -20.0],
++                        lat = [78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333] }
++# Barents Sea Opening follows the mooring line from Norway (Fugløya) via Bjørnøya to Sørkapp, Svalbard.
++barents_sea_opening = { lon = [20.0, 19.0, 16.5],  lat = [70.0, 74.45, 77.0] }
++bering_strait       = { lon = [-166.0, -171.0], lat = [66.0, 66.0] }
++davis_strait        = { lon = [-53.0, -63.0],   lat = [67.0, 66.5] }
++
++[paths]
++data_dir   = ""   # where downloads are stored; "" = each dataset's default cache
++output_dir = "output"    # model output: time averages (.jld2), checkpoints and the config; one folder per experiment
++figure_dir = "figures"   # figures and movies from the plotting/ scripts; one folder per experiment
++
++[boundaries]
++velocity_inflow_days = 0.0417   # oblique radiation on u, v: nudging timescale toward GLORYS on inflow (0.0417 days = 1 hour).
++                                # With 1 day, a partial bottom cell on the Atlantic open face drifted to −0.9 m/s
++                                # (GLORYS −0.26); 1 hour removes it and moves the section transports by < 0.1 Sv
++tracer_inflow_km     = 20  # T, S reservoir inflow relaxation length, both open sides
++relaxation_hours     = 6   # T, S and baroclinic u, v relax toward GLORYS in a ~2/3° band along the open sides
++                           # over this timescale; 0 = off (nested_ocean_model's default is 6)
++
++# Volume control (volume_control.jl): the net inflow through the two open sides together is pinned at every barotropic
++# substep, as NEMO and ROMS do; Flather splits it between the sides. Without it the domain's volume drifts from GLORYS's.
++follow_glorys_volume      = true   # true: the net inflow follows GLORYS's domain-mean η, with the surface freshwater handed back
++volume_relaxation_days    = 1      # with follow_glorys_volume: time over which the remaining drift from GLORYS's mean η is removed
++follow_glorys_tendency    = false  # with follow_glorys_volume: true also follows GLORYS's rate of change exactly
++# net_inflow_Sv           = 0.0    # with follow_glorys_volume = false: a constant net inflow instead (Sv, positive into the domain);
++                                   # with neither, Flather alone (no volume control)
++net_inflow_depth_exponent = 0.5    # the pin's correction to each boundary column ∝ Hᵖ: 0 uniform per length, 1 uniform velocity
++                                   # (NEMO, ROMS), 0.5 a uniform shift of GLORYS's η in Flather
++
++[ocean]
++closure = "CATKE"   # "CATKE" (default), "RiBased", "TKEDissipation" or "none"
++catke_under_ice = "open_water"   # CATKE's surface shear-driven TKE flux under ice: "none" (stock), "open_water" (× (1 − ℵ)), "tanh" (× (1 − tanh(10ℵ)))
+diff --git a/config_sep2005_30d_catke_ice_tanh.toml b/config_sep2005_30d_catke_ice_tanh.toml
+new file mode 100644
+index 0000000..400ada1
+--- /dev/null
++++ b/config_sep2005_30d_catke_ice_tanh.toml
+@@ -0,0 +1,84 @@
++# September 2005 only (30 days) at 15 km, otherwise as config_sep2005_15km_nz50.toml: a test of what makes the
++# Arctic surface layer too salty (patch 065). Compare its September mean with the 61-day run's, and with GLORYS, using
++#   julia +1.13 --project=. analysis/salinity_drift.jl <this config>
++# CATKE with its surface shear-driven TKE flux scaled under sea ice, as NEMO 4 (nn_eice) does: catke_under_ice below.
++
++architecture = "GPU"   # "GPU" or "CPU"
++experiment   = "sep2005_30d_catke_ice_tanh"  # name of the run: output and figures go to output_dir/<experiment> and figure_dir/<experiment>
++
++[grid]
++spacing_km = 15     # largest horizontal grid spacing [km] (at the pole; ~15% finer near the Atlantic edge)
++Nz         = 50     # vertical levels
++depth      = 5000   # maximum depth (m)
++bathymetry       = "GEBCO2026"   # "GEBCO2026" (15″, with IBCAO), "ETOPO" (ETOPO 2022, 60″) or "GLORYS" (GLORYS's own sea floor)
++bottom           = "partial"     # "partial": bottom cells cut at the sea floor; "full": whole cells
++partial_cell_fix = true          # with partial cells: flux-form momentum advection at bottom-cell thickness jumps
++                                 # (Oceananigans.jl#6533), which removes the bottom jets of issue #6532
++
++[time]
++start_date = 2005-09-01   # initial condition (GLORYS); the run starts at 00:00 on this date
++end_date   = 2005-10-01   # the run ends at 00:00 on this date; for short tests a date and time, e.g. 1993-01-01T03:00
++dt_minutes = 10           # time step
++
++[atmosphere]
++jra55 = "multi_year"   # "multi_year": JRA55 for the run's own dates; "repeat_year": the 1990–91 repeat year
++pressure = false           # true: JRA55's sea-level pressure acts on the ocean (nested_pressure_fix.jl). Off for now: with it,
++                           # Fram Strait drifts far from GLORYS (1–5 Jan 1993, 15 km: day 4 −12.4 Sv, GLORYS −2.1, −5.6
++                           # without pressure; the same at 100 km), which looks like an error in the pressure path, not
++                           # physics. Main has had no pressure on the ocean since #43.
++inverse_barometer = false  # with pressure = true: GLORYS's η carries no response to the pressure (issue #37), so add the
++                           # inverse-barometer sea level −(pᵃ − ⟨pᵃ⟩)/(ρ₀g) to GLORYS's η at the open sides (Flather) and
++                           # to the initial free surface; its domain mean is removed, so the volume is unchanged.
++                           # Keep false with pressure = false: then neither the model nor GLORYS feels the pressure
++
++[output]
++average_hours   = 24      # time-averaged output (3D ocean, free surface, sea ice), written to output_dir
++checkpoint_days = 30      # how often the full model state is saved for restarts
++restart         = false   # true: continue from the latest checkpoint in output_dir
++monitor_hours   = 1       # monitor.csv: transports through the open sides, mean η against GLORYS's, volume budget,
++                          # fastest point (plotting/volume_budget.jl, plotting/max_speed.jl); 0 = off
++
++[transports]
++# Volume, heat, salt and freshwater transports through the sections below and the open boundaries (see transports.jl).
++online                = true   # true: computed every time step and averaged over average_hours, written to arctic_transports.jld2
++reference_temperature = 0      # heat transport relative to this temperature (°C)
++reference_salinity    = 34.8   # freshwater transport relative to this salinity (g/kg)
++
++# Each section is a great-circle path through (longitude, latitude) waypoints. Positive transport flows to the right,
++# walking from the first waypoint to the last; these are ordered so that positive is into the Arctic. Both ends should
++# be on land, so the section spans the whole strait on any grid. Check with plotting/transport_sections.jl.
++[transports.sections]
++# Fram Strait follows the mooring array at 78°50′N; intermediate waypoints keep the great circles on that latitude.
++fram_strait         = { lon = [15.0, 10.0, 5.0, 0.0, -5.0, -10.0, -15.0, -20.0],
++                        lat = [78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333] }
++# Barents Sea Opening follows the mooring line from Norway (Fugløya) via Bjørnøya to Sørkapp, Svalbard.
++barents_sea_opening = { lon = [20.0, 19.0, 16.5],  lat = [70.0, 74.45, 77.0] }
++bering_strait       = { lon = [-166.0, -171.0], lat = [66.0, 66.0] }
++davis_strait        = { lon = [-53.0, -63.0],   lat = [67.0, 66.5] }
++
++[paths]
++data_dir   = ""   # where downloads are stored; "" = each dataset's default cache
++output_dir = "output"    # model output: time averages (.jld2), checkpoints and the config; one folder per experiment
++figure_dir = "figures"   # figures and movies from the plotting/ scripts; one folder per experiment
++
++[boundaries]
++velocity_inflow_days = 0.0417   # oblique radiation on u, v: nudging timescale toward GLORYS on inflow (0.0417 days = 1 hour).
++                                # With 1 day, a partial bottom cell on the Atlantic open face drifted to −0.9 m/s
++                                # (GLORYS −0.26); 1 hour removes it and moves the section transports by < 0.1 Sv
++tracer_inflow_km     = 20  # T, S reservoir inflow relaxation length, both open sides
++relaxation_hours     = 6   # T, S and baroclinic u, v relax toward GLORYS in a ~2/3° band along the open sides
++                           # over this timescale; 0 = off (nested_ocean_model's default is 6)
++
++# Volume control (volume_control.jl): the net inflow through the two open sides together is pinned at every barotropic
++# substep, as NEMO and ROMS do; Flather splits it between the sides. Without it the domain's volume drifts from GLORYS's.
++follow_glorys_volume      = true   # true: the net inflow follows GLORYS's domain-mean η, with the surface freshwater handed back
++volume_relaxation_days    = 1      # with follow_glorys_volume: time over which the remaining drift from GLORYS's mean η is removed
++follow_glorys_tendency    = false  # with follow_glorys_volume: true also follows GLORYS's rate of change exactly
++# net_inflow_Sv           = 0.0    # with follow_glorys_volume = false: a constant net inflow instead (Sv, positive into the domain);
++                                   # with neither, Flather alone (no volume control)
++net_inflow_depth_exponent = 0.5    # the pin's correction to each boundary column ∝ Hᵖ: 0 uniform per length, 1 uniform velocity
++                                   # (NEMO, ROMS), 0.5 a uniform shift of GLORYS's η in Flather
++
++[ocean]
++closure = "CATKE"   # "CATKE" (default), "RiBased", "TKEDissipation" or "none"
++catke_under_ice = "tanh"   # CATKE's surface shear-driven TKE flux under ice: "none" (stock), "open_water" (× (1 − ℵ)), "tanh" (× (1 − tanh(10ℵ)))
+diff --git a/config_sep2005_30d_ice_ustar_drag.toml b/config_sep2005_30d_ice_ustar_drag.toml
+new file mode 100644
+index 0000000..791c850
+--- /dev/null
++++ b/config_sep2005_30d_ice_ustar_drag.toml
+@@ -0,0 +1,86 @@
++# September 2005 only (30 days) at 15 km, otherwise as config_sep2005_15km_nz50.toml: a test of what makes the
++# Arctic surface layer too salty (patch 065). Compare its September mean with the 61-day run's, and with GLORYS, using
++#   julia +1.13 --project=. analysis/salinity_drift.jl <this config>
++# Stock CATKE; the ice–ocean heat and salt exchange with u★ from the ice–ocean drag instead of a constant 0.002 m/s.
++
++architecture = "GPU"   # "GPU" or "CPU"
++experiment   = "sep2005_30d_ice_ustar_drag"  # name of the run: output and figures go to output_dir/<experiment> and figure_dir/<experiment>
++
++[grid]
++spacing_km = 15     # largest horizontal grid spacing [km] (at the pole; ~15% finer near the Atlantic edge)
++Nz         = 50     # vertical levels
++depth      = 5000   # maximum depth (m)
++bathymetry       = "GEBCO2026"   # "GEBCO2026" (15″, with IBCAO), "ETOPO" (ETOPO 2022, 60″) or "GLORYS" (GLORYS's own sea floor)
++bottom           = "partial"     # "partial": bottom cells cut at the sea floor; "full": whole cells
++partial_cell_fix = true          # with partial cells: flux-form momentum advection at bottom-cell thickness jumps
++                                 # (Oceananigans.jl#6533), which removes the bottom jets of issue #6532
++
++[time]
++start_date = 2005-09-01   # initial condition (GLORYS); the run starts at 00:00 on this date
++end_date   = 2005-10-01   # the run ends at 00:00 on this date; for short tests a date and time, e.g. 1993-01-01T03:00
++dt_minutes = 10           # time step
++
++[atmosphere]
++jra55 = "multi_year"   # "multi_year": JRA55 for the run's own dates; "repeat_year": the 1990–91 repeat year
++pressure = false           # true: JRA55's sea-level pressure acts on the ocean (nested_pressure_fix.jl). Off for now: with it,
++                           # Fram Strait drifts far from GLORYS (1–5 Jan 1993, 15 km: day 4 −12.4 Sv, GLORYS −2.1, −5.6
++                           # without pressure; the same at 100 km), which looks like an error in the pressure path, not
++                           # physics. Main has had no pressure on the ocean since #43.
++inverse_barometer = false  # with pressure = true: GLORYS's η carries no response to the pressure (issue #37), so add the
++                           # inverse-barometer sea level −(pᵃ − ⟨pᵃ⟩)/(ρ₀g) to GLORYS's η at the open sides (Flather) and
++                           # to the initial free surface; its domain mean is removed, so the volume is unchanged.
++                           # Keep false with pressure = false: then neither the model nor GLORYS feels the pressure
++
++[output]
++average_hours   = 24      # time-averaged output (3D ocean, free surface, sea ice), written to output_dir
++checkpoint_days = 30      # how often the full model state is saved for restarts
++restart         = false   # true: continue from the latest checkpoint in output_dir
++monitor_hours   = 1       # monitor.csv: transports through the open sides, mean η against GLORYS's, volume budget,
++                          # fastest point (plotting/volume_budget.jl, plotting/max_speed.jl); 0 = off
++
++[transports]
++# Volume, heat, salt and freshwater transports through the sections below and the open boundaries (see transports.jl).
++online                = true   # true: computed every time step and averaged over average_hours, written to arctic_transports.jld2
++reference_temperature = 0      # heat transport relative to this temperature (°C)
++reference_salinity    = 34.8   # freshwater transport relative to this salinity (g/kg)
++
++# Each section is a great-circle path through (longitude, latitude) waypoints. Positive transport flows to the right,
++# walking from the first waypoint to the last; these are ordered so that positive is into the Arctic. Both ends should
++# be on land, so the section spans the whole strait on any grid. Check with plotting/transport_sections.jl.
++[transports.sections]
++# Fram Strait follows the mooring array at 78°50′N; intermediate waypoints keep the great circles on that latitude.
++fram_strait         = { lon = [15.0, 10.0, 5.0, 0.0, -5.0, -10.0, -15.0, -20.0],
++                        lat = [78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333] }
++# Barents Sea Opening follows the mooring line from Norway (Fugløya) via Bjørnøya to Sørkapp, Svalbard.
++barents_sea_opening = { lon = [20.0, 19.0, 16.5],  lat = [70.0, 74.45, 77.0] }
++bering_strait       = { lon = [-166.0, -171.0], lat = [66.0, 66.0] }
++davis_strait        = { lon = [-53.0, -63.0],   lat = [67.0, 66.5] }
++
++[paths]
++data_dir   = ""   # where downloads are stored; "" = each dataset's default cache
++output_dir = "output"    # model output: time averages (.jld2), checkpoints and the config; one folder per experiment
++figure_dir = "figures"   # figures and movies from the plotting/ scripts; one folder per experiment
++
++[boundaries]
++velocity_inflow_days = 0.0417   # oblique radiation on u, v: nudging timescale toward GLORYS on inflow (0.0417 days = 1 hour).
++                                # With 1 day, a partial bottom cell on the Atlantic open face drifted to −0.9 m/s
++                                # (GLORYS −0.26); 1 hour removes it and moves the section transports by < 0.1 Sv
++tracer_inflow_km     = 20  # T, S reservoir inflow relaxation length, both open sides
++relaxation_hours     = 6   # T, S and baroclinic u, v relax toward GLORYS in a ~2/3° band along the open sides
++                           # over this timescale; 0 = off (nested_ocean_model's default is 6)
++
++# Volume control (volume_control.jl): the net inflow through the two open sides together is pinned at every barotropic
++# substep, as NEMO and ROMS do; Flather splits it between the sides. Without it the domain's volume drifts from GLORYS's.
++follow_glorys_volume      = true   # true: the net inflow follows GLORYS's domain-mean η, with the surface freshwater handed back
++volume_relaxation_days    = 1      # with follow_glorys_volume: time over which the remaining drift from GLORYS's mean η is removed
++follow_glorys_tendency    = false  # with follow_glorys_volume: true also follows GLORYS's rate of change exactly
++# net_inflow_Sv           = 0.0    # with follow_glorys_volume = false: a constant net inflow instead (Sv, positive into the domain);
++                                   # with neither, Flather alone (no volume control)
++net_inflow_depth_exponent = 0.5    # the pin's correction to each boundary column ∝ Hᵖ: 0 uniform per length, 1 uniform velocity
++                                   # (NEMO, ROMS), 0.5 a uniform shift of GLORYS's η in Flather
++
++[ocean]
++closure = "CATKE"   # "CATKE" (default), "RiBased", "TKEDissipation" or "none"
++
++[sea_ice]
++ice_ocean_friction_velocity = "drag"   # u★ of the ice–ocean heat exchange: "constant" (0.002 m/s) or "drag" (√Cᴰ |uⁱ − uᵒ|, ≥ 0.002 m/s)
+diff --git a/config_smoke_test_under_ice.toml b/config_smoke_test_under_ice.toml
+new file mode 100644
+index 0000000..a2d61a7
+--- /dev/null
++++ b/config_smoke_test_under_ice.toml
+@@ -0,0 +1,86 @@
++# Smoke test of patch 072 (under_ice_coupling.jl): config_smoke_test_sep2005.toml (100 km, 1–5 September 2005) with both
++# under-ice options on, CATKE's surface TKE flux × (1 − tanh(10ℵ)) and the drag-based ice–ocean u★. It checks that
++# both build and run on the GPU before the 30-day runs; the numbers are not the test.
++
++architecture = "GPU"   # "GPU" or "CPU"
++experiment   = "smoke_test_under_ice"  # name of the run: output and figures go to output_dir/<experiment> and figure_dir/<experiment>
++
++[grid]
++spacing_km = 100    # largest horizontal grid spacing [km] (at the pole; ~15% finer near the Atlantic edge)
++Nz         = 20     # vertical levels
++depth      = 5000   # maximum depth (m)
++bathymetry       = "GEBCO2026"   # "GEBCO2026" (15″, with IBCAO), "ETOPO" (ETOPO 2022, 60″) or "GLORYS" (GLORYS's own sea floor)
++bottom           = "partial"     # "partial": bottom cells cut at the sea floor; "full": whole cells
++partial_cell_fix = true          # with partial cells: flux-form momentum advection at bottom-cell thickness jumps
++                                 # (Oceananigans.jl#6533), which removes the bottom jets of issue #6532
++
++[time]
++start_date = 2005-09-01   # initial condition (GLORYS); the run starts at 00:00 on this date
++end_date   = 2005-09-05   # the run ends at 00:00 on this date; for short tests a date and time, e.g. 1993-01-01T03:00
++dt_minutes = 10           # time step
++
++[atmosphere]
++jra55 = "multi_year"   # "multi_year": JRA55 for the run's own dates; "repeat_year": the 1990–91 repeat year
++pressure = false           # true: JRA55's sea-level pressure acts on the ocean (nested_pressure_fix.jl). Off for now: with it,
++                           # Fram Strait drifts far from GLORYS (1–5 Jan 1993, 15 km: day 4 −12.4 Sv, GLORYS −2.1, −5.6
++                           # without pressure; the same at 100 km), which looks like an error in the pressure path, not
++                           # physics. Main has had no pressure on the ocean since #43.
++inverse_barometer = false  # with pressure = true: GLORYS's η carries no response to the pressure (issue #37), so add the
++                           # inverse-barometer sea level −(pᵃ − ⟨pᵃ⟩)/(ρ₀g) to GLORYS's η at the open sides (Flather) and
++                           # to the initial free surface; its domain mean is removed, so the volume is unchanged.
++                           # Keep false with pressure = false: then neither the model nor GLORYS feels the pressure
++
++[output]
++average_hours   = 24      # time-averaged output (3D ocean, free surface, sea ice), written to output_dir
++checkpoint_days = 30      # how often the full model state is saved for restarts
++restart         = false   # true: continue from the latest checkpoint in output_dir
++monitor_hours   = 1       # monitor.csv: transports through the open sides, mean η against GLORYS's, volume budget,
++                          # fastest point (plotting/volume_budget.jl, plotting/max_speed.jl); 0 = off
++
++[transports]
++# Volume, heat, salt and freshwater transports through the sections below and the open boundaries (see transports.jl).
++online                = true   # true: computed every time step and averaged over average_hours, written to arctic_transports.jld2
++reference_temperature = 0      # heat transport relative to this temperature (°C)
++reference_salinity    = 34.8   # freshwater transport relative to this salinity (g/kg)
++
++# Each section is a great-circle path through (longitude, latitude) waypoints. Positive transport flows to the right,
++# walking from the first waypoint to the last; these are ordered so that positive is into the Arctic. Both ends should
++# be on land, so the section spans the whole strait on any grid. Check with plotting/transport_sections.jl.
++[transports.sections]
++# Fram Strait follows the mooring array at 78°50′N; intermediate waypoints keep the great circles on that latitude.
++fram_strait         = { lon = [15.0, 10.0, 5.0, 0.0, -5.0, -10.0, -15.0, -20.0],
++                        lat = [78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333] }
++# Barents Sea Opening follows the mooring line from Norway (Fugløya) via Bjørnøya to Sørkapp, Svalbard.
++barents_sea_opening = { lon = [20.0, 19.0, 16.5],  lat = [70.0, 74.45, 77.0] }
++bering_strait       = { lon = [-166.0, -171.0], lat = [66.0, 66.0] }
++davis_strait        = { lon = [-53.0, -63.0],   lat = [67.0, 66.5] }
++
++[paths]
++data_dir   = ""   # where downloads are stored; "" = each dataset's default cache
++output_dir = "output"    # model output: time averages (.jld2), checkpoints and the config; one folder per experiment
++figure_dir = "figures"   # figures and movies from the plotting/ scripts; one folder per experiment
++
++[boundaries]
++velocity_inflow_days = 0.0417   # oblique radiation on u, v: nudging timescale toward GLORYS on inflow (0.0417 days = 1 hour).
++                                # With 1 day, a partial bottom cell on the Atlantic open face drifted to −0.9 m/s
++                                # (GLORYS −0.26); 1 hour removes it and moves the section transports by < 0.1 Sv
++tracer_inflow_km     = 20  # T, S reservoir inflow relaxation length, both open sides
++relaxation_hours     = 6   # T, S and baroclinic u, v relax toward GLORYS in a ~2/3° band along the open sides
++                           # over this timescale; 0 = off (nested_ocean_model's default is 6)
++
++# Volume control (volume_control.jl): the net inflow through the two open sides together is pinned at every barotropic
++# substep, as NEMO and ROMS do; Flather splits it between the sides. Without it the domain's volume drifts from GLORYS's.
++follow_glorys_volume      = true   # true: the net inflow follows GLORYS's domain-mean η, with the surface freshwater handed back
++volume_relaxation_days    = 1      # with follow_glorys_volume: time over which the remaining drift from GLORYS's mean η is removed
++follow_glorys_tendency    = false  # with follow_glorys_volume: true also follows GLORYS's rate of change exactly
++# net_inflow_Sv           = 0.0    # with follow_glorys_volume = false: a constant net inflow instead (Sv, positive into the domain);
++                                   # with neither, Flather alone (no volume control)
++net_inflow_depth_exponent = 0.5    # the pin's correction to each boundary column ∝ Hᵖ: 0 uniform per length, 1 uniform velocity
++                                   # (NEMO, ROMS), 0.5 a uniform shift of GLORYS's η in Flather
++
++[ocean]
++closure = "CATKE"
++catke_under_ice = "tanh"   # CATKE's surface shear-driven TKE flux under ice: "none" (stock), "open_water" (× (1 − ℵ)), "tanh" (× (1 − tanh(10ℵ)))
++
++[sea_ice]
++ice_ocean_friction_velocity = "drag"   # u★ of the ice–ocean heat exchange: "constant" (0.002 m/s) or "drag" (√Cᴰ |uⁱ − uᵒ|, ≥ 0.002 m/s)
+diff --git a/panarctic.jl b/panarctic.jl
+index 69a9bd9..2426017 100644
+--- a/panarctic.jl
++++ b/panarctic.jl
+@@ -120,6 +120,17 @@ h[no_ice] .= 0
+ ℵ[no_ice] .= 0
+ set!(sea_ice.model, h = h, ℵ = ℵ)
+ 
++# Under-ice options (issue #48; under_ice_coupling.jl): [ocean] catke_under_ice scales CATKE's surface shear-driven TKE
++# flux by the open-water fraction; [sea_ice] ice_ocean_friction_velocity sets the u★ of the ice–ocean heat exchange.
++include("under_ice_coupling.jl")
++catke_under_ice = get(ocean_settings, "catke_under_ice", "none")
++catke_under_ice == "none" || attenuate_catke_under_ice!(child, sea_ice.model.ice_concentration, catke_under_ice)
++
++sea_ice_settings = get(config, "sea_ice", Dict{String, Any}())
++ice_ocean_friction_velocity = get(sea_ice_settings, "ice_ocean_friction_velocity", "constant")
++ice_ocean_friction_velocity in ("constant", "drag") ||
++    error("[sea_ice] ice_ocean_friction_velocity must be \"constant\" or \"drag\", not \"$ice_ocean_friction_velocity\"")
++
+ # Warn about unstable stratification (N² < -1e-6 s⁻² between wet cells) in the initial state.
+ 
+ cpu_grid = on_architecture(CPU(), child.grid)
+@@ -156,7 +167,8 @@ atmosphere    = JRA55PrescribedAtmosphere(arch; jra55..., dir_kw...)
+ radiation     = JRA55PrescribedRadiation(arch; jra55..., dir_kw...)
+ land          = JRA55PrescribedLand(child.grid; jra55..., dir_kw...)
+ 
+-coupled_model = EarthSystemModel(; ocean, sea_ice, land, atmosphere, radiation)
++interface_kw = ice_ocean_friction_velocity == "drag" ? (; sea_ice_ocean_heat_flux = drag_based_heat_flux(sea_ice, child)) : (;)
++coupled_model = EarthSystemModel(; ocean, sea_ice, land, atmosphere, radiation, interface_kw...)
+ 
+ # ## Simulation
+ 
+diff --git a/under_ice_coupling.jl b/under_ice_coupling.jl
+new file mode 100644
+index 0000000..f54c6e1
+--- /dev/null
++++ b/under_ice_coupling.jl
+@@ -0,0 +1,89 @@
++# Two under-ice options for the tests of issue #48 (see panarctic-tools/docs/sea-ice-coupling-review.md).
++#
++# [ocean] catke_under_ice: CATKE's surface shear-driven TKE flux, Cᵂu★ u★³, times a function of the ice concentration ℵ,
++#   as NEMO 4 attenuates its surface TKE input under ice (nn_eice; Allende et al. 2024, GMD 17, 7445):
++#   "open_water" → 1 − ℵ, "tanh" → 1 − tanh(10ℵ) (NEMO's default), "none" (default) → stock CATKE.
++#   The convective part of the flux is unchanged.
++# [sea_ice] ice_ocean_friction_velocity: the u★ of the three-equation ice–ocean heat and salt exchange.
++#   "constant" (default): NumericalEarth's 0.002 m/s. "drag": √Cᴰ |uⁱ − uᵒ| from the ice and top-cell velocities and
++#   the ice–ocean drag coefficient, as LIM2 (McPhee), never below 0.002 m/s.
++
++using Oceananigans.Architectures: Adapt
++using Oceananigans.BoundaryConditions: FluxBoundaryCondition
++using Oceananigans.TurbulenceClosures.TKEBasedVerticalDiffusivities: TKETopBoundaryConditionParameters,
++    CATKEVerticalDiffusivity, top_tke_flux, friction_velocity
++using NumericalEarth.EarthSystemModels: ThreeEquationHeatFlux
++using NumericalEarth.EarthSystemModels: InterfaceComputations
++
++#####
++##### CATKE's surface TKE flux under ice
++#####
++
++struct OpenWaterFraction end
++struct TanhAttenuation end
++
++@inline under_ice_factor(::OpenWaterFraction, ℵ) = 1 - ℵ
++@inline under_ice_factor(::TanhAttenuation, ℵ)   = 1 - tanh(10ℵ)
++
++@inline function under_ice_top_tke_flux(i, j, grid, clock, fields, parameters, closure::CATKEVerticalDiffusivity, buoyancy)
++    J  = top_tke_flux(i, j, grid, clock, fields, parameters, closure, buoyancy)
++    u★ = friction_velocity(i, j, grid, clock, fields, parameters.top_velocity_boundary_conditions)
++    ice = parameters.top_tracer_boundary_conditions
++    @inbounds ℵ = ice.ice_concentration[i, j, 1]
++    f = under_ice_factor(ice.attenuation, ℵ)
++    return J + (1 - f) * closure.turbulent_kinetic_energy_equation.Cᵂu★ * u★^3
++end
++
++function attenuate_catke_under_ice!(ocean_model, ice_concentration, choice)
++    attenuation = choice == "open_water" ? OpenWaterFraction() :
++                  choice == "tanh"       ? TanhAttenuation() :
++                  error("[ocean] catke_under_ice must be \"none\", \"open_water\" or \"tanh\", not \"$choice\"")
++    ocean_model.closure isa CATKEVerticalDiffusivity ||
++        error("[ocean] catke_under_ice needs closure = \"CATKE\"")
++
++    e_bcs = ocean_model.tracers.e.boundary_conditions
++    stock = e_bcs.top.condition.parameters
++    tracer_bcs = merge(stock.top_tracer_boundary_conditions, (; ice_concentration, attenuation))
++    parameters = TKETopBoundaryConditionParameters(tracer_bcs, stock.top_velocity_boundary_conditions)
++    e_bcs.top = FluxBoundaryCondition(under_ice_top_tke_flux; discrete_form = true, parameters)
++
++    @info "CATKE surface shear-driven TKE flux under ice × " * (choice == "tanh" ? "(1 − tanh(10ℵ))" : "(1 − ℵ)")
++    return nothing
++end
++
++#####
++##### Ice–ocean friction velocity from the drag
++#####
++
++struct DragFrictionVelocity{U, V, I, J, FT}
++    uᵒ :: U
++    vᵒ :: V
++    uⁱ :: I
++    vⁱ :: J
++    drag_coefficient :: FT
++    minimum_friction_velocity :: FT
++    kᴺ :: Int
++end
++
++Adapt.adapt_structure(to, f::DragFrictionVelocity) =
++    DragFrictionVelocity(Adapt.adapt(to, f.uᵒ), Adapt.adapt(to, f.vᵒ), Adapt.adapt(to, f.uⁱ), Adapt.adapt(to, f.vⁱ),
++                         f.drag_coefficient, f.minimum_friction_velocity, f.kᴺ)
++
++@inline Δu²(i, j, f) = @inbounds (f.uⁱ[i, j, 1] - f.uᵒ[i, j, f.kᴺ])^2
++@inline Δv²(i, j, f) = @inbounds (f.vⁱ[i, j, 1] - f.vᵒ[i, j, f.kᴺ])^2
++
++# Squared velocity difference at the cell centre as the mean over its four faces, as LIM2's ust2s
++@inline function InterfaceComputations.get_friction_velocity(f::DragFrictionVelocity, i, j, grid, τˣ, τʸ, ρᵒᶜ)
++    Δ² = (Δu²(i, j, f) + Δu²(i + 1, j, f) + Δv²(i, j, f) + Δv²(i, j + 1, f)) / 2
++    return max(f.minimum_friction_velocity, sqrt(f.drag_coefficient * Δ²))
++end
++
++function drag_based_heat_flux(sea_ice, ocean_model)
++    uⁱ, vⁱ = sea_ice.model.velocities.u, sea_ice.model.velocities.v
++    Cᴰ = sea_ice.model.dynamics.external_momentum_stresses.bottom.Cᴰ
++    u★ = DragFrictionVelocity(ocean_model.velocities.u, ocean_model.velocities.v, uⁱ, vⁱ,
++                              Cᴰ, convert(typeof(Cᴰ), 0.002), size(ocean_model.grid, 3))
++
++    @info "Ice–ocean heat and salt exchange with u★ = max(√Cᴰ |uⁱ − uᵒ|, 0.002 m/s), Cᴰ = $Cᴰ"
++    return ThreeEquationHeatFlux(sea_ice; friction_velocity = u★)
++end
+-- 
+2.43.0
+
