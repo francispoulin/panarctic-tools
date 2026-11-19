@@ -1,0 +1,29 @@
+From 33f816ddad235ae9526fe49d61cf6982e8d9a8bf Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 18 Nov 2026 20:27:53 -0500
+Subject: [PATCH] salinity_drift.jl: read the bottom height by index (it is an
+ offset array in a grid read back from output)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Abhhvm7xByUXxouq5u8r5W
+---
+ analysis/salinity_drift.jl | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/analysis/salinity_drift.jl b/analysis/salinity_drift.jl
+index ccf14e0..458543a 100644
+--- a/analysis/salinity_drift.jl
++++ b/analysis/salinity_drift.jl
+@@ -50,7 +50,8 @@ Nx, Ny, Nz = size(grid)
+ 
+ ug  = grid.underlying_grid
+ zf  = Float64.(collect(ug.z.cᵃᵃᶠ[1:Nz+1]))         # level interfaces, bottom to top (the reference levels, at rest)
+-hb  = Float64.(Array(interior(grid.immersed_boundary.bottom_height))[:, :, 1])
++bottom_height = grid.immersed_boundary.bottom_height   # a Field, or an offset array in a grid read back from output
++hb  = [Float64(bottom_height[i, j, 1]) for i in 1:Nx, j in 1:Ny]
+ λ   = mod.(Array(λnodes(ug, Center(), Center(), Center())) .+ 180, 360) .- 180
+ φ   = Array(φnodes(ug, Center(), Center(), Center()))
+ A   = [Azᶜᶜᶜ(i, j, 1, ug) for i in 1:Nx, j in 1:Ny]
+-- 
+2.43.0
+

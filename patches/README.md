@@ -68,6 +68,7 @@ Numbered in the order to apply, across repositories. Each was checked to apply w
 | 061 | PanArcticShenanigans | `fjp/test-061` only (diagnostic, not for the merge) | after 060 | `config_sep2005_15km_nz50_caa.toml` (production config + Nares, Jones, Lancaster sections; same experiment), `analysis/section_comparison.jl` (offline transports of every section vs GLORYS, monthly means and daily series, Archipelago total, online beside offline): is the weak Davis Strait the Archipelago throughflow? |
 | 062 | PanArcticShenanigans | `fjp/test-061` (diagnostic, on top of 061) | after 061 | `inflow_outflow` in transports.jl, saved by analysis/transports.jl and analysis/glorys_transports.jl; `analysis/water_masses.jl`: inflow and outflow with transport-weighted T and S, model vs GLORYS, monthly; heat and freshwater differences split into property and volume parts |
 | 063 | PanArcticShenanigans | `fjp/test-061` (diagnostic, on top of 062) | after 062 | `analysis/salinity_drift.jl`: model monthly means against GLORYSMonthly on the model grid; maps of model − GLORYS (surface S, top-200 m S and T) per month and at the start; by region the mean differences and liquid freshwater content (rel. 34.8); model daily freshwater content |
+| 064 | PanArcticShenanigans | `fjp/test-061` (diagnostic, fix for 063) | after 063 | `analysis/salinity_drift.jl`: bottom height read by index (an offset array, not a Field, in a grid read back from output) |
 
 ## Applying 001–006
 
