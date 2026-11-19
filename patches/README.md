@@ -75,6 +75,7 @@ Numbered in the order to apply, across repositories. Each was checked to apply w
 | 068 | PanArcticShenanigans | `fjp/test-061` (test, on top of 067) | after 067 | `vertical_divergence_fix.jl`: Oceananigans #6538 as a run-time override; `[grid] partial_cell_fix = "6538"` (true/"6533" keep #6533); `config_smoke_test_fix6538.toml`, `config_sep2005_30d_fix6538.toml` |
 | 069 | PanArcticShenanigans | `fjp/test-061` (diagnostic, on top of 068) | after 068 | `analysis/sea_ice_comparison.jl`: model sea ice vs GLORYS daily (every n days) by region: area, extent, volume, thickness, mean and 95th-percentile ice speed (ℵ > 0.15); time series and maps |
 | 070 | PanArcticShenanigans | `fjp/test-061` (test, on top of 069) | after 069 | `[ocean] catke_surface_tke_scale` (× CATKE's surface shear-driven TKE flux Cᵂu★; 1 = stock); `config_sep2005_30d_catke_nosurface.toml` (scale 0), `config_sep2005_30d_nz100_noclosure.toml` |
+| 071 | PanArcticShenanigans | new branch `fjp/fix-071` from `main` | fc38201 (merge of #46) | fixes the merged #46 suggestions in `analysis/tsubouchi_comparison.jl`: `theirs()` now takes the times (per-block θ′, S′) but its five calls passed three arguments (`MethodError`); header and figure title list the blocks' reference θ′ / S′ instead of printing the 12-value arrays |
 
 ## Applying 001–006
 
