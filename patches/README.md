@@ -66,6 +66,7 @@ Numbered in the order to apply, across repositories. Each was checked to apply w
 | 058 | PanArcticShenanigans | `fjp/merge-nested` | after 057 | `velocity_inflow_days = 0.0417` (1 hour) in config.toml and the smoke configs: removes the open-face jet in partial bottom cells; sections move < 0.1 Sv (056) |
 | 060 | PanArcticShenanigans | `fjp/merge-nested` (or the first PR after it) | after 058 | `analysis/tsubouchi_comparison.jl`: calendar-month means of volume, heat, freshwater, model vs GLORYS, and means over Tsubouchi et al.'s (2018) 30-day blocks on their reference values (1.01 °C, 34.67), model and GLORYS vs Tsubouchi; tables in `output_dir/tsubouchi_comparison.md`, figure `tsubouchi_comparison.png`; reference CSVs in `analysis/references/` |
 | 061 | PanArcticShenanigans | `fjp/test-061` only (diagnostic, not for the merge) | after 060 | `config_sep2005_15km_nz50_caa.toml` (production config + Nares, Jones, Lancaster sections; same experiment), `analysis/section_comparison.jl` (offline transports of every section vs GLORYS, monthly means and daily series, Archipelago total, online beside offline): is the weak Davis Strait the Archipelago throughflow? |
+| 062 | PanArcticShenanigans | `fjp/test-061` (diagnostic, on top of 061) | after 061 | `inflow_outflow` in transports.jl, saved by analysis/transports.jl and analysis/glorys_transports.jl; `analysis/water_masses.jl`: inflow and outflow with transport-weighted T and S, model vs GLORYS, monthly; heat and freshwater differences split into property and volume parts |
 
 ## Applying 001–006
 

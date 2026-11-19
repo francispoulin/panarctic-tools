@@ -1,0 +1,340 @@
+From b172dac44289367f1761c5dda8a6a165c5562c74 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 18 Nov 2026 19:43:18 -0500
+Subject: [PATCH] Inflow and outflow at each section, with their temperature
+ and salinity: is a heat or freshwater error in the water or in the flow?
+
+transports.jl: inflow_outflow splits a section's transport by direction
+(same faces, areas and tracer averaging as section_transports) and returns
+the inflow and outflow (Sv) with their transport-weighted temperature and
+salinity. analysis/transports.jl (offline, model) and
+analysis/glorys_transports.jl (GLORYS) save these under "inflow_outflow".
+
+analysis/water_masses.jl compares them, model against GLORYS, as monthly
+means, and splits the model - GLORYS heat and freshwater transport
+differences into a property part (GLORYS's flow carrying the model's T or S),
+a volume part (the model's extra or missing flow carrying GLORYS's water)
+and the rest. Tables in output_dir/water_masses.md, daily series in
+figure_dir/water_masses.png.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Abhhvm7xByUXxouq5u8r5W
+---
+ analysis/glorys_transports.jl |  10 +-
+ analysis/transports.jl        |  12 ++-
+ analysis/water_masses.jl      | 177 ++++++++++++++++++++++++++++++++++
+ transports.jl                 |  29 ++++++
+ 4 files changed, 226 insertions(+), 2 deletions(-)
+ create mode 100644 analysis/water_masses.jl
+
+diff --git a/analysis/glorys_transports.jl b/analysis/glorys_transports.jl
+index 967870d..6c26faf 100644
+--- a/analysis/glorys_transports.jl
++++ b/analysis/glorys_transports.jl
+@@ -15,7 +15,8 @@
+ # end_date, and the static deptho. Needs no GPU and no model run.
+ #
+ # Writes glorys_transports.jld2 in output_dir: "dates" (the days, as strings) and "transports/<section>_<quantity>"
+-# (one value per day, in the units of transport_units), read by plotting/gateway_transports.jl.
++# (one value per day, in the units of transport_units), read by plotting/gateway_transports.jl; and
++# "inflow_outflow/<section>_<quantity>": inflow and outflow (Sv) and their temperature and salinity (inflow_outflow).
+ 
+ include("../config.jl")
+ include("../transports.jl")
+@@ -97,6 +98,7 @@ function glorys_fields(grid, region, levels, date)
+ end
+ 
+ results = Dict{String, Vector{Float64}}()
++inout   = Dict{String, Vector{Float64}}()   # inflow and outflow, and their T and S (inflow_outflow)
+ 
+ for (name, lons, lats) in transport_sections(config)
+     grid, region, levels = glorys_section_grid(lons, lats)
+@@ -112,6 +114,9 @@ for (name, lons, lats) in transport_sections(config)
+             compute!(field)
+             push!(get!(results, key, Float64[]), field[1, 1, 1])
+         end
++        for (q, value) in pairs(inflow_outflow(grid, u, v, T, S, sᵘ, sᵛ))
++            push!(get!(inout, "$(name)_$q", Float64[]), value)
++        end
+     end
+ 
+     @info @sprintf("    volume (Sv): %s", join([@sprintf("%.2f", Q) for Q in results["$(name)_volume"]], ", "))
+@@ -124,5 +129,8 @@ jldopen(file, "w") do f
+     for (key, values) in results
+         f["transports/$key"] = values
+     end
++    for (key, values) in inout
++        f["inflow_outflow/$key"] = values
++    end
+ end
+ @info "Wrote $file"
+diff --git a/analysis/transports.jl b/analysis/transports.jl
+index 926d600..5c0ef08 100644
+--- a/analysis/transports.jl
++++ b/analysis/transports.jl
+@@ -3,7 +3,8 @@
+ #
+ #   julia +1.13 --project=. analysis/transports.jl [config.toml]
+ #
+-# Reads arctic_ocean.jld2 from `output_dir` and writes arctic_transports_offline.jld2 there. Runs on the CPU and reads one
++# Reads arctic_ocean.jld2 from `output_dir` and writes arctic_transports_offline.jld2 there (the transports, and in
++# "inflow_outflow" each section's inflow and outflow with their temperature and salinity, see inflow_outflow). Runs on the CPU and reads one
+ # average at a time. Uses the grid saved with the output, so the faces are those of the run, even if the config's grid
+ # has changed since. The cell thicknesses follow the averaged free surface.
+ #
+@@ -28,6 +29,9 @@ T, S = CenterField(grid), CenterField(grid)
+ sections   = vcat(gateway_sections(grid, config), boundary_sections(grid))
+ transports = section_transports(grid, u, v, T, S, sections; reference_values(config)...)
+ values     = Dict(name => zeros(length(times)) for name in keys(transports))
++inout      = Dict("$(name)_$q" => zeros(length(times)) for (name, _, _) in sections
++                  for q in ("inflow_volume", "outflow_volume", "inflow_temperature", "outflow_temperature",
++                            "inflow_salinity", "outflow_salinity"))
+ 
+ for n in eachindex(times)
+     for (field, name) in ((u, "u"), (v, "v"), (T, "T"), (S, "S"))
+@@ -41,6 +45,9 @@ for n in eachindex(times)
+     for (name, transport) in transports
+         values[name][n] = compute!(transport)[1, 1, 1]
+     end
++    for (name, sᵘ, sᵛ) in sections, (q, value) in pairs(inflow_outflow(grid, u, v, T, S, sᵘ, sᵛ))
++        inout["$(name)_$q"][n] = value
++    end
+     @info @sprintf("%d / %d: %s", n, length(times), prettytime(times[n]))
+ end
+ 
+@@ -51,6 +58,9 @@ jldopen(offline_transport_output_file, "w") do file
+     for (name, value) in values
+         file["transports/$name"] = value
+     end
++    for (name, value) in inout
++        file["inflow_outflow/$name"] = value
++    end
+ end
+ 
+ @info "Wrote $offline_transport_output_file"
+diff --git a/analysis/water_masses.jl b/analysis/water_masses.jl
+new file mode 100644
+index 0000000..0173ab4
+--- /dev/null
++++ b/analysis/water_masses.jl
+@@ -0,0 +1,177 @@
++# Is a heat or freshwater error at a gateway in the water or in the flow? For every section, the inflow and the outflow
++# (into and out of the Arctic) and the transport-weighted temperature and salinity of each, model against GLORYS, as
++# calendar-month means; then the model − GLORYS difference in heat and freshwater transport split into a property part
++# (the water is warmer, colder, fresher or saltier, carried by GLORYS's flow) and a volume part (more or less of
++# GLORYS's water flows), plus what is left over.
++#
++#   julia +1.13 --project=. analysis/transports.jl        [config.toml]   (offline transports, with inflow_outflow)
++#   julia +1.13 --project=. analysis/glorys_transports.jl [config.toml]   (GLORYS, with inflow_outflow)
++#   julia +1.13 --project=. analysis/water_masses.jl      [config.toml]
++#
++# Writes water_masses.md (tables, markdown) to `output_dir` and water_masses.png to `figure_dir`.
++#
++# With inflow Qᵢ, outflow Qₒ (negative) and their weighted Tᵢ, Tₒ, Sᵢ, Sₒ, and the reference values T₀, S₀ of
++# [transports]:
++#     heat       H = ρ cₚ [Qᵢ (Tᵢ - T₀) + Qₒ (Tₒ - T₀)]
++#     freshwater F = Qᵢ (1 - Sᵢ / S₀) + Qₒ (1 - Sₒ / S₀)
++# Model − GLORYS: property part = GLORYS's Qᵢ, Qₒ with the model's minus GLORYS's T or S; volume part = the model's
++# minus GLORYS's Qᵢ, Qₒ with GLORYS's T or S; the rest is the product of the two differences. The property part does
++# not depend on T₀, S₀; the volume part does (it is the volume error valued at T₀, S₀).
++# Monthly values: mean inflow and outflow; temperatures and salinities weighted by the daily transports. Built from
++# daily means, so the within-day covariance is missing for both (the offline transports; see analysis/transports.jl).
++
++include("../config.jl")
++include("../transports.jl")
++
++using CairoMakie, Dates, JLD2, Printf
++
++start_date = Date(config["time"]["start_date"])
++end_date   = Date(config["time"]["end_date"])
++run_days   = Dates.value(end_date - start_date)
++window     = config["output"]["average_hours"] / 24
++section_names = first.(transport_sections(config))
++T₀, S₀ = reference_values(config)
++ρcₚ = default_reference_density * default_heat_capacity
++
++isfile(offline_transport_output_file) || error("No $offline_transport_output_file: run analysis/transports.jl first")
++glorys_file = joinpath(output_dir, "glorys_transports.jld2")
++isfile(glorys_file) || error("No $glorys_file: run analysis/glorys_transports.jl first")
++
++group_missing(file) = error("No inflow_outflow in $file: rerun the script that wrote it after this change")
++
++model_t, model = jldopen(offline_transport_output_file) do f
++    haskey(f, "inflow_outflow") || group_missing(offline_transport_output_file)
++    times = f["times"] ./ 86400
++    keep  = findall(>(0), times)
++    times[keep] .- window / 2, Dict(k => f["inflow_outflow/$k"][keep] for k in keys(f["inflow_outflow"]))
++end
++
++glorys_t, glorys = jldopen(glorys_file) do f
++    haskey(f, "inflow_outflow") || group_missing(glorys_file)
++    Dates.value.(Date.(f["dates"]) .- start_date) .+ 0.5, Dict(k => f["inflow_outflow/$k"] for k in keys(f["inflow_outflow"]))
++end
++
++# Monthly means over days a ≤ t < b: (Qᵢ, Qₒ, Tᵢ, Tₒ, Sᵢ, Sₒ), T and S weighted by the transport; NaN without data
++function monthly(t, values, name, a, b)
++    haskey(values, "$(name)_inflow_volume") || return fill(NaN, 6)
++    d = findall(τ -> a ≤ τ < b, t)
++    isempty(d) && return fill(NaN, 6)
++    out = Float64[]
++    for direction in ("inflow", "outflow")
++        q = values["$(name)_$(direction)_volume"][d]
++        push!(out, sum(q) / length(d))
++    end
++    for tracer in ("temperature", "salinity"), direction in ("inflow", "outflow")
++        q = values["$(name)_$(direction)_volume"][d]
++        c = values["$(name)_$(direction)_$tracer"][d]
++        ok = isfinite.(c)
++        push!(out, any(ok) ? sum(q[ok] .* c[ok]) / sum(q[ok]) : NaN)
++    end
++    return out   # Qᵢ, Qₒ, Tᵢ, Tₒ, Sᵢ, Sₒ
++end
++
++heat(Qᵢ, Qₒ, Tᵢ, Tₒ)       = ρcₚ * 1e6 * 1e-12 * (Qᵢ * (Tᵢ - T₀) + Qₒ * (Tₒ - T₀))     # TW, Q in Sv
++freshwater(Qᵢ, Qₒ, Sᵢ, Sₒ) = Qᵢ * (1 - Sᵢ / S₀) + Qₒ * (1 - Sₒ / S₀)                   # Sv
++
++function decomposition(m, g)
++    Qᵢ, Qₒ, Tᵢ, Tₒ, Sᵢ, Sₒ = g
++    Qᵢᵐ, Qₒᵐ, Tᵢᵐ, Tₒᵐ, Sᵢᵐ, Sₒᵐ = m
++    nz(x) = isnan(x) ? 0.0 : x   # no flow one way: no contribution
++    total_H  = nz(heat(Qᵢᵐ, 0, Tᵢᵐ, 0)) + nz(heat(0, Qₒᵐ, 0, Tₒᵐ)) - nz(heat(Qᵢ, 0, Tᵢ, 0)) - nz(heat(0, Qₒ, 0, Tₒ))
++    prop_H   = ρcₚ * 1e-6 * (nz(Qᵢ * (Tᵢᵐ - Tᵢ)) + nz(Qₒ * (Tₒᵐ - Tₒ)))
++    vol_H    = ρcₚ * 1e-6 * (nz((Qᵢᵐ - Qᵢ) * (Tᵢ - T₀)) + nz((Qₒᵐ - Qₒ) * (Tₒ - T₀)))
++    total_F  = nz(freshwater(Qᵢᵐ, 0, Sᵢᵐ, 0)) + nz(freshwater(0, Qₒᵐ, 0, Sₒᵐ)) -
++               nz(freshwater(Qᵢ, 0, Sᵢ, 0)) - nz(freshwater(0, Qₒ, 0, Sₒ))
++    prop_F   = -(nz(Qᵢ * (Sᵢᵐ - Sᵢ)) + nz(Qₒ * (Sₒᵐ - Sₒ))) / S₀
++    vol_F    = nz((Qᵢᵐ - Qᵢ) * (1 - Sᵢ / S₀)) + nz((Qₒᵐ - Qₒ) * (1 - Sₒ / S₀))
++    return (; total_H, prop_H, vol_H, rest_H = total_H - prop_H - vol_H,
++              total_F, prop_F, vol_F, rest_F = total_F - prop_F - vol_F)
++end
++
++months = Date[]
++let m = firstdayofmonth(start_date)
++    while m < end_date
++        push!(months, m)
++        m += Month(1)
++    end
++end
++month_window(m) = (max(Dates.value(m - start_date), 0), min(Dates.value(m + Month(1) - start_date), run_days))
++month_label(m) = (a_b = month_window(m); n = a_b[2] - a_b[1];
++                  n == daysinmonth(m) ? Dates.format(m, "u yyyy") : Dates.format(m, "u yyyy") * " [$n d]")
++label(name) = replace(name, "_" => " ")
++f2(x) = isnan(x) ? "–" : @sprintf("%.2f", x)
++f0(x) = isnan(x) ? "–" : @sprintf("%.0f", x)
++f3(x) = isnan(x) ? "–" : @sprintf("%.3f", x)
++
++#####
++##### Tables
++#####
++
++io = IOBuffer()
++println(io, "# Inflow and outflow at the sections: $experiment ($start_date to $end_date)\n")
++println(io, "Inflow is into the Arctic (positive), outflow out of it (negative), in Sv; temperature (°C) and salinity ",
++            "weighted by the transport. Model: offline, from the daily output; GLORYS: daily means on its own grid. ",
++            "Monthly means.\n")
++
++println(io, "## Inflow and outflow, model / GLORYS\n")
++head = ["Section", "Month", "Inflow (Sv)", "T in (°C)", "S in", "Outflow (Sv)", "T out (°C)", "S out"]
++println(io, "| ", join(head, " | "), " |")
++println(io, "|", join(fill("---", length(head)), "|"), "|")
++for name in section_names, m in months
++    a, b = month_window(m)
++    mm, gg = monthly(model_t, model, name, a, b), monthly(glorys_t, glorys, name, a, b)
++    pair(i, f) = f(mm[i]) * " / " * f(gg[i])
++    println(io, "| ", join([label(name), month_label(m), pair(1, f2), pair(3, f2), pair(5, f2),
++                            pair(2, f2), pair(4, f2), pair(6, f2)], " | "), " |")
++end
++println(io)
++
++println(io, "## Model − GLORYS: water (property) or flow (volume)?\n")
++println(io, @sprintf("Heat in TW relative to %g °C, freshwater in Sv relative to %g. ", T₀, S₀),
++            "Property: GLORYS's flow carrying the model's T or S; volume: the model's extra or missing flow carrying ",
++            "GLORYS's water; rest: both together. Total is from the monthly values, so it differs a little from the ",
++            "difference of monthly mean transports.\n")
++head = ["Section", "Month", "Heat total", "property", "volume", "rest", "FW total", "property", "volume", "rest"]
++println(io, "| ", join(head, " | "), " |")
++println(io, "|", join(fill("---", length(head)), "|"), "|")
++for name in section_names, m in months
++    a, b = month_window(m)
++    gg = monthly(glorys_t, glorys, name, a, b)
++    all(isnan, gg) && continue   # no GLORYS reference (e.g. the open boundaries)
++    d = decomposition(monthly(model_t, model, name, a, b), gg)
++    println(io, "| ", join([label(name), month_label(m), f0(d.total_H), f0(d.prop_H), f0(d.vol_H), f0(d.rest_H),
++                            f3(d.total_F), f3(d.prop_F), f3(d.vol_F), f3(d.rest_F)], " | "), " |")
++end
++println(io)
++
++text = String(take!(io))
++print(text)
++table_file = joinpath(output_dir, "water_masses.md")
++write(table_file, text)
++@info "Wrote $table_file"
++
++#####
++##### Figure: daily inflow and outflow, and their T and S, model against GLORYS
++#####
++
++rows = (("volume", "Sv"), ("temperature", "°C"), ("salinity", "g/kg"))
++fig = Figure(size = (280 * length(section_names) + 100, 800))
++first_axis = nothing
++for (row, (quantity, unit)) in enumerate(rows), (col, name) in enumerate(section_names)
++    ax = Axis(fig[row, col]; xlabel = row == length(rows) ? "days since $start_date" : "",
++              ylabel = col == 1 ? "$quantity ($unit)" : "", title = row == 1 ? label(name) : "")
++    row == 1 && col == 1 && (global first_axis = ax)
++    quantity == "volume" && hlines!(ax, 0; color = :black, linewidth = 0.5)
++    for (direction, color) in (("inflow", :red), ("outflow", :blue))
++        key = "$(name)_$(direction)_$quantity"
++        haskey(model, key)  && lines!(ax, model_t, model[key]; color, label = "model, $direction")
++        haskey(glorys, key) && scatter!(ax, glorys_t, glorys[key]; color, marker = :diamond, markersize = 5,
++                                        label = "GLORYS, $direction")
++    end
++end
++Legend(fig[length(rows) + 1, :], first_axis; orientation = :horizontal, framevisible = false, unique = true)
++Label(fig[0, :], "$experiment: inflow (into the Arctic) and outflow, and their transport-weighted T and S"; fontsize = 16)
++
++file = joinpath(figure_dir, "water_masses.png")
++save(file, fig)
++@info "Wrote $file"
+diff --git a/transports.jl b/transports.jl
+index 746f6c6..e581ddf 100644
+--- a/transports.jl
++++ b/transports.jl
+@@ -237,6 +237,35 @@ function section_transports(grid, u, v, T, S, sections;
+     return transports
+ end
+ 
++"""
++    inflow_outflow(grid, u, v, T, S, sᵘ, sᵛ)
++
++The transport through one section split by direction, on the CPU: the volume flowing in (positive, the section's
++positive direction, into the Arctic) and out (negative), in Sv, and the transport-weighted temperature and salinity of
++each, `Σ q T / Σ q` over the faces and levels with that sign. Same faces, face areas and tracer averaging as
++`section_transports`, so inflow + outflow volume equals its volume transport. Weighted temperatures and salinities do
++not depend on reference values. NaN where nothing flows that way.
++"""
++function inflow_outflow(grid, u, v, T, S, sᵘ, sᵛ)
++    Nz = size(grid, 3)
++    Q, QT, QS = zeros(2), zeros(2), zeros(2)
++    for (s, flux, tracer) in ((sᵘ, (i, j, k) -> u_flux(i, j, k, grid, sᵘ, u, nothing, 1.0, 0.0), tracerᶠᶜᶜ),
++                              (sᵛ, (i, j, k) -> v_flux(i, j, k, grid, sᵛ, v, nothing, 1.0, 0.0), tracerᶜᶠᶜ))
++        for I in findall(!=(0), s), k in 1:Nz
++            i, j = Tuple(I)
++            q = flux(i, j, k)
++            q == 0 && continue
++            n = q > 0 ? 1 : 2
++            Q[n]  += q
++            QT[n] += q * tracer(i, j, k, grid, T)
++            QS[n] += q * tracer(i, j, k, grid, S)
++        end
++    end
++    return (inflow_volume       = Q[1] * 1e-6,  outflow_volume       = Q[2] * 1e-6,
++            inflow_temperature  = QT[1] / Q[1], outflow_temperature  = QT[2] / Q[2],
++            inflow_salinity     = QS[1] / Q[1], outflow_salinity     = QS[2] / Q[2])
++end
++
+ transport_quantities = ("volume", "heat", "salt", "freshwater")
+ transport_units      = Dict("volume" => "Sv", "heat" => "TW", "salt" => "kg s⁻¹", "freshwater" => "Sv")
+ 
+-- 
+2.43.0
+
