@@ -1,0 +1,245 @@
+From 818b64c0f50fb066ac55965b229cc0d979e6a4ca Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 18 Nov 2026 23:11:52 -0500
+Subject: [PATCH] Sea ice against GLORYS: area, extent, volume, thickness and
+ ice speed by region
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+analysis/sea_ice_comparison.jl reads the daily sea-ice averages (h, ℵ, uᵢ,
+vᵢ) and GLORYS's daily sea ice every n days (regridded onto the model grid),
+and compares them by region: area, extent, volume, mean thickness, and the
+mean and 95th-percentile ice speed where the concentration exceeds 15 %.
+Tables in output_dir/sea_ice_comparison.md; time series and maps (mean ice
+speed, model and GLORYS; concentration difference) in figure_dir.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Abhhvm7xByUXxouq5u8r5W
+---
+ analysis/sea_ice_comparison.jl | 213 +++++++++++++++++++++++++++++++++
+ 1 file changed, 213 insertions(+)
+ create mode 100644 analysis/sea_ice_comparison.jl
+
+diff --git a/analysis/sea_ice_comparison.jl b/analysis/sea_ice_comparison.jl
+new file mode 100644
+index 0000000..c2bf708
+--- /dev/null
++++ b/analysis/sea_ice_comparison.jl
+@@ -0,0 +1,213 @@
++# The model's sea ice against GLORYS's, by region and through the run: ice area, extent and volume, mean thickness of
++# the ice, and how fast the ice moves (mean and 95th-percentile speed where the concentration exceeds 15 %). Is the
++# ice too fast (so the ice-ocean stress stirs the surface ocean too much), or does it freeze too early or too much
++# (brine)?
++#
++#   julia +1.13 --project=. analysis/sea_ice_comparison.jl [config.toml] [every n days, default 3]
++#
++# Reads the daily averages in arctic_sea_ice.jld2 (h, ℵ, uᵢ, vᵢ) and the grid of arctic_ocean.jld2 from `output_dir`;
++# downloads GLORYS's daily sea ice (sithick, siconc, usi, vsi) every n days and regrids it onto the model grid (on the
++# config's architecture). Writes sea_ice_comparison.md (tables) to `output_dir`, and sea_ice_timeseries.png and
++# sea_ice_maps.png to `figure_dir`.
++#
++# Definitions, the same for model and GLORYS: area Σ A ℵ; extent Σ A over cells with ℵ > 0.15; volume Σ A ℵ h (h is
++# the thickness of the ice where there is ice, as GLORYS's sithick is used to start the model); speed √(u² + v²) of
++# the ice velocity (the model's u and v are on cell faces and taken at the face west and south of each cell: good
++# enough for regional statistics), over cells with ℵ > 0.15. Model values are daily means, at the middle of their day.
++
++include("../config.jl")
++
++using NumericalEarth, Oceananigans, Oceananigans.Units
++using Oceananigans.Architectures: on_architecture
++using Oceananigans.Operators: Azᶜᶜᶜ
++using Oceananigans.OutputReaders: OnDisk
++using NumericalEarth.DataWrangling: BoundingBox, Metadatum
++using CopernicusMarine
++using CairoMakie, CUDA, Dates, JLD2, Printf, Statistics
++
++arch       = config["architecture"] == "GPU" ? GPU() : CPU()
++start_date = DateTime(config["time"]["start_date"])
++end_date   = DateTime(config["time"]["end_date"])
++every      = length(ARGS) ≥ 2 ? parse(Int, ARGS[2]) : 3
++run_days   = Dates.value(end_date - start_date) / 86400e3
++sea_ice_file = joinpath(output_dir, "arctic_sea_ice.jld2")
++
++#####
++##### Grid (from the ocean output: the sea ice uses the same horizontal grid)
++#####
++
++grid = FieldTimeSeries(ocean_output_file, "η"; backend = OnDisk()).grid
++Nx, Ny, Nz = size(grid)
++ug = grid.underlying_grid
++bottom_height = grid.immersed_boundary.bottom_height
++H  = [max(-Float64(bottom_height[i, j, 1]), 0.0) for i in 1:Nx, j in 1:Ny]
++ocean = H .> 0
++λ  = mod.(Array(λnodes(ug, Center(), Center(), Center())) .+ 180, 360) .- 180
++φ  = Array(φnodes(ug, Center(), Center(), Center()))
++A  = [Azᶜᶜᶜ(i, j, 1, ug) for i in 1:Nx, j in 1:Ny]
++
++regions = [("Whole domain",     (λ, φ, H) -> true),
++           ("Beaufort Gyre",    (λ, φ, H) -> 70.5 ≤ φ ≤ 80.5 && -170 ≤ λ ≤ -130 && H > 300),
++           ("Central Arctic",   (λ, φ, H) -> φ > 82),
++           ("Siberian shelves", (λ, φ, H) -> 66 ≤ φ ≤ 82 && (λ ≥ 60 || λ ≤ -170) && H < 200),
++           ("Barents Sea",      (λ, φ, H) -> 68 ≤ φ ≤ 80 && 15 ≤ λ < 60),
++           ("Greenland Sea",    (λ, φ, H) -> 65 ≤ φ ≤ 82 && -40 ≤ λ < 15),
++           ("Archipelago",      (λ, φ, H) -> 68 ≤ φ ≤ 82 && -125 ≤ λ ≤ -80),
++           ("Baffin Bay",       (λ, φ, H) -> 67 ≤ φ ≤ 78 && -80 < λ ≤ -55)]
++masks = [[ocean[i, j] && test(λ[i, j], φ[i, j], H[i, j]) for i in 1:Nx, j in 1:Ny] for (_, test) in regions]
++
++#####
++##### Model sea ice, read from the file directly (its grid is not saved with it)
++#####
++
++# Interior of a saved 2-D array, with or without halos (works for centre and face fields)
++function interior_part(a)
++    a = ndims(a) == 3 ? a[:, :, 1] : a
++    hx, hy = (size(a, 1) - Nx) ÷ 2, (size(a, 2) - Ny) ÷ 2
++    return Float64.(a[hx+1:hx+Nx, hy+1:hy+Ny])
++end
++
++model_t, model = jldopen(sea_ice_file) do f
++    iterations = sort(filter(!=("serialized"), keys(f["timeseries/t"])), by = s -> parse(Int, s))
++    t = [f["timeseries/t/$i"] for i in iterations] ./ 86400
++    fields = Dict(name => [interior_part(f["timeseries/$name/$i"]) for i in iterations] for name in ("h", "ℵ", "uᵢ", "vᵢ"))
++    t, fields
++end
++window = config["output"]["average_hours"] / 24
++model_t = [t == 0 ? 0.0 : t - window / 2 for t in model_t]      # averages at the middle of their window
++@info @sprintf("Model sea ice: %d outputs, days %.1f to %.1f", length(model_t), first(model_t), last(model_t))
++
++#####
++##### GLORYS sea ice on the model grid, every `every` days
++#####
++
++region = BoundingBox(longitude = (-180, 180), latitude = (43, 90))
++target = on_architecture(arch, grid)
++function glorys_2d(name, date)
++    field = Field{Center, Center, Nothing}(target)
++    set!(field, Metadatum(name; dataset = GLORYSDaily(), date, region, dir_kw...))
++    return Float64.(Array(interior(field))[:, :, 1])
++end
++
++glorys_days = collect(0:every:floor(Int, run_days) - 1)
++glorys_t = glorys_days .+ 0.5
++glorys = Dict(name => Matrix{Float64}[] for name in ("h", "ℵ", "uᵢ", "vᵢ"))
++for d in glorys_days
++    date = start_date + Day(d)
++    for (name, variable) in (("h", :sea_ice_thickness), ("ℵ", :sea_ice_concentration),
++                             ("uᵢ", :sea_ice_u_velocity), ("vᵢ", :sea_ice_v_velocity))
++        push!(glorys[name], glorys_2d(variable, date))
++    end
++    @info "GLORYS sea ice, $(Date(date)): on the model grid"
++end
++
++#####
++##### Regional statistics
++#####
++
++clean(x) = ifelse(isfinite(x), x, 0.0)
++function statistics(h, ℵ, u, v, mask)
++    ℵc = clamp.(clean.(ℵ), 0, 1)
++    hc = max.(clean.(h), 0)
++    ice = mask .& (ℵc .> 0.15)
++    area   = sum(A[mask] .* ℵc[mask]) / 1e12            # 10⁶ km²
++    extent = sum(A[ice]) / 1e12
++    volume = sum(A[mask] .* ℵc[mask] .* hc[mask]) / 1e12 # 10³ km³
++    thickness = any(ice) ? sum(A[ice] .* hc[ice]) / sum(A[ice]) : NaN
++    speed = sqrt.(clean.(u) .^ 2 .+ clean.(v) .^ 2)[ice]
++    mean_speed = isempty(speed) ? NaN : mean(speed)
++    p95_speed  = isempty(speed) ? NaN : quantile(speed, 0.95)
++    return (; area, extent, volume, thickness, mean_speed, p95_speed)
++end
++
++model_stats  = [[statistics(model["h"][n], model["ℵ"][n], model["uᵢ"][n], model["vᵢ"][n], mask) for n in eachindex(model_t)]
++                for mask in masks]
++glorys_stats = [[statistics(glorys["h"][n], glorys["ℵ"][n], glorys["uᵢ"][n], glorys["vᵢ"][n], mask) for n in eachindex(glorys_t)]
++                for mask in masks]
++
++#####
++##### Table: model / GLORYS at the start, and averaged over the first and second half of the run
++#####
++
++io = IOBuffer()
++println(io, "# Sea ice: $experiment ($(Date(start_date)) to $(Date(end_date)))\n")
++println(io, "Model / GLORYS. Area and extent in 10⁶ km², volume in 10³ km³, thickness (m, mean over ice), speed of the ice ",
++            "(m/s, mean and 95th percentile over cells with more than 15 % ice). \"start\": the model's first output ",
++            "(its initial state if saved) and GLORYS's first day; then means over each half of the run.\n")
++println(io, "| Region | When | Area | Extent | Volume | Thickness | Mean speed | 95 % speed |")
++println(io, "|---|---|---|---|---|---|---|---|")
++pair(a, b, fmt) = (Printf.format(Printf.Format(fmt), a) * " / " * Printf.format(Printf.Format(fmt), b))
++mean_over(stats, t, a, b, q) = (sel = [getfield(s, q) for (s, τ) in zip(stats, t) if a ≤ τ < b && isfinite(getfield(s, q))];
++                                isempty(sel) ? NaN : mean(sel))
++half = run_days / 2
++for (r, (name, _)) in enumerate(regions)
++    for (label, a, b) in (("start", -Inf, Inf), ("first half", 0.0, half), ("second half", half, run_days))
++        if label == "start"
++            m, g = model_stats[r][1], glorys_stats[r][1]
++            vals = [(getfield(m, q), getfield(g, q)) for q in (:area, :extent, :volume, :thickness, :mean_speed, :p95_speed)]
++        else
++            vals = [(mean_over(model_stats[r], model_t, a, b, q), mean_over(glorys_stats[r], glorys_t, a, b, q))
++                    for q in (:area, :extent, :volume, :thickness, :mean_speed, :p95_speed)]
++        end
++        fmts = ("%.2f", "%.2f", "%.2f", "%.2f", "%.2f", "%.2f")
++        println(io, "| $name | $label | ", join([pair(v..., f) for (v, f) in zip(vals, fmts)], " | "), " |")
++    end
++end
++println(io)
++
++text = String(take!(io))
++print(text)
++table_file = joinpath(output_dir, "sea_ice_comparison.md")
++write(table_file, text)
++@info "Wrote $table_file"
++
++#####
++##### Time series by region
++#####
++
++quantities = ((:area, "area (10⁶ km²)"), (:volume, "volume (10³ km³)"), (:mean_speed, "mean speed (m/s)"),
++              (:p95_speed, "95 % speed (m/s)"))
++fig = Figure(size = (280 * length(regions) + 100, 950))
++first_axis = nothing
++for (row, (q, label)) in enumerate(quantities), (col, (name, _)) in enumerate(regions)
++    ax = Axis(fig[row, col]; title = row == 1 ? name : "", ylabel = col == 1 ? label : "",
++              xlabel = row == length(quantities) ? "days since $(Date(start_date))" : "")
++    row == 1 && col == 1 && (global first_axis = ax)
++    lines!(ax, model_t, [getfield(s, q) for s in model_stats[col]]; color = :red, label = "model")
++    scatter!(ax, glorys_t, [getfield(s, q) for s in glorys_stats[col]]; color = :black, marker = :diamond,
++             markersize = 7, label = "GLORYS")
++end
++Legend(fig[length(quantities) + 1, :], first_axis; orientation = :horizontal, framevisible = false)
++Label(fig[0, :], "$experiment: sea ice, model against GLORYS"; fontsize = 18)
++file = joinpath(figure_dir, "sea_ice_timeseries.png")
++save(file, fig)
++@info "Wrote $file"
++
++#####
++##### Maps: mean ice speed over the run, and the concentration at the last GLORYS day
++#####
++
++mean_speed_map(u, v, ℵ) = (s = zeros(Nx, Ny); c = zeros(Nx, Ny);
++    for n in eachindex(u)
++        ice = clean.(ℵ[n]) .> 0.15
++        s .+= ice .* sqrt.(clean.(u[n]) .^ 2 .+ clean.(v[n]) .^ 2); c .+= ice
++    end; ifelse.((c .> 0) .& ocean, s ./ max.(c, 1), NaN))
++saved = findall(>(0), model_t)
++model_speed  = mean_speed_map(model["uᵢ"][saved], model["vᵢ"][saved], model["ℵ"][saved])
++glorys_speed = mean_speed_map(glorys["uᵢ"], glorys["vᵢ"], glorys["ℵ"])
++last_day = last(glorys_t)
++n_model  = argmin(abs.(model_t .- last_day))
++Δℵ = ifelse.(ocean, clamp.(clean.(model["ℵ"][n_model]), 0, 1) .- clamp.(clean.(glorys["ℵ"][end]), 0, 1), NaN)
++
++fig = Figure(size = (1500, 520))
++for (col, (title, data, cmap, limits)) in enumerate((("model: mean ice speed (m/s)", model_speed, :viridis, (0, 0.5)),
++                                                     ("GLORYS: mean ice speed (m/s)", glorys_speed, :viridis, (0, 0.5)),
++                                                     (@sprintf("concentration, model − GLORYS, day %.1f", last_day), Δℵ, :balance, (-0.6, 0.6))))
++    ax = Axis(fig[1, 2col - 1]; title, aspect = DataAspect())
++    hm = heatmap!(ax, 1:Nx, 1:Ny, data; colormap = cmap, colorrange = limits, nan_color = :lightgray, highclip = :white)
++    Colorbar(fig[1, 2col], hm)
++end
++Label(fig[0, :], "$experiment: sea ice (speed over cells with more than 15 % ice)"; fontsize = 18)
++file = joinpath(figure_dir, "sea_ice_maps.png")
++save(file, fig)
++@info "Wrote $file"
+-- 
+2.43.0
+
