@@ -13,7 +13,15 @@
 # (e.g. "hybrid-wet"), which compares wet cells only when looking for a thickness change, so walls (cliff edges,
 # coasts) do not count and whole-cell grids are left as stock.
 
-include(joinpath(@__DIR__, "thickness_jump_fixes.jl"))
+# Plain Oceananigans (no overrides, so any branch works; only the "stock" and "flux" schemes): define
+# PLAIN_OCEANANIGANS = true before including this file, as branch_checks.jl does.
+if @isdefined(PLAIN_OCEANANIGANS) && PLAIN_OCEANANIGANS
+    using Oceananigans
+    set_momentum_fix!(base) = base in ("stock", "flux") || error("scheme $base needs the overrides (not in plain mode)")
+    set_jump_walls!(walls) = nothing
+else
+    include(joinpath(@__DIR__, "thickness_jump_fixes.jl"))
+end
 
 using Oceananigans.Units, Printf
 using Oceananigans.Operators: volume, Azᶜᶜᶜ, Δrᶜᶜᶜ
