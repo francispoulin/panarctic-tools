@@ -1,0 +1,267 @@
+From 6c3dc8ff24f9b81175f8c9902031c32a8c6abc32 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 19 Nov 2026 18:50:54 -0500
+Subject: [PATCH] =?UTF-8?q?Mixing=20diagnostic:=20daily=20CATKE=20=CE=BA?=
+ =?UTF-8?q?=E1=B6=9C=20and=20e=20over=20the=20top=20metres,=20and=20their?=
+ =?UTF-8?q?=20region=20means=20against=20depth=20and=20time?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+[output] mixing_depth (m; 0 = off) writes daily averages of CATKE's tracer diffusivity κᶜ and turbulent kinetic energy
+e over the top mixing_depth metres to arctic_mixing.jld2. analysis/mixing_timeseries.jl plots region means (the
+regions of salinity_drift.jl) against depth and time and tabulates κᶜ at 5, 10, 20 and 40 m per third of the run:
+mixing all month points to shear, mixing that grows as the surface cools to convection.
+
+config_sep2005_30d_catke_ice_tanh_mixing.toml: the tanh under-ice run with mixing_depth = 60, to see what still mixes
+the Central Arctic (issue #48).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AbhhvmYEBvTrBMFfuX35Ju
+---
+ analysis/mixing_timeseries.jl                 | 112 ++++++++++++++++++
+ config_sep2005_30d_catke_ice_tanh_mixing.toml |  86 ++++++++++++++
+ panarctic.jl                                  |  15 +++
+ 3 files changed, 213 insertions(+)
+ create mode 100644 analysis/mixing_timeseries.jl
+ create mode 100644 config_sep2005_30d_catke_ice_tanh_mixing.toml
+
+diff --git a/analysis/mixing_timeseries.jl b/analysis/mixing_timeseries.jl
+new file mode 100644
+index 0000000..8789075
+--- /dev/null
++++ b/analysis/mixing_timeseries.jl
+@@ -0,0 +1,112 @@
++# When and where does CATKE mix the upper ocean? Region means of CATKE's tracer diffusivity κᶜ and turbulent kinetic
++# energy e against depth and time, from the daily averages written with [output] mixing_depth (arctic_mixing.jld2).
++# Mixing all month points to shear; mixing that starts or deepens as the surface cools points to convection.
++#
++#   julia --project=. analysis/mixing_timeseries.jl [config.toml]
++#
++# Writes mixing_timeseries.md (region-mean κᶜ at a few depths, per third of the run) to `output_dir` and
++# mixing_timeseries.png (depth–time sections of log₁₀ κᶜ and log₁₀ e by region) to `figure_dir`.
++
++include("../config.jl")
++
++using Oceananigans
++using Oceananigans.Operators: Azᶜᶜᶜ
++using Oceananigans.OutputReaders: OnDisk
++using CairoMakie, Printf, Statistics
++
++mixing_file = joinpath(output_dir, "arctic_mixing.jld2")
++κt = FieldTimeSeries(mixing_file, "κc"; backend = OnDisk())
++et = FieldTimeSeries(mixing_file, "e";  backend = OnDisk())
++
++grid  = κt.grid
++times = κt.times ./ 86400              # days
++Nx, Ny, Nz = size(grid)
++ug = grid.underlying_grid
++levels = κt.indices[3]                  # the saved levels, k₀:Nz
++zᶠ = [Float64(ug.z.cᵃᵃᶠ[k]) for k in levels]
++zᶜ = [Float64(ug.z.cᵃᵃᶜ[k]) for k in levels]
++
++bottom_height = grid.immersed_boundary.bottom_height
++hb = [Float64(bottom_height[i, j, 1]) for i in 1:Nx, j in 1:Ny]
++λ  = mod.(Array(λnodes(ug, Center(), Center(), Center())) .+ 180, 360) .- 180
++φ  = Array(φnodes(ug, Center(), Center(), Center()))
++A  = [Azᶜᶜᶜ(i, j, 1, ug) for i in 1:Nx, j in 1:Ny]
++H  = max.(-hb, 0)
++ocean = H .> 0
++
++# Regions as in salinity_drift.jl (longitude −180 to 180)
++regions = [("Beaufort Gyre",    (λ, φ, H) -> 70.5 ≤ φ ≤ 80.5 && -170 ≤ λ ≤ -130 && H > 300),
++           ("Central Arctic",   (λ, φ, H) -> φ > 82),
++           ("Siberian shelves", (λ, φ, H) -> 66 ≤ φ ≤ 82 && (λ ≥ 60 || λ ≤ -170) && H < 200),
++           ("Barents Sea",      (λ, φ, H) -> 68 ≤ φ ≤ 80 && 15 ≤ λ < 60),
++           ("Nordic Seas",      (λ, φ, H) -> 62 ≤ φ ≤ 79 && -20 ≤ λ < 15),
++           ("Archipelago",      (λ, φ, H) -> 68 ≤ φ ≤ 82 && -125 ≤ λ ≤ -80),
++           ("Baffin Bay",       (λ, φ, H) -> 67 ≤ φ ≤ 78 && -80 < λ ≤ -55)]
++masks = [[ocean[i, j] && test(λ[i, j], φ[i, j], H[i, j]) for i in 1:Nx, j in 1:Ny] for (_, test) in regions]
++
++# Area-weighted region mean at each saved level, over the columns where that level is above the seafloor
++function region_profile(c, mask, z)
++    profile = fill(NaN, length(z))
++    for n in eachindex(z)
++        w = A .* mask .* (hb .< z[n])
++        W = sum(w)
++        W > 0 && (profile[n] = sum(w .* c[:, :, n]) / W)
++    end
++    return profile
++end
++
++Nt = length(times)
++κ = [zeros(Nt, length(zᶠ)) for _ in regions]
++e = [zeros(Nt, length(zᶜ)) for _ in regions]
++for t in 1:Nt
++    κn = interior(κt[t])
++    en = interior(et[t])
++    for (r, mask) in enumerate(masks)
++        κ[r][t, :] = region_profile(κn, mask, zᶠ)
++        e[r][t, :] = region_profile(en, mask, zᶜ)
++    end
++end
++
++#####
++##### Table: region-mean κᶜ at a few depths, per third of the run
++#####
++
++depths = filter(d -> d < -minimum(zᶠ), [5, 10, 20, 40])
++thirds = [(1, Nt ÷ 3), (Nt ÷ 3 + 1, 2Nt ÷ 3), (2Nt ÷ 3 + 1, Nt)]
++nearest(d) = argmin(abs.(zᶠ .+ d))
++
++io = IOBuffer()
++println(io, "# CATKE mixing: $experiment\n")
++println(io, "Region-mean tracer diffusivity κᶜ (m²/s) from the daily averages, at the level interface nearest each depth, ",
++            "averaged over each third of the run (days).\n")
++println(io, "| Region | Days | " * join(["κᶜ at $(round(-zᶠ[nearest(d)], digits = 1)) m" for d in depths], " | ") * " |")
++println(io, "|---|---|" * repeat("---|", length(depths)))
++for (r, (name, _)) in enumerate(regions), (t₁, t₂) in thirds
++    values = [mean(filter(isfinite, κ[r][t₁:t₂, nearest(d)])) for d in depths]
++    println(io, "| $name | $(round(Int, times[t₁] - 1))–$(round(Int, times[t₂])) | " *
++                join([@sprintf("%.1e", v) for v in values], " | ") * " |")
++end
++table = String(take!(io))
++print(table)
++table_file = joinpath(output_dir, "mixing_timeseries.md")
++write(table_file, table)
++@info "Wrote $table_file"
++
++#####
++##### Figure: depth–time sections by region
++#####
++
++fig = Figure(size = (320 * length(regions), 620))
++for (r, (name, _)) in enumerate(regions)
++    for (row, (field, z, label, limits)) in enumerate(((κ[r], zᶠ, "log₁₀ κᶜ (m²/s)", (-5, -1)),
++                                                      (e[r], zᶜ, "log₁₀ e (m²/s²)", (-7, -3))))
++        ax = Axis(fig[row, r]; title = row == 1 ? name : "", xlabel = row == 2 ? "days" : "",
++                  ylabel = r == 1 ? "z (m)" : "")
++        hm = heatmap!(ax, times, z, log10.(max.(field, 1e-12)); colorrange = limits, colormap = :viridis)
++        r == length(regions) && Colorbar(fig[row, length(regions) + 1], hm; label)
++    end
++end
++Label(fig[0, :], "$experiment: CATKE mixing, region means"; fontsize = 18)
++file = joinpath(figure_dir, "mixing_timeseries.png")
++save(file, fig)
++@info "Wrote $file"
+diff --git a/config_sep2005_30d_catke_ice_tanh_mixing.toml b/config_sep2005_30d_catke_ice_tanh_mixing.toml
+new file mode 100644
+index 0000000..3993903
+--- /dev/null
++++ b/config_sep2005_30d_catke_ice_tanh_mixing.toml
+@@ -0,0 +1,86 @@
++# September 2005 only (30 days) at 15 km, otherwise as config_sep2005_15km_nz50.toml: a test of what makes the
++# Arctic surface layer too salty (patch 065). Compare its September mean with the 61-day run's, and with GLORYS, using
++#   julia +1.13 --project=. analysis/salinity_drift.jl <this config>
++# config_sep2005_30d_catke_ice_tanh.toml with daily CATKE κᶜ and e over the top 60 m ([output] mixing_depth), for
++# analysis/mixing_timeseries.jl: where and when CATKE still mixes the Central Arctic once its surface TKE flux is off under ice.
++
++architecture = "GPU"   # "GPU" or "CPU"
++experiment   = "sep2005_30d_catke_ice_tanh_mixing"  # name of the run: output and figures go to output_dir/<experiment> and figure_dir/<experiment>
++
++[grid]
++spacing_km = 15     # largest horizontal grid spacing [km] (at the pole; ~15% finer near the Atlantic edge)
++Nz         = 50     # vertical levels
++depth      = 5000   # maximum depth (m)
++bathymetry       = "GEBCO2026"   # "GEBCO2026" (15″, with IBCAO), "ETOPO" (ETOPO 2022, 60″) or "GLORYS" (GLORYS's own sea floor)
++bottom           = "partial"     # "partial": bottom cells cut at the sea floor; "full": whole cells
++partial_cell_fix = true          # with partial cells: flux-form momentum advection at bottom-cell thickness jumps
++                                 # (Oceananigans.jl#6533), which removes the bottom jets of issue #6532
++
++[time]
++start_date = 2005-09-01   # initial condition (GLORYS); the run starts at 00:00 on this date
++end_date   = 2005-10-01   # the run ends at 00:00 on this date; for short tests a date and time, e.g. 1993-01-01T03:00
++dt_minutes = 10           # time step
++
++[atmosphere]
++jra55 = "multi_year"   # "multi_year": JRA55 for the run's own dates; "repeat_year": the 1990–91 repeat year
++pressure = false           # true: JRA55's sea-level pressure acts on the ocean (nested_pressure_fix.jl). Off for now: with it,
++                           # Fram Strait drifts far from GLORYS (1–5 Jan 1993, 15 km: day 4 −12.4 Sv, GLORYS −2.1, −5.6
++                           # without pressure; the same at 100 km), which looks like an error in the pressure path, not
++                           # physics. Main has had no pressure on the ocean since #43.
++inverse_barometer = false  # with pressure = true: GLORYS's η carries no response to the pressure (issue #37), so add the
++                           # inverse-barometer sea level −(pᵃ − ⟨pᵃ⟩)/(ρ₀g) to GLORYS's η at the open sides (Flather) and
++                           # to the initial free surface; its domain mean is removed, so the volume is unchanged.
++                           # Keep false with pressure = false: then neither the model nor GLORYS feels the pressure
++
++[output]
++average_hours   = 24      # time-averaged output (3D ocean, free surface, sea ice), written to output_dir
++checkpoint_days = 30      # how often the full model state is saved for restarts
++restart         = false   # true: continue from the latest checkpoint in output_dir
++monitor_hours   = 1       # monitor.csv: transports through the open sides, mean η against GLORYS's, volume budget,
++                          # fastest point (plotting/volume_budget.jl, plotting/max_speed.jl); 0 = off
++mixing_depth    = 60      # daily CATKE κᶜ and e over the top this many metres in arctic_mixing.jld2; 0 = off
++
++[transports]
++# Volume, heat, salt and freshwater transports through the sections below and the open boundaries (see transports.jl).
++online                = true   # true: computed every time step and averaged over average_hours, written to arctic_transports.jld2
++reference_temperature = 0      # heat transport relative to this temperature (°C)
++reference_salinity    = 34.8   # freshwater transport relative to this salinity (g/kg)
++
++# Each section is a great-circle path through (longitude, latitude) waypoints. Positive transport flows to the right,
++# walking from the first waypoint to the last; these are ordered so that positive is into the Arctic. Both ends should
++# be on land, so the section spans the whole strait on any grid. Check with plotting/transport_sections.jl.
++[transports.sections]
++# Fram Strait follows the mooring array at 78°50′N; intermediate waypoints keep the great circles on that latitude.
++fram_strait         = { lon = [15.0, 10.0, 5.0, 0.0, -5.0, -10.0, -15.0, -20.0],
++                        lat = [78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333] }
++# Barents Sea Opening follows the mooring line from Norway (Fugløya) via Bjørnøya to Sørkapp, Svalbard.
++barents_sea_opening = { lon = [20.0, 19.0, 16.5],  lat = [70.0, 74.45, 77.0] }
++bering_strait       = { lon = [-166.0, -171.0], lat = [66.0, 66.0] }
++davis_strait        = { lon = [-53.0, -63.0],   lat = [67.0, 66.5] }
++
++[paths]
++data_dir   = ""   # where downloads are stored; "" = each dataset's default cache
++output_dir = "output"    # model output: time averages (.jld2), checkpoints and the config; one folder per experiment
++figure_dir = "figures"   # figures and movies from the plotting/ scripts; one folder per experiment
++
++[boundaries]
++velocity_inflow_days = 0.0417   # oblique radiation on u, v: nudging timescale toward GLORYS on inflow (0.0417 days = 1 hour).
++                                # With 1 day, a partial bottom cell on the Atlantic open face drifted to −0.9 m/s
++                                # (GLORYS −0.26); 1 hour removes it and moves the section transports by < 0.1 Sv
++tracer_inflow_km     = 20  # T, S reservoir inflow relaxation length, both open sides
++relaxation_hours     = 6   # T, S and baroclinic u, v relax toward GLORYS in a ~2/3° band along the open sides
++                           # over this timescale; 0 = off (nested_ocean_model's default is 6)
++
++# Volume control (volume_control.jl): the net inflow through the two open sides together is pinned at every barotropic
++# substep, as NEMO and ROMS do; Flather splits it between the sides. Without it the domain's volume drifts from GLORYS's.
++follow_glorys_volume      = true   # true: the net inflow follows GLORYS's domain-mean η, with the surface freshwater handed back
++volume_relaxation_days    = 1      # with follow_glorys_volume: time over which the remaining drift from GLORYS's mean η is removed
++follow_glorys_tendency    = false  # with follow_glorys_volume: true also follows GLORYS's rate of change exactly
++# net_inflow_Sv           = 0.0    # with follow_glorys_volume = false: a constant net inflow instead (Sv, positive into the domain);
++                                   # with neither, Flather alone (no volume control)
++net_inflow_depth_exponent = 0.5    # the pin's correction to each boundary column ∝ Hᵖ: 0 uniform per length, 1 uniform velocity
++                                   # (NEMO, ROMS), 0.5 a uniform shift of GLORYS's η in Flather
++
++[ocean]
++closure = "CATKE"   # "CATKE" (default), "RiBased", "TKEDissipation" or "none"
++catke_under_ice = "tanh"   # CATKE's surface shear-driven TKE flux under ice: "none" (stock), "open_water" (× (1 − ℵ)), "tanh" (× (1 − tanh(10ℵ)))
+diff --git a/panarctic.jl b/panarctic.jl
+index ef56bcc..a51af8f 100644
+--- a/panarctic.jl
++++ b/panarctic.jl
+@@ -246,6 +246,21 @@ simulation.output_writers[:sea_ice] = JLD2Writer(sea_ice.model, sea_ice_outputs;
+                                                  schedule = AveragedTimeInterval(output["average_hours"] * hours),
+                                                  overwrite_files = !restart)
+ 
++# [output] mixing_depth (m; 0, the default, = off): averages of CATKE's tracer diffusivity κᶜ and its turbulent kinetic
++# energy e over the top mixing_depth metres, in arctic_mixing.jld2 (analysis/mixing_timeseries.jl).
++mixing_depth = get(output, "mixing_depth", 0)
++if mixing_depth > 0
++    child.closure isa CATKEVerticalDiffusivity || error("[output] mixing_depth needs closure = \"CATKE\"")
++    zᶠ = [cpu_grid.underlying_grid.z.cᵃᵃᶠ[k] for k in 1:Nz+1]
++    k₀ = max(1, findfirst(z -> z > -mixing_depth, zᶠ) - 1)
++    simulation.output_writers[:mixing] = JLD2Writer(child, (; κc = child.closure_fields.κc, e = child.tracers.e);
++                                                    filename = joinpath(output_dir, "arctic_mixing.jld2"),
++                                                    schedule = AveragedTimeInterval(output["average_hours"] * hours),
++                                                    indices = (:, :, k₀:Nz),
++                                                    overwrite_files = !restart)
++    @info "Mixing output: κᶜ and e above $(round(zᶠ[k₀], digits = 1)) m (levels $k₀ to $Nz) in arctic_mixing.jld2"
++end
++
+ # Transports through the sections in [transports] and the open boundaries (transports.jl): computed every time step and
+ # averaged over the same interval, so they include the covariance of velocity and tracers within each average, which
+ # transports computed offline from the averaged fields (analysis/transports.jl) miss.
+-- 
+2.43.0
+
