@@ -1,0 +1,298 @@
+From 0a0ec481f7122f76c99d7fcb3a1f245c485be593 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 18 Nov 2026 20:57:24 -0500
+Subject: [PATCH] Why is the Arctic surface layer too salty? Closure option,
+ two 30-day tests, and profiles
+
+The Sep-Oct 2005 run keeps the right freshwater content in the Arctic but its
+surface is 0.2-0.7 too salty: fresh water mixed down. Two tests, 30 days each
+(September 2005, 15 km), compared with the 61-day run's September:
+
+- panarctic.jl: [ocean] closure = "CATKE" (default, unchanged), "RiBased" or
+  "TKEDissipation"; config_sep2005_30d_ribased.toml uses RiBased.
+- config_sep2005_30d_nz100.toml: 100 levels (top cell ~4 m instead of ~8 m).
+
+analysis/salinity_drift.jl also draws region-mean model - GLORYS profiles of
+salinity and temperature over the top 300 m (salinity_drift_profiles.png): a
+salty surface over a fresher layer below is the sign of too much mixing.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Abhhvm7xByUXxouq5u8r5W
+---
+ analysis/salinity_drift.jl      | 40 +++++++++++++++-
+ config_sep2005_30d_nz100.toml   | 81 ++++++++++++++++++++++++++++++++
+ config_sep2005_30d_ribased.toml | 83 +++++++++++++++++++++++++++++++++
+ panarctic.jl                    | 17 ++++++-
+ 4 files changed, 219 insertions(+), 2 deletions(-)
+ create mode 100644 config_sep2005_30d_nz100.toml
+ create mode 100644 config_sep2005_30d_ribased.toml
+
+diff --git a/analysis/salinity_drift.jl b/analysis/salinity_drift.jl
+index 458543a..8876fb2 100644
+--- a/analysis/salinity_drift.jl
++++ b/analysis/salinity_drift.jl
+@@ -12,7 +12,9 @@
+ # Reads arctic_ocean.jld2 (daily T and S) from `output_dir`; downloads GLORYS's monthly T and S once (north of 43°N)
+ # and regrids them onto the run's grid with NumericalEarth (inpainted, as for the initial state), on the config's
+ # architecture (a GPU makes the regridding much faster). Writes salinity_drift.md (tables) to `output_dir` and
+-# salinity_drift_maps.png, salinity_drift_fwc.png to `figure_dir`.
++# salinity_drift_maps.png, salinity_drift_fwc.png and salinity_drift_profiles.png to `figure_dir`. The profiles
++# (model − GLORYS against depth, by region) show whether a salty surface sits on a fresher layer below: the sign of
++# too much vertical mixing.
+ #
+ # How to read it: a salinity excess spread over the ice-covered Arctic points to the surface freshwater flux or the
+ # ice–ocean exchange; along coasts and river mouths, to runoff; strongest below the mixed layer or in the Nordic Seas,
+@@ -213,3 +215,39 @@ Label(fig[0, :], "$experiment: liquid freshwater content relative to $S_ref"; fo
+ file = joinpath(figure_dir, "salinity_drift_fwc.png")
+ save(file, fig)
+ @info "Wrote $file"
++
++#####
++##### Profiles by region: model − GLORYS salinity and temperature over the top 300 m
++#####
++
++# Volume-weighted region mean of a 3-D field at each level (NaN where the region has no water at that level)
++function region_profile(c, mask)
++    profile = fill(NaN, Nz)
++    for k in 1:Nz
++        w = A .* h[:, :, k] .* mask
++        W = sum(w)
++        W > 0 && (profile[k] = sum(w .* c[:, :, k]) / W)
++    end
++    return profile
++end
++
++zc = (zf[1:end-1] .+ zf[2:end]) ./ 2
++upper = findall(>(-300), zc)
++colors = Makie.wong_colors()
++fig = Figure(size = (1500, 900))
++for (n, ((name, _, _), mask)) in enumerate(zip(regions, masks)), (q, (quantity, unit, model_of, glorys_of)) in
++        enumerate((("salinity", "g/kg", s -> s[2], s -> s[3]), ("temperature", "°C", s -> s[4], s -> s[5])))
++    row, col = fldmod1(n, 4)
++    ax = Axis(fig[2row - 2 + q, col]; title = q == 1 ? name : "", ylabel = col == 1 ? "z (m)" : "",
++              xlabel = "Δ$quantity ($unit)", limits = (nothing, (-300, 0)))
++    vlines!(ax, 0; color = :black, linewidth = 0.5)
++    for (m, snapshot) in enumerate(snapshots)
++        Δ = region_profile(model_of(snapshot), mask) .- region_profile(glorys_of(snapshot), mask)
++        scatterlines!(ax, Δ[upper], zc[upper]; color = colors[m], markersize = 4, label = snapshot[1])
++    end
++    n == 1 && q == 1 && axislegend(ax; position = :rb, framevisible = false, labelsize = 10)
++end
++Label(fig[0, :], "$experiment: model − GLORYS by region, top 300 m (salinity above, temperature below)"; fontsize = 18)
++file = joinpath(figure_dir, "salinity_drift_profiles.png")
++save(file, fig)
++@info "Wrote $file"
+diff --git a/config_sep2005_30d_nz100.toml b/config_sep2005_30d_nz100.toml
+new file mode 100644
+index 0000000..51f5700
+--- /dev/null
++++ b/config_sep2005_30d_nz100.toml
+@@ -0,0 +1,81 @@
++# September 2005 only (30 days) at 15 km, otherwise as config_sep2005_15km_nz50.toml: a test of what makes the
++# Arctic surface layer too salty (patch 065). Compare its September mean with the 61-day run's, and with GLORYS, using
++#   julia +1.13 --project=. analysis/salinity_drift.jl <this config>
++# 100 levels instead of 50 (top cell ~4 m instead of ~8 m; same exponential stretching). A new Nz needs the GEBCO
++# regridding once (~55 GB of memory; cached after).
++
++architecture = "GPU"   # "GPU" or "CPU"
++experiment   = "sep2005_30d_nz100"  # name of the run: output and figures go to output_dir/<experiment> and figure_dir/<experiment>
++
++[grid]
++spacing_km = 15     # largest horizontal grid spacing [km] (at the pole; ~15% finer near the Atlantic edge)
++Nz         = 100    # vertical levels
++depth      = 5000   # maximum depth (m)
++bathymetry       = "GEBCO2026"   # "GEBCO2026" (15″, with IBCAO), "ETOPO" (ETOPO 2022, 60″) or "GLORYS" (GLORYS's own sea floor)
++bottom           = "partial"     # "partial": bottom cells cut at the sea floor; "full": whole cells
++partial_cell_fix = true          # with partial cells: flux-form momentum advection at bottom-cell thickness jumps
++                                 # (Oceananigans.jl#6533), which removes the bottom jets of issue #6532
++
++[time]
++start_date = 2005-09-01   # initial condition (GLORYS); the run starts at 00:00 on this date
++end_date   = 2005-10-01   # the run ends at 00:00 on this date; for short tests a date and time, e.g. 1993-01-01T03:00
++dt_minutes = 10           # time step
++
++[atmosphere]
++jra55 = "multi_year"   # "multi_year": JRA55 for the run's own dates; "repeat_year": the 1990–91 repeat year
++pressure = false           # true: JRA55's sea-level pressure acts on the ocean (nested_pressure_fix.jl). Off for now: with it,
++                           # Fram Strait drifts far from GLORYS (1–5 Jan 1993, 15 km: day 4 −12.4 Sv, GLORYS −2.1, −5.6
++                           # without pressure; the same at 100 km), which looks like an error in the pressure path, not
++                           # physics. Main has had no pressure on the ocean since #43.
++inverse_barometer = false  # with pressure = true: GLORYS's η carries no response to the pressure (issue #37), so add the
++                           # inverse-barometer sea level −(pᵃ − ⟨pᵃ⟩)/(ρ₀g) to GLORYS's η at the open sides (Flather) and
++                           # to the initial free surface; its domain mean is removed, so the volume is unchanged.
++                           # Keep false with pressure = false: then neither the model nor GLORYS feels the pressure
++
++[output]
++average_hours   = 24      # time-averaged output (3D ocean, free surface, sea ice), written to output_dir
++checkpoint_days = 30      # how often the full model state is saved for restarts
++restart         = false   # true: continue from the latest checkpoint in output_dir
++monitor_hours   = 1       # monitor.csv: transports through the open sides, mean η against GLORYS's, volume budget,
++                          # fastest point (plotting/volume_budget.jl, plotting/max_speed.jl); 0 = off
++
++[transports]
++# Volume, heat, salt and freshwater transports through the sections below and the open boundaries (see transports.jl).
++online                = true   # true: computed every time step and averaged over average_hours, written to arctic_transports.jld2
++reference_temperature = 0      # heat transport relative to this temperature (°C)
++reference_salinity    = 34.8   # freshwater transport relative to this salinity (g/kg)
++
++# Each section is a great-circle path through (longitude, latitude) waypoints. Positive transport flows to the right,
++# walking from the first waypoint to the last; these are ordered so that positive is into the Arctic. Both ends should
++# be on land, so the section spans the whole strait on any grid. Check with plotting/transport_sections.jl.
++[transports.sections]
++# Fram Strait follows the mooring array at 78°50′N; intermediate waypoints keep the great circles on that latitude.
++fram_strait         = { lon = [15.0, 10.0, 5.0, 0.0, -5.0, -10.0, -15.0, -20.0],
++                        lat = [78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333] }
++# Barents Sea Opening follows the mooring line from Norway (Fugløya) via Bjørnøya to Sørkapp, Svalbard.
++barents_sea_opening = { lon = [20.0, 19.0, 16.5],  lat = [70.0, 74.45, 77.0] }
++bering_strait       = { lon = [-166.0, -171.0], lat = [66.0, 66.0] }
++davis_strait        = { lon = [-53.0, -63.0],   lat = [67.0, 66.5] }
++
++[paths]
++data_dir   = ""   # where downloads are stored; "" = each dataset's default cache
++output_dir = "output"    # model output: time averages (.jld2), checkpoints and the config; one folder per experiment
++figure_dir = "figures"   # figures and movies from the plotting/ scripts; one folder per experiment
++
++[boundaries]
++velocity_inflow_days = 0.0417   # oblique radiation on u, v: nudging timescale toward GLORYS on inflow (0.0417 days = 1 hour).
++                                # With 1 day, a partial bottom cell on the Atlantic open face drifted to −0.9 m/s
++                                # (GLORYS −0.26); 1 hour removes it and moves the section transports by < 0.1 Sv
++tracer_inflow_km     = 20  # T, S reservoir inflow relaxation length, both open sides
++relaxation_hours     = 6   # T, S and baroclinic u, v relax toward GLORYS in a ~2/3° band along the open sides
++                           # over this timescale; 0 = off (nested_ocean_model's default is 6)
++
++# Volume control (volume_control.jl): the net inflow through the two open sides together is pinned at every barotropic
++# substep, as NEMO and ROMS do; Flather splits it between the sides. Without it the domain's volume drifts from GLORYS's.
++follow_glorys_volume      = true   # true: the net inflow follows GLORYS's domain-mean η, with the surface freshwater handed back
++volume_relaxation_days    = 1      # with follow_glorys_volume: time over which the remaining drift from GLORYS's mean η is removed
++follow_glorys_tendency    = false  # with follow_glorys_volume: true also follows GLORYS's rate of change exactly
++# net_inflow_Sv           = 0.0    # with follow_glorys_volume = false: a constant net inflow instead (Sv, positive into the domain);
++                                   # with neither, Flather alone (no volume control)
++net_inflow_depth_exponent = 0.5    # the pin's correction to each boundary column ∝ Hᵖ: 0 uniform per length, 1 uniform velocity
++                                   # (NEMO, ROMS), 0.5 a uniform shift of GLORYS's η in Flather
+diff --git a/config_sep2005_30d_ribased.toml b/config_sep2005_30d_ribased.toml
+new file mode 100644
+index 0000000..4ca7bb8
+--- /dev/null
++++ b/config_sep2005_30d_ribased.toml
+@@ -0,0 +1,83 @@
++# September 2005 only (30 days) at 15 km, otherwise as config_sep2005_15km_nz50.toml: a test of what makes the
++# Arctic surface layer too salty (patch 065). Compare its September mean with the 61-day run's, and with GLORYS, using
++#   julia +1.13 --project=. analysis/salinity_drift.jl <this config>
++# Vertical mixing: Richardson-number based instead of CATKE.
++
++architecture = "GPU"   # "GPU" or "CPU"
++experiment   = "sep2005_30d_ribased"  # name of the run: output and figures go to output_dir/<experiment> and figure_dir/<experiment>
++
++[grid]
++spacing_km = 15     # largest horizontal grid spacing [km] (at the pole; ~15% finer near the Atlantic edge)
++Nz         = 50     # vertical levels
++depth      = 5000   # maximum depth (m)
++bathymetry       = "GEBCO2026"   # "GEBCO2026" (15″, with IBCAO), "ETOPO" (ETOPO 2022, 60″) or "GLORYS" (GLORYS's own sea floor)
++bottom           = "partial"     # "partial": bottom cells cut at the sea floor; "full": whole cells
++partial_cell_fix = true          # with partial cells: flux-form momentum advection at bottom-cell thickness jumps
++                                 # (Oceananigans.jl#6533), which removes the bottom jets of issue #6532
++
++[time]
++start_date = 2005-09-01   # initial condition (GLORYS); the run starts at 00:00 on this date
++end_date   = 2005-10-01   # the run ends at 00:00 on this date; for short tests a date and time, e.g. 1993-01-01T03:00
++dt_minutes = 10           # time step
++
++[atmosphere]
++jra55 = "multi_year"   # "multi_year": JRA55 for the run's own dates; "repeat_year": the 1990–91 repeat year
++pressure = false           # true: JRA55's sea-level pressure acts on the ocean (nested_pressure_fix.jl). Off for now: with it,
++                           # Fram Strait drifts far from GLORYS (1–5 Jan 1993, 15 km: day 4 −12.4 Sv, GLORYS −2.1, −5.6
++                           # without pressure; the same at 100 km), which looks like an error in the pressure path, not
++                           # physics. Main has had no pressure on the ocean since #43.
++inverse_barometer = false  # with pressure = true: GLORYS's η carries no response to the pressure (issue #37), so add the
++                           # inverse-barometer sea level −(pᵃ − ⟨pᵃ⟩)/(ρ₀g) to GLORYS's η at the open sides (Flather) and
++                           # to the initial free surface; its domain mean is removed, so the volume is unchanged.
++                           # Keep false with pressure = false: then neither the model nor GLORYS feels the pressure
++
++[output]
++average_hours   = 24      # time-averaged output (3D ocean, free surface, sea ice), written to output_dir
++checkpoint_days = 30      # how often the full model state is saved for restarts
++restart         = false   # true: continue from the latest checkpoint in output_dir
++monitor_hours   = 1       # monitor.csv: transports through the open sides, mean η against GLORYS's, volume budget,
++                          # fastest point (plotting/volume_budget.jl, plotting/max_speed.jl); 0 = off
++
++[transports]
++# Volume, heat, salt and freshwater transports through the sections below and the open boundaries (see transports.jl).
++online                = true   # true: computed every time step and averaged over average_hours, written to arctic_transports.jld2
++reference_temperature = 0      # heat transport relative to this temperature (°C)
++reference_salinity    = 34.8   # freshwater transport relative to this salinity (g/kg)
++
++# Each section is a great-circle path through (longitude, latitude) waypoints. Positive transport flows to the right,
++# walking from the first waypoint to the last; these are ordered so that positive is into the Arctic. Both ends should
++# be on land, so the section spans the whole strait on any grid. Check with plotting/transport_sections.jl.
++[transports.sections]
++# Fram Strait follows the mooring array at 78°50′N; intermediate waypoints keep the great circles on that latitude.
++fram_strait         = { lon = [15.0, 10.0, 5.0, 0.0, -5.0, -10.0, -15.0, -20.0],
++                        lat = [78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333] }
++# Barents Sea Opening follows the mooring line from Norway (Fugløya) via Bjørnøya to Sørkapp, Svalbard.
++barents_sea_opening = { lon = [20.0, 19.0, 16.5],  lat = [70.0, 74.45, 77.0] }
++bering_strait       = { lon = [-166.0, -171.0], lat = [66.0, 66.0] }
++davis_strait        = { lon = [-53.0, -63.0],   lat = [67.0, 66.5] }
++
++[paths]
++data_dir   = ""   # where downloads are stored; "" = each dataset's default cache
++output_dir = "output"    # model output: time averages (.jld2), checkpoints and the config; one folder per experiment
++figure_dir = "figures"   # figures and movies from the plotting/ scripts; one folder per experiment
++
++[boundaries]
++velocity_inflow_days = 0.0417   # oblique radiation on u, v: nudging timescale toward GLORYS on inflow (0.0417 days = 1 hour).
++                                # With 1 day, a partial bottom cell on the Atlantic open face drifted to −0.9 m/s
++                                # (GLORYS −0.26); 1 hour removes it and moves the section transports by < 0.1 Sv
++tracer_inflow_km     = 20  # T, S reservoir inflow relaxation length, both open sides
++relaxation_hours     = 6   # T, S and baroclinic u, v relax toward GLORYS in a ~2/3° band along the open sides
++                           # over this timescale; 0 = off (nested_ocean_model's default is 6)
++
++# Volume control (volume_control.jl): the net inflow through the two open sides together is pinned at every barotropic
++# substep, as NEMO and ROMS do; Flather splits it between the sides. Without it the domain's volume drifts from GLORYS's.
++follow_glorys_volume      = true   # true: the net inflow follows GLORYS's domain-mean η, with the surface freshwater handed back
++volume_relaxation_days    = 1      # with follow_glorys_volume: time over which the remaining drift from GLORYS's mean η is removed
++follow_glorys_tendency    = false  # with follow_glorys_volume: true also follows GLORYS's rate of change exactly
++# net_inflow_Sv           = 0.0    # with follow_glorys_volume = false: a constant net inflow instead (Sv, positive into the domain);
++                                   # with neither, Flather alone (no volume control)
++net_inflow_depth_exponent = 0.5    # the pin's correction to each boundary column ∝ Hᵖ: 0 uniform per length, 1 uniform velocity
++                                   # (NEMO, ROMS), 0.5 a uniform shift of GLORYS's η in Flather
++
++[ocean]
++closure = "RiBased"   # "CATKE" (default), "RiBased" or "TKEDissipation"
+diff --git a/panarctic.jl b/panarctic.jl
+index ca851ff..0109c7e 100644
+--- a/panarctic.jl
++++ b/panarctic.jl
+@@ -36,6 +36,21 @@ using NumericalEarth.EarthSystemModels: reference_density, heat_capacity
+ # The child grid is a copy of `grid` with Open sides and the blended bathymetry: use child.grid below.
+ 
+ bc = config["boundaries"]
++
++# Vertical mixing ([ocean] closure): "CATKE" (default), "RiBased" (Richardson-number based, as in Pacanowski & Philander
++# and NEMO-style schemes; no extra tracers) or "TKEDissipation" (k–ε). For testing how much of the upper-ocean
++# mixing comes from CATKE.
++closure_name = get(get(config, "ocean", Dict{String, Any}()), "closure", "CATKE")
++closure = if closure_name == "CATKE"
++    CATKEVerticalDiffusivity()
++elseif closure_name == "RiBased"
++    Oceananigans.TurbulenceClosures.RiBasedVerticalDiffusivity()
++elseif closure_name == "TKEDissipation"
++    Oceananigans.TurbulenceClosures.TKEDissipationVerticalDiffusivity()
++else
++    error("[ocean] closure must be \"CATKE\", \"RiBased\" or \"TKEDissipation\", not \"$closure_name\"")
++end
++@info "Vertical mixing: $closure_name"
+ Δt = config["time"]["dt_minutes"] * minutes
+ time_discretization = AdaptiveVerticallyImplicitDiscretization(cfl=0.5)
+ net_inflow = net_inflow_setting(bc)
+@@ -55,7 +70,7 @@ ocean = nested_ocean_simulation(grid, dataset;
+                                 free_surface = SplitExplicitFreeSurface(grid; cfl = 0.7, fixed_Δt = Δt),
+                                 momentum_advection = WENOVectorInvariant(; order=5, time_discretization),
+                                 tracer_advection = WENO(; order=7, time_discretization, minimum_buffer_upwind_order=1),
+-                                closure = CATKEVerticalDiffusivity())
++                                closure)
+ 
+ child = ocean.model.child   # the regional ocean model; ocean.model also holds the GLORYS parent
+ 
+-- 
+2.43.0
+
