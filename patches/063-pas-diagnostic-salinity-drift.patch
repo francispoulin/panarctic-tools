@@ -1,0 +1,247 @@
+From 1d11ea5fa6e502ddc89e774b5ac9b3613994a796 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 18 Nov 2026 20:17:29 -0500
+Subject: [PATCH] Where does the salinity drift? Model against GLORYS monthly
+ means, maps and regions
+
+analysis/salinity_drift.jl compares the run's monthly means (from the daily
+output) with GLORYS's monthly means (GLORYSMonthly), both on the model grid:
+maps of model - GLORYS surface salinity and top-200 m salinity and
+temperature, per month and at the start (initial state against GLORYS's
+first day, as a check); by region (Beaufort Gyre, central Arctic, Siberian
+shelves, Barents Sea, Nordic Seas, Archipelago, Baffin Bay) the mean
+differences and the liquid freshwater content relative to 34.8; and the
+model's daily freshwater content through the run. Tables in
+output_dir/salinity_drift.md, figures salinity_drift_maps.png and
+salinity_drift_fwc.png.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Abhhvm7xByUXxouq5u8r5W
+---
+ analysis/salinity_drift.jl | 214 +++++++++++++++++++++++++++++++++++++
+ 1 file changed, 214 insertions(+)
+ create mode 100644 analysis/salinity_drift.jl
+
+diff --git a/analysis/salinity_drift.jl b/analysis/salinity_drift.jl
+new file mode 100644
+index 0000000..ccf14e0
+--- /dev/null
++++ b/analysis/salinity_drift.jl
+@@ -0,0 +1,214 @@
++# Where does the model's salinity drift away from GLORYS's? Monthly means of the model's daily output against GLORYS's
++# monthly means (GLORYSMonthly), both on the model grid:
++#
++#   - maps of model − GLORYS: surface salinity, and salinity and temperature averaged over the top 200 m, per month
++#     (and at the start, model against GLORYS's daily mean of start_date, if the output has the initial state: a check
++#     that the comparison itself starts near zero);
++#   - by region: the top-200 m mean salinity and temperature differences, and the liquid freshwater content
++#     (relative to 34.8), model and GLORYS, per month; and the model's daily freshwater content through the run.
++#
++#   julia +1.13 --project=. analysis/salinity_drift.jl [config.toml]
++#
++# Reads arctic_ocean.jld2 (daily T and S) from `output_dir`; downloads GLORYS's monthly T and S once (north of 43°N)
++# and regrids them onto the run's grid with NumericalEarth (inpainted, as for the initial state), on the config's
++# architecture (a GPU makes the regridding much faster). Writes salinity_drift.md (tables) to `output_dir` and
++# salinity_drift_maps.png, salinity_drift_fwc.png to `figure_dir`.
++#
++# How to read it: a salinity excess spread over the ice-covered Arctic points to the surface freshwater flux or the
++# ice–ocean exchange; along coasts and river mouths, to runoff; strongest below the mixed layer or in the Nordic Seas,
++# to vertical mixing.
++#
++# Freshwater content: Σ (34.8 − S) / 34.8 × cell volume over cells fresher than 34.8 (a cell-by-cell version of the
++# usual integral down to the 34.8 isohaline). Cell thicknesses are the partial bottom cells' wet parts, at rest (the
++# z⋆ stretching, a fraction of a percent, is left out). Monthly model means are plain means of the daily averages.
++
++include("../config.jl")
++
++using NumericalEarth, Oceananigans, Oceananigans.Units
++using Oceananigans.Architectures: on_architecture
++using Oceananigans.Operators: Azᶜᶜᶜ
++using Oceananigans.OutputReaders: OnDisk
++using NumericalEarth.DataWrangling: BoundingBox, Metadatum
++using CopernicusMarine   # enables the GLORYS download extension
++using CairoMakie, CUDA, Dates, JLD2, Printf
++
++arch       = config["architecture"] == "GPU" ? GPU() : CPU()
++start_date = DateTime(config["time"]["start_date"])
++end_date   = DateTime(config["time"]["end_date"])
++window     = config["output"]["average_hours"] / 24     # days
++S_ref      = 34.8
++
++#####
++##### The model's output and its grid
++#####
++
++St = FieldTimeSeries(ocean_output_file, "S"; backend = OnDisk())
++Tt = FieldTimeSeries(ocean_output_file, "T"; backend = OnDisk())
++grid  = St.grid                       # the run's own grid (CPU), with its bottom
++times = St.times ./ 86400             # days; each average is saved at the end of its window
++Nx, Ny, Nz = size(grid)
++
++ug  = grid.underlying_grid
++zf  = Float64.(collect(ug.z.cᵃᵃᶠ[1:Nz+1]))         # level interfaces, bottom to top (the reference levels, at rest)
++hb  = Float64.(Array(interior(grid.immersed_boundary.bottom_height))[:, :, 1])
++λ   = mod.(Array(λnodes(ug, Center(), Center(), Center())) .+ 180, 360) .- 180
++φ   = Array(φnodes(ug, Center(), Center(), Center()))
++A   = [Azᶜᶜᶜ(i, j, 1, ug) for i in 1:Nx, j in 1:Ny]
++H   = max.(-hb, 0)                                   # column depth
++ocean = H .> 0
++
++# Wet thickness of each cell, and the part of it in the top 200 m
++overlap(a, b, c, d) = max(0.0, min(b, d) - max(a, c))
++h    = [overlap(zf[k], zf[k+1], hb[i, j], 0.0)      for i in 1:Nx, j in 1:Ny, k in 1:Nz]
++h200 = [overlap(zf[k], zf[k+1], max(hb[i, j], -200.0), 0.0) for i in 1:Nx, j in 1:Ny, k in 1:Nz]
++
++# Top-200 m mean of a 3-D field (NaN on land), and the freshwater content per column (m³)
++top200(c) = (num = dropdims(sum(c .* h200, dims = 3), dims = 3); den = dropdims(sum(h200, dims = 3), dims = 3);
++             ifelse.(den .> 0, num ./ den, NaN))
++column_fwc(S) = A .* dropdims(sum(h .* max.(S_ref .- S, 0), dims = 3), dims = 3) ./ S_ref
++surface(c) = ifelse.(ocean, c[:, :, Nz], NaN)
++
++# Regions (longitude −180 to 180)
++regions = [("Beaufort Gyre",     "70.5–80.5°N, 170–130°W, deeper than 300 m", (λ, φ, H) -> 70.5 ≤ φ ≤ 80.5 && -170 ≤ λ ≤ -130 && H > 300),
++           ("Central Arctic",    "north of 82°N",                             (λ, φ, H) -> φ > 82),
++           ("Siberian shelves",  "66–82°N, 60°E–170°W, shallower than 200 m", (λ, φ, H) -> 66 ≤ φ ≤ 82 && (λ ≥ 60 || λ ≤ -170) && H < 200),
++           ("Barents Sea",       "68–80°N, 15–60°E",                          (λ, φ, H) -> 68 ≤ φ ≤ 80 && 15 ≤ λ < 60),
++           ("Nordic Seas",       "62–79°N, 20°W–15°E",                        (λ, φ, H) -> 62 ≤ φ ≤ 79 && -20 ≤ λ < 15),
++           ("Archipelago",       "68–82°N, 125–80°W",                         (λ, φ, H) -> 68 ≤ φ ≤ 82 && -125 ≤ λ ≤ -80),
++           ("Baffin Bay",        "67–78°N, 80–55°W",                          (λ, φ, H) -> 67 ≤ φ ≤ 78 && -80 < λ ≤ -55)]
++masks = [[ocean[i, j] && test(λ[i, j], φ[i, j], H[i, j]) for i in 1:Nx, j in 1:Ny] for (_, _, test) in regions]
++region_mean(map, mask) = (m = mask .& isfinite.(map); w = A[m]; sum(map[m] .* w) / sum(w))
++region_fwc(fwc, mask)  = sum(fwc[mask]) / 1e9      # km³
++
++#####
++##### Model: monthly means, the initial state, and daily freshwater content
++#####
++
++saved   = findall(>(0), times)
++t_mid   = times[saved] .- window / 2               # days since start_date
++months  = DateTime[]
++let m = DateTime(firstdayofmonth(Date(start_date)))
++    while m < end_date
++        push!(months, m)
++        m += Month(1)
++    end
++end
++day_of(d) = Dates.value(d - start_date) / 86400e3
++month_days(m) = (max(day_of(m), 0.0), min(day_of(m + Month(1)), day_of(end_date)))
++
++model_S = Dict{DateTime, Array{Float64, 3}}()
++model_T = Dict{DateTime, Array{Float64, 3}}()
++for m in months
++    a, b = month_days(m)
++    ns = saved[findall(τ -> a ≤ τ < b, t_mid)]
++    isempty(ns) && continue
++    model_S[m] = sum(Float64.(interior(St[n])) for n in ns) ./ length(ns)
++    model_T[m] = sum(Float64.(interior(Tt[n])) for n in ns) ./ length(ns)
++    @info @sprintf("Model, %s: %d daily averages", Dates.format(m, "u yyyy"), length(ns))
++end
++
++initial = findfirst(==(0), times)
++model_S0 = isnothing(initial) ? nothing : Float64.(interior(St[initial]))
++model_T0 = isnothing(initial) ? nothing : Float64.(interior(Tt[initial]))
++
++daily_fwc = zeros(length(saved), length(masks))
++for (row, n) in enumerate(saved)
++    fwc = column_fwc(Float64.(interior(St[n])))
++    for (col, mask) in enumerate(masks)
++        daily_fwc[row, col] = region_fwc(fwc, mask)
++    end
++end
++@info "Model: daily freshwater content done"
++
++#####
++##### GLORYS on the model grid
++#####
++
++region = BoundingBox(longitude = (-180, 180), latitude = (43, 90))
++target_grid = on_architecture(arch, grid)
++function glorys_on_grid(name, dataset, date)
++    field = CenterField(target_grid)
++    set!(field, Metadatum(name; dataset, date, region, dir_kw...))
++    @info "GLORYS $name, $(Dates.format(date, "yyyy-mm-dd")) ($(nameof(typeof(dataset)))): on the model grid"
++    return Float64.(Array(interior(field)))
++end
++
++glorys_S = Dict(m => glorys_on_grid(:salinity,    GLORYSMonthly(), m) for m in keys(model_S))
++glorys_T = Dict(m => glorys_on_grid(:temperature, GLORYSMonthly(), m) for m in keys(model_T))
++glorys_S0 = isnothing(initial) ? nothing : glorys_on_grid(:salinity,    GLORYSDaily(), DateTime(Date(start_date)))
++glorys_T0 = isnothing(initial) ? nothing : glorys_on_grid(:temperature, GLORYSDaily(), DateTime(Date(start_date)))
++
++#####
++##### Tables
++#####
++
++# (label, model S, GLORYS S, model T, GLORYS T, time in days for the freshwater plot)
++snapshots = Any[(Dates.format(m, "u yyyy"), model_S[m], glorys_S[m], model_T[m], glorys_T[m], sum(month_days(m)) / 2)
++                for m in sort(collect(keys(model_S)))]
++isnothing(initial) || pushfirst!(snapshots, ("start", model_S0, glorys_S0, model_T0, glorys_T0, 0.0))
++
++io = IOBuffer()
++println(io, "# Salinity and temperature drift: $experiment ($(Date(start_date)) to $(Date(end_date)))\n")
++println(io, "Model (monthly means of the daily output) against GLORYS (monthly means, GLORYSMonthly), both on the model grid. ",
++            "\"start\": the model's initial state against GLORYS's daily mean of the first day. Top 200 m: thickness-weighted ",
++            "mean over the top 200 m (or the whole column where shallower). Freshwater content relative to $S_ref, in km³.\n")
++println(io, "| Region | Definition | When | ΔS surface | ΔS top 200 m | ΔT top 200 m (°C) | FWC model | FWC GLORYS | ΔFWC |")
++println(io, "|---|---|---|---|---|---|---|---|---|")
++for ((name, definition, _), mask) in zip(regions, masks), (label, Sm, Sg, Tm, Tg, _) in snapshots
++    dSs = region_mean(surface(Sm) .- surface(Sg), mask)
++    dS  = region_mean(top200(Sm) .- top200(Sg), mask)
++    dT  = region_mean(top200(Tm) .- top200(Tg), mask)
++    Fm, Fg = region_fwc(column_fwc(Sm), mask), region_fwc(column_fwc(Sg), mask)
++    println(io, @sprintf("| %s | %s | %s | %+.3f | %+.3f | %+.2f | %.0f | %.0f | %+.0f |",
++                         name, definition, label, dSs, dS, dT, Fm, Fg, Fm - Fg))
++end
++println(io)
++
++text = String(take!(io))
++print(text)
++table_file = joinpath(output_dir, "salinity_drift.md")
++write(table_file, text)
++@info "Wrote $table_file"
++
++#####
++##### Maps: model − GLORYS
++#####
++
++fields = (("surface salinity", s -> surface(s[1]) .- surface(s[2]), (-1.0, 1.0), "g/kg"),
++          ("salinity, top 200 m", s -> top200(s[1]) .- top200(s[2]), (-0.5, 0.5), "g/kg"),
++          ("temperature, top 200 m", s -> top200(s[3]) .- top200(s[4]), (-2.0, 2.0), "°C"))
++fig = Figure(size = (380 * length(snapshots) + 150, 1150))
++for (row, (title, difference, limits, unit)) in enumerate(fields)
++    local hm
++    for (col, (label, Sm, Sg, Tm, Tg, _)) in enumerate(snapshots)
++        ax = Axis(fig[row, col]; title = "$title: $label", aspect = DataAspect(),
++                  xlabel = row == length(fields) ? "i" : "", ylabel = col == 1 ? "j" : "")
++        hm = heatmap!(ax, 1:Nx, 1:Ny, difference((Sm, Sg, Tm, Tg)); colormap = :balance, colorrange = limits,
++                      lowclip = :navy, highclip = :darkred, nan_color = :lightgray)
++    end
++    Colorbar(fig[row, length(snapshots) + 1], hm; label = "model − GLORYS ($unit)")
++end
++Label(fig[0, :], "$experiment: model − GLORYS"; fontsize = 18)
++file = joinpath(figure_dir, "salinity_drift_maps.png")
++save(file, fig)
++@info "Wrote $file"
++
++#####
++##### Freshwater content by region: model daily, GLORYS monthly (and at the start)
++#####
++
++fig = Figure(size = (1400, 700))
++for (n, ((name, _, _), mask)) in enumerate(zip(regions, masks))
++    ax = Axis(fig[fldmod1(n, 4)...]; title = name, xlabel = "days since $(Date(start_date))",
++              ylabel = mod1(n, 4) == 1 ? "freshwater content (km³)" : "")
++    lines!(ax, t_mid, daily_fwc[:, n]; color = :red, label = "model, daily")
++    for (label, Sm, Sg, _, _, t) in snapshots
++        scatter!(ax, [t], [region_fwc(column_fwc(Sg), mask)]; color = :black, marker = :diamond, label = "GLORYS")
++        scatter!(ax, [t], [region_fwc(column_fwc(Sm), mask)]; color = :red, marker = :circle, label = "model, same period")
++    end
++    n == 1 && axislegend(ax; position = :lb, framevisible = false, unique = true, labelsize = 10)
++end
++Label(fig[0, :], "$experiment: liquid freshwater content relative to $S_ref"; fontsize = 18)
++file = joinpath(figure_dir, "salinity_drift_fwc.png")
++save(file, fig)
++@info "Wrote $file"
+-- 
+2.43.0
+
