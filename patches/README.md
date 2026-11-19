@@ -72,6 +72,7 @@ Numbered in the order to apply, across repositories. Each was checked to apply w
 | 065 | PanArcticShenanigans | `fjp/test-061` (diagnostic, on top of 064) | after 064 | `[ocean] closure` option in panarctic.jl (CATKE default, RiBased, TKEDissipation); `config_sep2005_30d_ribased.toml`, `config_sep2005_30d_nz100.toml` (15 km, Sep 2005, 30 days); region profiles of model − GLORYS S and T (top 300 m) in `analysis/salinity_drift.jl` |
 | 066 | PanArcticShenanigans | `fjp/test-061` (diagnostic, on top of 065) | after 065 | `[ocean] closure = "none"` (no vertical mixing scheme, not even convective adjustment); `config_sep2005_30d_noclosure.toml` (15 km, Sep 2005, 30 days) |
 | 067 | PanArcticShenanigans | `fjp/test-061` (diagnostic, fix for 066) | after 066 | `closure = "none"` passes `nothing` (an empty tuple failed in model construction: reducing over an empty collection) |
+| 068 | PanArcticShenanigans | `fjp/test-061` (test, on top of 067) | after 067 | `vertical_divergence_fix.jl`: Oceananigans #6538 as a run-time override; `[grid] partial_cell_fix = "6538"` (true/"6533" keep #6533); `config_smoke_test_fix6538.toml`, `config_sep2005_30d_fix6538.toml` |
 
 ## Applying 001–006
 
