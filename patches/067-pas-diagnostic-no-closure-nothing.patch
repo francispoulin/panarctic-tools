@@ -1,0 +1,28 @@
+From 7ce624c1d8bf6c0f00171972a6d49ba34b2e72ee Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 18 Nov 2026 21:38:18 -0500
+Subject: [PATCH] closure = "none" is nothing, not an empty tuple (model
+ construction reduces over the closures)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Abhhvm7xByUXxouq5u8r5W
+---
+ panarctic.jl | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/panarctic.jl b/panarctic.jl
+index 8ee7125..0761da7 100644
+--- a/panarctic.jl
++++ b/panarctic.jl
+@@ -48,7 +48,7 @@ elseif closure_name == "RiBased"
+ elseif closure_name == "TKEDissipation"
+     Oceananigans.TurbulenceClosures.TKEDissipationVerticalDiffusivity()
+ elseif closure_name == "none"
+-    ()   # no vertical mixing scheme at all, not even convective adjustment: only WENO's implicit dissipation. A test only.
++    nothing   # no vertical mixing scheme at all, not even convective adjustment: only WENO's implicit dissipation. A test only.
+ else
+     error("[ocean] closure must be \"CATKE\", \"RiBased\", \"TKEDissipation\" or \"none\", not \"$closure_name\"")
+ end
+-- 
+2.43.0
+
