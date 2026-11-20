@@ -1,0 +1,156 @@
+From e4f94d95a7692a21ecdc9971daab81fd66c3eb23 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 20 Nov 2026 13:46:06 -0500
+Subject: [PATCH] Keep compiled code between runs: overrides loaded once per
+ process, one job module per runner
+
+- panarctic.jl: the method overrides (jra55_read_fix, nested_pressure_fix, partial_cell_fix / vertical_divergence_fix)
+  and under_ice_coupling.jl are included once per Julia process (include_once), and catke_under_ice!(choice) is
+  evaluated once per choice. Redefining a method, even identically, invalidates the compiled code that depends on it:
+  at every include the @eval overrides of Oceananigans.Advection made the next run recompile the advection kernels
+  (20 Nov: a second 7-day smoke run in the same REPL still took 1.8 min per model day against 2.5). A run that needs
+  another partial-cell fix than the one loaded stops with a message to start a fresh Julia; catke_under_ice = "none"
+  after a loaded choice keeps the override with factor 1 (stock CATKE flux), with a warning.
+- tools/runner.jl: one job module for all the jobs of a runner process (as a reused REPL), instead of a fresh module
+  per job, which recompiled everything (smoke jobs: 7.4 and 6.6 min per model day).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Abhhvmoet3Py5umLctXSCh
+---
+ panarctic.jl    | 47 ++++++++++++++++++++++++++++++++++++++---------
+ tools/runner.jl | 30 ++++++++++++++++++++++--------
+ 2 files changed, 60 insertions(+), 17 deletions(-)
+
+diff --git a/panarctic.jl b/panarctic.jl
+index 2c64451..19286a5 100644
+--- a/panarctic.jl
++++ b/panarctic.jl
+@@ -19,22 +19,42 @@ include("setup.jl")
+ acquire_run_lock(output_dir, config_file)
+ run_status = new_run_status(output_dir, experiment, config_file, config, start_date, end_date)
+ write_run_status(run_status, "building"; detail = "grid done")
+-include("jra55_read_fix.jl")
++
++# Method overrides and the kernel code of under_ice_coupling.jl are loaded once per Julia process. Redefining a method,
++# even identically, invalidates all compiled code that depends on it: at every include, the @eval overrides of
++# Oceananigans.Advection (partial-cell fixes) made the next run recompile the advection kernels. A reused REPL or a
++# queue runner now keeps them compiled. Overrides cannot be unloaded: a run that needs other ones than those loaded
++# stops with a message to start a fresh Julia (the queue runner restarts by itself).
++if !@isdefined(loaded_once)
++    const loaded_once = Set{String}()
++end
++function include_once(file)
++    file in loaded_once && return false
++    include(file)
++    push!(loaded_once, file)
++    return true
++end
++
++include_once("jra55_read_fix.jl")
+ # The atmospheric pressure on the nested ocean ([atmosphere] pressure, off by default; see config.toml)
+-get(config["atmosphere"], "pressure", false) && include("nested_pressure_fix.jl")
++get(config["atmosphere"], "pressure", false) && include_once("nested_pressure_fix.jl")
+ 
+ # Momentum advection at partial bottom cells ([grid] partial_cell_fix), before the model is built: true or "6533" for
+ # the flux form at bottom-cell thickness jumps (Oceananigans.jl#6533, partial_cell_fix.jl); "6538" for the
+ # vector-invariant divergence with the area difference interpolated symmetrically (#6538, vertical_divergence_fix.jl;
+ # acts on every grid, as the PR does); false for neither.
+ partial_cell_fix = get(config["grid"], "partial_cell_fix", false)
+-if partial_cell_fix == "6538"
+-    include("vertical_divergence_fix.jl")
+-elseif (partial_cell_fix === true || partial_cell_fix == "6533") && grid.immersed_boundary isa PartialCellBottom
+-    include("partial_cell_fix.jl")
+-elseif !(partial_cell_fix in (false, true, "6533"))
++partial_cell_fix in (false, true, "6533", "6538") ||
+     error("[grid] partial_cell_fix must be true, false, \"6533\" or \"6538\", not $(repr(partial_cell_fix))")
++fix_file = partial_cell_fix == "6538" ? "vertical_divergence_fix.jl" :
++           (partial_cell_fix === true || partial_cell_fix == "6533") && grid.immersed_boundary isa PartialCellBottom ?
++           "partial_cell_fix.jl" : nothing
++for loaded in intersect(loaded_once, ("partial_cell_fix.jl", "vertical_divergence_fix.jl"))
++    loaded == fix_file || error("This Julia process has loaded $loaded for an earlier run ([grid] partial_cell_fix); this " *
++                                "run needs $(something(fix_file, "neither fix")). Overrides cannot be unloaded: start a " *
++                                "fresh Julia (exit(), then julia --project=.) and include again.")
+ end
++fix_file === nothing || include_once(fix_file)
+ include("transports.jl")
+ include("volume_control.jl")
+ include("monitor.jl")
+@@ -101,9 +121,18 @@ net_inflow_depth_exponent = get(bc, "net_inflow_depth_exponent", 0)
+ 
+ # [ocean] catke_under_ice (issue #48; under_ice_coupling.jl): CATKE's surface shear-driven TKE flux scaled by the open
+ # water under sea ice. Set up before the ocean is built.
+-include("under_ice_coupling.jl")
++include_once("under_ice_coupling.jl")
+ catke_under_ice = get(ocean_settings, "catke_under_ice", "none")
+-catke_under_ice == "none" || catke_under_ice!(catke_under_ice)
++loaded_choice = [key for key in loaded_once if startswith(key, "catke_under_ice=")]
++if catke_under_ice == "none"
++    # The override stays loaded, but with no ice concentration copied into it its factor is 1: stock CATKE
++    isempty(loaded_choice) || @warn "catke_under_ice = \"none\" after $(only(loaded_choice)) in this Julia process: " *
++                                    "the override stays, with factor 1 (stock CATKE flux)"
++elseif "catke_under_ice=$catke_under_ice" ∉ loaded_once
++    foreach(key -> delete!(loaded_once, key), loaded_choice)   # another choice: redefined (and recompiled)
++    catke_under_ice!(catke_under_ice)
++    push!(loaded_once, "catke_under_ice=$catke_under_ice")
++end
+ 
+ ocean = nested_ocean_simulation(grid, dataset;
+                                 dates = (start_date, end_date),
+diff --git a/tools/runner.jl b/tools/runner.jl
+index 79b38b6..aec0cc4 100644
+--- a/tools/runner.jl
++++ b/tools/runner.jl
+@@ -15,8 +15,11 @@
+ #   - is claimed by renaming it from queue/ to running/ (atomic: two runners, on either server, never take the same
+ #     job), but only when no other process is on this GPU (nvidia-smi) and, for a config with [queue] long = true, when
+ #     fewer than $PANARCTIC_MAX_LONG (2) long jobs already run on this server;
+-#   - runs panarctic.jl in a fresh anonymous module (no globals from the previous job; packages and compiled GPU
+-#     kernels stay loaded, so the next job starts quickly). panarctic.jl's own lock and status.txt work as in a REPL;
++#   - runs panarctic.jl in the runner's job module: one module for all the jobs of this Julia process, as a reused
++#     REPL is (patch 083). panarctic.jl clears the previous job's globals at its top, and this module keeps the rest:
++#     re-running in it reuses part of the compiled code (20 Nov: 1.8 against 2.5 min per model day for a 7-day smoke
++#     run in a reused REPL; a fresh module per job recompiled everything). panarctic.jl's own lock and status.txt work
++#     as in a REPL;
+ #   - is followed by its scorecard (unless the config's [output] post_run_analysis already wrote it), then the module's
+ #     globals are cleared and the GPU memory freed.
+ # A job whose method overrides differ from those loaded by an earlier job ([grid] partial_cell_fix, [ocean]
+@@ -178,11 +181,22 @@ function claim(job)
+     return target
+ end
+ 
+-function run_in_fresh_module(path)
+-    sandbox = Module(:panarctic_job)
+-    Core.eval(sandbox, :(eval(x) = Core.eval($sandbox, x)))
+-    Core.eval(sandbox, :(include(p::AbstractString) = Base.include($sandbox, p)))
+-    Core.eval(sandbox, :(include(mapexpr::Function, p::AbstractString) = Base.include(mapexpr, $sandbox, p)))
++# One module for every job of this process (kept apart from the runner's own globals), created at the first job
++const job_module = Ref{Union{Module, Nothing}}(nothing)
++
++function the_job_module()
++    if job_module[] === nothing
++        sandbox = Module(:panarctic_job)
++        Core.eval(sandbox, :(eval(x) = Core.eval($sandbox, x)))
++        Core.eval(sandbox, :(include(p::AbstractString) = Base.include($sandbox, p)))
++        Core.eval(sandbox, :(include(mapexpr::Function, p::AbstractString) = Base.include(mapexpr, $sandbox, p)))
++        job_module[] = sandbox
++    end
++    return job_module[]
++end
++
++function run_job(path)
++    sandbox = the_job_module()
+     empty!(ARGS)
+     push!(ARGS, path)
+     try
+@@ -224,7 +238,7 @@ function main()
+         started = time()
+         ok, message, interrupted = true, "", false
+         try
+-            run_in_fresh_module(path)
++            run_job(path)
+         catch err
+             ok = false
+             interrupted = err isa InterruptException
+-- 
+2.43.0
+
