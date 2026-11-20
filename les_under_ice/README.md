@@ -7,9 +7,10 @@ columns with CATKE variants at 1, 4 and 8 m, with the same forcing and initial s
 - `cases.jl`: the cases. Step 0 (now): two cases of CATKE's own calibration (LESbrary's 24-hour suite): free
   convection, strong wind, and strong wind with Stokes drift (Langmuir). Stage 1 (sea ice, GLORYS September profile,
   TEOS-10, quadratic ice–ocean drag) follows once step 0 checks out.
-- `les.jl <case> [small]`: the LES (GPU). Default 256 × 256 × 128 m at 1 m; `small` = 128 × 128 × 128 m at 2 m.
+- `les.jl <case> [small|fine]`: the LES (GPU), 256 m deep. Default 512 × 512 m at 2 m (the calibration extent);
+  `small` = 256 × 256 m at 2 m; `fine` = 256 × 256 m at 1 m.
 - `columns.jl <case>`: CATKE columns (CPU, a minute or two): stock, and without the shear-driven surface TKE flux.
-- `compare.jl <case> [small]`: profiles at 6, 12, 24 h and a table of errors (`output/<case>_comparison.md`, `.png`).
+- `compare.jl <case> [small|fine]`: profiles at 6, 12, 24 h and a table of errors (`output/<case>_comparison.md`, `.png`).
 
 Run in a REPL from the PanArcticShenanigans clone's environment (same Oceananigans as the model):
 

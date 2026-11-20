@@ -6,8 +6,11 @@
 #     empty!(ARGS); push!(ARGS, "free_convection")            # or "strong_wind", "strong_wind_stokes"
 #     include("/mnt/autofs/bow.math/scratch/fpoulin/software/panarctic-tools/les_under_ice/les.jl")
 #
-# Default 256 × 256 × 128 m at 1 m (8.4 million cells; ~10–30 min on an A100 for 24 hours). A second argument
-# "small" uses 128 × 128 × 128 m at 2 m, for a quick check (a few minutes).
+# Domain 256 m deep (cases.jl). A second argument sets the size:
+#   (none)  512 × 512 m at 2 m: the calibration LES's extent (8.4 million cells; ~15–30 min on an A100 for 24 hours)
+#   small   256 × 256 m at 2 m (2.1 million cells; a few minutes): a quick check
+#   fine    256 × 256 m at 1 m (16.8 million cells): when the top metres matter (1 m columns)
+# Horizontally the domain must stay several times wider than the boundary layer (plumes as wide as it is deep).
 
 using Oceananigans, Oceananigans.Units
 using CUDA, JLD2, Printf, Random
@@ -15,12 +18,13 @@ using CUDA, JLD2, Printf, Random
 include(joinpath(@__DIR__, "cases.jl"))
 
 case_name = isempty(ARGS) ? "free_convection" : ARGS[1]
-small     = length(ARGS) ≥ 2 && ARGS[2] == "small"
+size_name = length(ARGS) ≥ 2 ? ARGS[2] : "default"
+size_name in ("default", "small", "fine") || error("Size must be small or fine (or nothing), not $size_name")
 case      = case_parameters(case_name)
 arch      = CUDA.functional() ? GPU() : CPU()
 
-Δ  = small ? 2.0 : 1.0                         # grid spacing (m)
-Lh = small ? 128.0 : 256.0                     # horizontal extent (m)
+Δ  = size_name == "fine" ? 1.0 : 2.0           # grid spacing (m)
+Lh = size_name == "default" ? 512.0 : 256.0    # horizontal extent (m)
 Lz = domain_depth
 grid = RectilinearGrid(arch; size = (round(Int, Lh / Δ), round(Int, Lh / Δ), round(Int, Lz / Δ)),
                        x = (0, Lh), y = (0, Lh), z = (-Lz, 0), halo = (5, 5, 5),
@@ -77,7 +81,7 @@ u, v, w = model.velocities
 b = model.tracers.b
 averages = (; b = Average(b, dims = (1, 2)), u = Average(u, dims = (1, 2)), v = Average(v, dims = (1, 2)),
               wb = Average(w * b, dims = (1, 2)), wu = Average(w * u, dims = (1, 2)), wv = Average(w * v, dims = (1, 2)))
-file = joinpath(output_folder(), case_name * (small ? "_small" : "") * "_les.jld2")
+file = joinpath(output_folder(), case_name * (size_name == "default" ? "" : "_" * size_name) * "_les.jld2")
 simulation.output_writers[:averages] = JLD2Writer(model, averages; filename = file,
                                                   schedule = TimeInterval(10minutes), overwrite_files = true)
 

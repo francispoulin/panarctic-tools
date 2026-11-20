@@ -2,11 +2,11 @@
 # 24 hours, and a table of errors. The LES is averaged onto each column's cells first (coarse-graining). Writes
 # output/<case>_comparison.md and output/<case>_comparison.png. On a CPU, after both have run:
 #
-#     empty!(ARGS); push!(ARGS, "free_convection")            # a second argument "small" for the small LES
+#     empty!(ARGS); push!(ARGS, "free_convection")            # a second argument "small" or "fine" as given to les.jl
 #     include("/mnt/autofs/bow.math/scratch/fpoulin/software/panarctic-tools/les_under_ice/compare.jl")
 #
 # Errors, for each column against the LES, at the end of the run:
-#   b error     ‖b_column − b_LES‖ / ‖b_LES − b_initial‖ over the top 96 m (the fraction of the change that is wrong)
+#   b error     ‖b_column − b_LES‖ / ‖b_LES − b_initial‖ over the top 160 m (the fraction of the change that is wrong)
 #   h           boundary-layer depth: the depth where b first falls 1e-5 m s⁻² below its surface value
 #               (about the 0.03 kg/m³ density step of the mixed-layer depth in the pan-Arctic analysis)
 # Step 0 passes if the stock CATKE columns' b errors are around 10 % and their depths within a few metres of the LES's,
@@ -19,10 +19,10 @@ using CairoMakie, JLD2, Printf, Statistics
 include(joinpath(@__DIR__, "cases.jl"))
 
 case_name = isempty(ARGS) ? "free_convection" : ARGS[1]
-small     = length(ARGS) ≥ 2 && ARGS[2] == "small"
+size_name = length(ARGS) ≥ 2 ? ARGS[2] : "default"
 folder    = output_folder()
 
-les_file = joinpath(folder, case_name * (small ? "_small" : "") * "_les.jld2")
+les_file = joinpath(folder, case_name * (size_name == "default" ? "" : "_" * size_name) * "_les.jld2")
 isfile(les_file) || error("No LES output $les_file: run les.jl first")
 B_les = FieldTimeSeries(les_file, "b")
 U_les = FieldTimeSeries(les_file, "u")
@@ -75,12 +75,12 @@ for (c, name) in enumerate(column_files)
         lines!(axes_b[i], profile(B, n), zc; color = colors[mod1(c, 7)], linestyle = style, label)
         lines!(axes_u[i], profile(U, n), zc; color = colors[mod1(c, 7)], linestyle = style, label)
     end
-    # Errors at the end of the run, over the top 96 m
+    # Errors at the end of the run, over the top 160 m
     n_col, n_les = length(B.times), time_index(B_les, B.times[end])
     b_les = coarse_grain(profile(B_les, n_les), z_les, zᶠ)
     b_col = profile(B, n_col)
     b_ini = three_layer_buoyancy.(zc)
-    top = zc .> -96
+    top = zc .> -160
     err = sqrt(sum(abs2, (b_col .- b_les)[top]) / sum(abs2, (b_les .- b_ini)[top]))
     h_les, h_col = boundary_layer_depth(b_les, zc), boundary_layer_depth(b_col, zc)
     push!(rows, @sprintf("| %s | %.0f %% | %.1f | %.1f | %+.1f |", label, 100err, h_col, h_les, h_col - h_les))
@@ -93,7 +93,7 @@ save(figure_file, fig)
 io = IOBuffer()
 println(io, "# $case_name: CATKE single columns against the LES (step 0)\n")
 println(io, "LES: $(les_file); at the end of the run ($(round(Int, B_les.times[end] / hour)) h). b error: ‖b_column − b_LES‖ / ",
-            "‖b_LES − b_initial‖ over the top 96 m, the LES averaged onto the column's cells. h: depth where b falls 1e-5 m s⁻² ",
+            "‖b_LES − b_initial‖ over the top 160 m, the LES averaged onto the column's cells. h: depth where b falls 1e-5 m s⁻² ",
             "below its surface value.\n")
 println(io, "| Column | b error | h column (m) | h LES (m) | Δh (m) |")
 println(io, "|---|---|---|---|---|")

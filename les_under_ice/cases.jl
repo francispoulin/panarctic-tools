@@ -34,7 +34,9 @@ cases = Dict(
 stokes_wavenumber = 2π / 60
 stokes_surface_velocity(τx; La_t = 0.3) = sqrt(abs(τx)) / La_t^2
 
-domain_depth = 128.0   # m: enough for 24 hours of these forcings (the three-layer thermocline is at 48–72 m)
+# 256 m deep, as the calibration LES: free convection deepens to ~100 m in 24 hours through the weak deep stratification,
+# and the bottom sponge (lowest tenth) must stay below the boundary layer (step 0 at 128 m: it did not)
+domain_depth = 256.0
 
 function case_parameters(name)
     haskey(cases, name) || error("Unknown case \"$name\"; cases: $(join(sort(collect(keys(cases))), ", "))")
