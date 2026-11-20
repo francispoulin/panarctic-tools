@@ -1,0 +1,38 @@
+From 4b1ff364609f089714e20db8e2e6c031f1c21a60 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 20 Nov 2026 08:47:37 -0500
+Subject: [PATCH] Scorecard: give each fresh analysis module its own include
+ and eval (fixes 077 under Julia 1.13)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Julia 1.13's Module(name) defines neither include nor eval, so every analysis script failed at its first
+include("../config.jl") with "UndefVarError: `include` not defined in Main.scorecard_…". Both are now defined in the
+module before the script is included; include stays relative to the including file.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Abhhvmoet3Py5umLctXSCh
+---
+ analysis/scorecard_functions.jl | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/analysis/scorecard_functions.jl b/analysis/scorecard_functions.jl
+index e4a0028..7bf02dd 100644
+--- a/analysis/scorecard_functions.jl
++++ b/analysis/scorecard_functions.jl
+@@ -37,6 +37,11 @@ function run_in_fresh_module(script, args)
+     append!(ARGS, args)
+     try
+         sandbox = Module(Symbol("scorecard_", splitext(basename(script))[1]))
++        # Julia 1.13's Module() has no include or eval of its own (unlike a `module … end` block): give it both, so the
++        # scripts' include("../config.jl") works (relative to the including file, as usual)
++        Core.eval(sandbox, :(eval(x) = Core.eval($sandbox, x)))
++        Core.eval(sandbox, :(include(path::AbstractString) = Base.include($sandbox, path)))
++        Core.eval(sandbox, :(include(mapexpr::Function, path::AbstractString) = Base.include(mapexpr, $sandbox, path)))
+         Base.include(sandbox, script)
+     finally
+         empty!(ARGS)
+-- 
+2.43.0
+
