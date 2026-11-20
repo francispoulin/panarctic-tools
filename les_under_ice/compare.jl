@@ -7,7 +7,7 @@
 #
 # Errors, for each column against the LES, at the end of the run:
 #   b error     ‖b_column − b_LES‖ / ‖b_LES − b_initial‖ over the top 160 m (the fraction of the change that is wrong)
-#   h           boundary-layer depth: the deepest point where b is below its 10 m value by more than 1e-5 m s⁻²
+#   h           boundary-layer depth: the first depth below 10 m where b is below its 10 m value by more than 1e-5 m s⁻²
 #               (about the 0.03 kg/m³ density step of the mixed-layer depth in the pan-Arctic analysis)
 # Step 0 passes if the stock CATKE columns' b errors are around 10 % and their depths within a few metres of the LES's,
 # at 1 to 8 m, as Wagner et al. report for the calibration cases.
@@ -95,7 +95,7 @@ save(figure_file, fig)
 io = IOBuffer()
 println(io, "# $case_name: CATKE single columns against the LES (step 0)\n")
 println(io, "LES: $(les_file); at the end of the run ($(round(Int, B_les.times[end] / hour)) h). b error: ‖b_column − b_LES‖ / ",
-            "‖b_LES − b_initial‖ over the top 160 m, the LES averaged onto the column's cells. h: deepest point where b is below its 10 m ",
+            "‖b_LES − b_initial‖ over the top 160 m, the LES averaged onto the column's cells. h: first depth below 10 m where b is below its 10 m ",
             "value by more than 1e-5 m s⁻².\n")
 println(io, "| Column | b error | h column (m) | h LES (m) | Δh (m) |")
 println(io, "|---|---|---|---|---|")
