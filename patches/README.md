@@ -80,6 +80,7 @@ Numbered in the order to apply, across repositories. Each was checked to apply w
 | 073 | PanArcticShenanigans | `fjp/test-061` (test, on top of 072) | after 072 | fixes 072's `catke_under_ice` ("Cannot convert an object of type BoundaryCondition"): the under-ice TKE flux is installed when the ocean is built (CATKE's `add_closure_specific_boundary_conditions` redefined by `catke_under_ice!`), with the ocean's own ice-concentration field copied from the sea ice every step |
 | 074 | PanArcticShenanigans | `fjp/test-061` (test, on top of 073) | after 073 | `[output] mixing_depth`: daily CATKE κᶜ and e over the top metres (arctic_mixing.jld2); `analysis/mixing_timeseries.jl` (region means against depth and time, κᶜ table); `config_sep2005_30d_catke_ice_tanh_mixing.toml` (tanh run with mixing_depth = 60) |
 | 075 | PanArcticShenanigans | `fjp/test-061` (test, on top of 074) | after 074 | `[sea_ice]` `ice_salinity`, `ice_ocean_drag_coefficient`, `ice_compressive_strength` (defaults unchanged) and `albedo = "ccsm3"` (SeaIceAlbedo); `config_sep2005_30d_catke_ice_tanh_lim2.toml` (tanh + LIM2 values 6, 5e-3, 20 000, state-dependent albedo, mixing output) |
+| 076 | PanArcticShenanigans | `fjp/test-061` (fix, on top of 075) | after 075 | `plotting/max_speed.jl`, `plotting/volume_budget.jl`, `analysis/glorys_transports.jl`: globals `hours`/`days` renamed (`elapsed_hours`, `elapsed_days`, `glorys_dates`) so running them in a REPL no longer breaks a later `include("panarctic.jl")` |
 
 ## Applying 001–006
 

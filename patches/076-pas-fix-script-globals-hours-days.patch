@@ -1,0 +1,134 @@
+From 96bb5eab731ab5f69963fa356044889e9653ddc6 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 19 Nov 2026 19:46:43 -0500
+Subject: [PATCH] Plotting and analysis scripts: no globals named hours or days
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+plotting/max_speed.jl set `hours`, and plotting/volume_budget.jl and analysis/glorys_transports.jl set `days`, as globals.
+Run in a REPL that then runs panarctic.jl, they replace Oceananigans.Units' hours and days, and the model fails (here
+relaxation_rate = 1 / (relaxation_hours * hours) became a vector: "no method matching side_rate(::Transpose…)").
+Renamed to elapsed_hours, elapsed_days and glorys_dates.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AbhhvmYEBvTrBMFfuX35Ju
+---
+ analysis/glorys_transports.jl |  8 ++++----
+ plotting/max_speed.jl         |  8 ++++----
+ plotting/volume_budget.jl     | 18 +++++++++---------
+ 3 files changed, 17 insertions(+), 17 deletions(-)
+
+diff --git a/analysis/glorys_transports.jl b/analysis/glorys_transports.jl
+index 6c26faf..447a1e5 100644
+--- a/analysis/glorys_transports.jl
++++ b/analysis/glorys_transports.jl
+@@ -31,7 +31,7 @@ using .NCDatasets: Dataset, dimnames
+ glorys_dir = isempty(data_dir) ? default_download_directory(GLORYSDaily()) : data_dir
+ start_date = config["time"]["start_date"]
+ end_date   = config["time"]["end_date"]
+-days       = collect(start_date:Day(1):end_date - Day(1))   # GLORYS's daily means over the run
++glorys_dates = collect(start_date:Day(1):end_date - Day(1))   # GLORYS's daily means over the run
+ 
+ # A GLORYS variable over `region` (one day, or static), with NaN on land: (; lon, lat, depth, data)
+ function read_glorys(name, dataset, region; date = nothing)
+@@ -63,7 +63,7 @@ end
+ function glorys_section_grid(lons, lats)
+     region = BoundingBox(longitude = (minimum(lons) - 1, maximum(lons) + 1), latitude = (minimum(lats) - 1, maximum(lats) + 1))
+     static = read_glorys(:depth, GLORYSStatic(), region)
+-    sample = read_glorys(:u_velocity, GLORYSDaily(), region; date = first(days))
++    sample = read_glorys(:u_velocity, GLORYSDaily(), region; date = first(glorys_dates))
+     (static.lon ≈ sample.lon && static.lat ≈ sample.lat) || error("GLORYS's deptho and uo are on different grids")
+ 
+     lon, lat = static.lon, static.lat
+@@ -107,7 +107,7 @@ for (name, lons, lats) in transport_sections(config)
+     @info @sprintf("GLORYS, section %s: %d open faces at the surface, deepest %.0f m, %d levels",
+                    name, length(u_faces) + length(v_faces), deepest, length(levels))
+ 
+-    for date in days
++    for date in glorys_dates
+         u, v, T, S = glorys_fields(grid, region, levels, date)
+         transports = section_transports(grid, u, v, T, S, [(name, sᵘ, sᵛ)]; reference_values(config)...)
+         for (key, field) in transports
+@@ -124,7 +124,7 @@ end
+ 
+ file = joinpath(output_dir, "glorys_transports.jld2")
+ jldopen(file, "w") do f
+-    f["dates"] = string.(days)
++    f["dates"] = string.(glorys_dates)
+     f["units"] = transport_units
+     for (key, values) in results
+         f["transports/$key"] = values
+diff --git a/plotting/max_speed.jl b/plotting/max_speed.jl
+index 24126de..1bbc1a5 100644
+--- a/plotting/max_speed.jl
++++ b/plotting/max_speed.jl
+@@ -13,13 +13,13 @@ include("../monitor_file.jl")
+ using CairoMakie, Printf
+ 
+ header, column = read_monitor(output_dir)
+-hours = column("hour")
++elapsed_hours = column("hour")
+ speed = max.(column("max_u"), column("max_v"))
+ level = column("fastest_k")
+ i, j  = column("fastest_i"), column("fastest_j")
+ n     = argmax(speed)
+ @info @sprintf("Fastest: %s = %.2f m/s at hour %.0f, (i, j, k) = (%d, %d, %d), %.1f°E %.1f°N, z = %.0f m",
+-               column("fastest_component")[n] == 1 ? "u" : "v", speed[n], hours[n], i[n], j[n], level[n],
++               column("fastest_component")[n] == 1 ? "u" : "v", speed[n], elapsed_hours[n], i[n], j[n], level[n],
+                column("fastest_longitude")[n], column("fastest_latitude")[n], column("fastest_z")[n])
+ 
+ depth = reduce(hcat, [parse.(Float64, split(line, ',')) for line in readlines(depth_file(output_dir))])   # (i, j)
+@@ -27,9 +27,9 @@ depth[depth .== 0] .= NaN
+ 
+ fig = Figure(size = (800, 1000))
+ ax₁ = Axis(fig[1, 1]; xlabel = "days", ylabel = "largest |u|, |v| (m/s)", title = experiment)
+-lines!(ax₁, hours ./ 24, speed; color = :black)
++lines!(ax₁, elapsed_hours ./ 24, speed; color = :black)
+ ax₂ = Axis(fig[1, 1]; ylabel = "model level k (red)", yaxisposition = :right, ygridvisible = false)
+-scatter!(ax₂, hours ./ 24, level; color = :red, markersize = 3)
++scatter!(ax₂, elapsed_hours ./ 24, level; color = :red, markersize = 3)
+ hidexdecorations!(ax₂)
+ 
+ ax₃ = Axis(fig[2, 1]; xlabel = "i", ylabel = "j", aspect = DataAspect(),
+diff --git a/plotting/volume_budget.jl b/plotting/volume_budget.jl
+index b606baf..bd3f949 100644
+--- a/plotting/volume_budget.jl
++++ b/plotting/volume_budget.jl
+@@ -14,24 +14,24 @@ include("../monitor_file.jl")
+ using CairoMakie
+ 
+ header, column = read_monitor(output_dir)
+-days = column("hour") ./ 24
++elapsed_days = column("hour") ./ 24
+ η, parent = column("eta_mean_cm"), column("parent_eta_mean_cm")
+ 
+ fig = Figure(size = (800, 800))
+ ax  = Axis(fig[1, 1]; xlabel = "days", ylabel = "change in domain-mean η (cm)", title = experiment)
+ hlines!(ax, 0; color = :black, linewidth = 0.5)
+-lines!(ax, days, parent .- parent[1]; color = :black, linewidth = 3, label = "GLORYS")
+-lines!(ax, days, η .- η[1]; color = :red, linestyle = :dash, label = "model")
+-lines!(ax, days, column("edge_volume_cm"); label = "through the open sides")
+-lines!(ax, days, column("surface_volume_cm"); label = "across the surface (freshwater)")
+-lines!(ax, days, column("budget_residual_cm"); linestyle = :dash, label = "residual")
++lines!(ax, elapsed_days, parent .- parent[1]; color = :black, linewidth = 3, label = "GLORYS")
++lines!(ax, elapsed_days, η .- η[1]; color = :red, linestyle = :dash, label = "model")
++lines!(ax, elapsed_days, column("edge_volume_cm"); label = "through the open sides")
++lines!(ax, elapsed_days, column("surface_volume_cm"); label = "across the surface (freshwater)")
++lines!(ax, elapsed_days, column("budget_residual_cm"); linestyle = :dash, label = "residual")
+ axislegend(ax; position = :lb, framevisible = false)
+ 
+ ax₂ = Axis(fig[2, 1]; xlabel = "days", ylabel = "net inflow through the open sides (Sv)")
+ hlines!(ax₂, 0; color = :black, linewidth = 0.5)
+-stepped = 2:length(days)
+-lines!(ax₂, days[stepped], column("net_in_Sv")[stepped]; label = "velocities at the boundary faces (carry T, S)")
+-lines!(ax₂, days[stepped], column("edge_inflow_from_volume_Sv")[stepped]; label = "from the volume (moves η)")
++stepped = 2:length(elapsed_days)
++lines!(ax₂, elapsed_days[stepped], column("net_in_Sv")[stepped]; label = "velocities at the boundary faces (carry T, S)")
++lines!(ax₂, elapsed_days[stepped], column("edge_inflow_from_volume_Sv")[stepped]; label = "from the volume (moves η)")
+ axislegend(ax₂; position = :lb, framevisible = false)
+ 
+ file = joinpath(figure_dir, "volume_budget.png")
+-- 
+2.43.0
+
