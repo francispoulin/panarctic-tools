@@ -1,0 +1,735 @@
+From 874ec266db06b568c9bd6b5486473c0ae7560712 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 20 Nov 2026 10:59:54 -0500
+Subject: [PATCH] Run queue: submit configs, one warm runner per GPU on pelee
+ and rondeau, scorecards at the end
+
+- tools/submit.sh: copies configs into the clone's queue (queue/queue/, shared by both servers through the RAID),
+  oldest first; skips a config whose experiment is already queued or running, or whose output folder already has a run
+  (--force to rerun it).
+- tools/runner.jl: one Julia process per GPU. Claims the oldest job by an atomic rename into queue/running/ (with a
+  .claim: host, GPU, process, long, start), only when no other process is on its GPU and, for [queue] long = true, when
+  fewer than $PANARCTIC_MAX_LONG (2) long jobs run on its server. Runs panarctic.jl in a fresh anonymous module, then
+  the scorecard (unless the config's post_run_analysis wrote it), clears the module and frees the GPU; moves the job to
+  done/ or failed/ (.error) and adds a line to queue/summary.md. Exits with 75 before a job whose method overrides
+  (partial_cell_fix, catke_under_ice, atmospheric pressure) differ from those loaded, so a fresh Julia takes it; exits
+  after 15 min ($PANARCTIC_IDLE_MINUTES) with nothing to run. Jobs left by a dead runner of the same server go to
+  failed/. Ctrl-C marks the job interrupted and stops the runner.
+- tools/runner_loop.sh: restarts the runner (75: at once; a crash: after 30 s; 0 or Ctrl-C: stops), with
+  CUDA_DEVICE_ORDER=PCI_BUS_ID so GPU numbers match nvidia-smi.
+- tools/start_runners.sh [gpus]: one tmux session per GPU (runner-<host>-g<gpu>, default all four), logged to
+  ~/logs/. tools/qstat.sh: waiting, running (with status.txt), last finished, runner sessions.
+- .gitignore: queue/.
+- config_smoke_test_queue_1.toml, _2.toml (100 km, 2 days; one with post_run_analysis, one without);
+  config_sep2005_30d_tanh_lim2_nz100.toml, the baseline with 100 levels (top cell 3.8 m instead of 7.8 m): the test
+  of the Arctic interior's remaining salinity dipole, as the queue's first real job.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Abhhvmoet3Py5umLctXSCh
+---
+ .gitignore                              |   1 +
+ config_sep2005_30d_tanh_lim2_nz100.toml |  94 +++++++++
+ config_smoke_test_queue_1.toml          |  92 +++++++++
+ config_smoke_test_queue_2.toml          |  92 +++++++++
+ tools/qstat.sh                          |  20 ++
+ tools/runner.jl                         | 256 ++++++++++++++++++++++++
+ tools/runner_loop.sh                    |  21 ++
+ tools/start_runners.sh                  |  22 ++
+ tools/submit.sh                         |  31 +++
+ 9 files changed, 629 insertions(+)
+ create mode 100644 .gitignore
+ create mode 100644 config_sep2005_30d_tanh_lim2_nz100.toml
+ create mode 100644 config_smoke_test_queue_1.toml
+ create mode 100644 config_smoke_test_queue_2.toml
+ create mode 100755 tools/qstat.sh
+ create mode 100644 tools/runner.jl
+ create mode 100755 tools/runner_loop.sh
+ create mode 100755 tools/start_runners.sh
+ create mode 100755 tools/submit.sh
+
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..cd7cb03
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1 @@
++queue/
+diff --git a/config_sep2005_30d_tanh_lim2_nz100.toml b/config_sep2005_30d_tanh_lim2_nz100.toml
+new file mode 100644
+index 0000000..8da425b
+--- /dev/null
++++ b/config_sep2005_30d_tanh_lim2_nz100.toml
+@@ -0,0 +1,94 @@
++# The baseline of 20 Nov 2026 (config_sep2005_30d_catke_ice_tanh_lim2.toml: tanh under-ice TKE flux, LIM2-like sea ice)
++# with 100 levels instead of 50: top cell 3.8 m instead of 7.8 m, five levels in the top 20 m instead of two and a half
++# (same exponential stretching). Test of the Arctic interior's remaining bias (patch 081's mixed-layer depth): is the
++# salty top / fresh 20 m dipole the 8 m top cell homogenising the melt layer? Compare its scorecard with the baseline's.
++# Ends with its scorecard (post_run_analysis). The first job of the run queue (patch 082):
++#   bash tools/submit.sh config_sep2005_30d_tanh_lim2_nz100.toml
++
++architecture = "GPU"   # "GPU" or "CPU"
++experiment   = "sep2005_30d_tanh_lim2_nz100"  # name of the run: output and figures go to output_dir/<experiment> and figure_dir/<experiment>
++
++[grid]
++spacing_km = 15     # largest horizontal grid spacing [km] (at the pole; ~15% finer near the Atlantic edge)
++Nz         = 100    # vertical levels
++depth      = 5000   # maximum depth (m)
++bathymetry       = "GEBCO2026"   # "GEBCO2026" (15″, with IBCAO), "ETOPO" (ETOPO 2022, 60″) or "GLORYS" (GLORYS's own sea floor)
++bottom           = "partial"     # "partial": bottom cells cut at the sea floor; "full": whole cells
++partial_cell_fix = true          # with partial cells: flux-form momentum advection at bottom-cell thickness jumps
++                                 # (Oceananigans.jl#6533), which removes the bottom jets of issue #6532
++
++[time]
++start_date = 2005-09-01   # initial condition (GLORYS); the run starts at 00:00 on this date
++end_date   = 2005-10-01   # the run ends at 00:00 on this date; for short tests a date and time, e.g. 1993-01-01T03:00
++dt_minutes = 10           # time step
++
++[atmosphere]
++jra55 = "multi_year"   # "multi_year": JRA55 for the run's own dates; "repeat_year": the 1990–91 repeat year
++pressure = false           # true: JRA55's sea-level pressure acts on the ocean (nested_pressure_fix.jl). Off for now: with it,
++                           # Fram Strait drifts far from GLORYS (1–5 Jan 1993, 15 km: day 4 −12.4 Sv, GLORYS −2.1, −5.6
++                           # without pressure; the same at 100 km), which looks like an error in the pressure path, not
++                           # physics. Main has had no pressure on the ocean since #43.
++inverse_barometer = false  # with pressure = true: GLORYS's η carries no response to the pressure (issue #37), so add the
++                           # inverse-barometer sea level −(pᵃ − ⟨pᵃ⟩)/(ρ₀g) to GLORYS's η at the open sides (Flather) and
++                           # to the initial free surface; its domain mean is removed, so the volume is unchanged.
++                           # Keep false with pressure = false: then neither the model nor GLORYS feels the pressure
++
++[output]
++average_hours   = 24      # time-averaged output (3D ocean, free surface, sea ice), written to output_dir
++checkpoint_days = 30      # how often the full model state is saved for restarts
++restart         = false   # true: continue from the latest checkpoint in output_dir
++monitor_hours   = 1       # monitor.csv: transports through the open sides, mean η against GLORYS's, volume budget,
++                          # fastest point (plotting/volume_budget.jl, plotting/max_speed.jl); 0 = off
++mixing_depth    = 60      # daily CATKE κᶜ and e over the top this many metres in arctic_mixing.jld2; 0 = off
++post_run_analysis = true  # at the end: clear the model from memory, then the scorecard (scorecard.md)
++
++[transports]
++# Volume, heat, salt and freshwater transports through the sections below and the open boundaries (see transports.jl).
++online                = true   # true: computed every time step and averaged over average_hours, written to arctic_transports.jld2
++reference_temperature = 0      # heat transport relative to this temperature (°C)
++reference_salinity    = 34.8   # freshwater transport relative to this salinity (g/kg)
++
++# Each section is a great-circle path through (longitude, latitude) waypoints. Positive transport flows to the right,
++# walking from the first waypoint to the last; these are ordered so that positive is into the Arctic. Both ends should
++# be on land, so the section spans the whole strait on any grid. Check with plotting/transport_sections.jl.
++[transports.sections]
++# Fram Strait follows the mooring array at 78°50′N; intermediate waypoints keep the great circles on that latitude.
++fram_strait         = { lon = [15.0, 10.0, 5.0, 0.0, -5.0, -10.0, -15.0, -20.0],
++                        lat = [78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333] }
++# Barents Sea Opening follows the mooring line from Norway (Fugløya) via Bjørnøya to Sørkapp, Svalbard.
++barents_sea_opening = { lon = [20.0, 19.0, 16.5],  lat = [70.0, 74.45, 77.0] }
++bering_strait       = { lon = [-166.0, -171.0], lat = [66.0, 66.0] }
++davis_strait        = { lon = [-53.0, -63.0],   lat = [67.0, 66.5] }
++
++[paths]
++data_dir   = ""   # where downloads are stored; "" = each dataset's default cache
++output_dir = "output"    # model output: time averages (.jld2), checkpoints and the config; one folder per experiment
++figure_dir = "figures"   # figures and movies from the plotting/ scripts; one folder per experiment
++
++[boundaries]
++velocity_inflow_days = 0.0417   # oblique radiation on u, v: nudging timescale toward GLORYS on inflow (0.0417 days = 1 hour).
++                                # With 1 day, a partial bottom cell on the Atlantic open face drifted to −0.9 m/s
++                                # (GLORYS −0.26); 1 hour removes it and moves the section transports by < 0.1 Sv
++tracer_inflow_km     = 20  # T, S reservoir inflow relaxation length, both open sides
++relaxation_hours     = 6   # T, S and baroclinic u, v relax toward GLORYS in a ~2/3° band along the open sides
++                           # over this timescale; 0 = off (nested_ocean_model's default is 6)
++
++# Volume control (volume_control.jl): the net inflow through the two open sides together is pinned at every barotropic
++# substep, as NEMO and ROMS do; Flather splits it between the sides. Without it the domain's volume drifts from GLORYS's.
++follow_glorys_volume      = true   # true: the net inflow follows GLORYS's domain-mean η, with the surface freshwater handed back
++volume_relaxation_days    = 1      # with follow_glorys_volume: time over which the remaining drift from GLORYS's mean η is removed
++follow_glorys_tendency    = false  # with follow_glorys_volume: true also follows GLORYS's rate of change exactly
++# net_inflow_Sv           = 0.0    # with follow_glorys_volume = false: a constant net inflow instead (Sv, positive into the domain);
++                                   # with neither, Flather alone (no volume control)
++net_inflow_depth_exponent = 0.5    # the pin's correction to each boundary column ∝ Hᵖ: 0 uniform per length, 1 uniform velocity
++                                   # (NEMO, ROMS), 0.5 a uniform shift of GLORYS's η in Flather
++
++[ocean]
++closure = "CATKE"   # "CATKE" (default), "RiBased", "TKEDissipation" or "none"
++catke_under_ice = "tanh"   # CATKE's surface shear-driven TKE flux under ice: "none" (stock), "open_water" (× (1 − ℵ)), "tanh" (× (1 − tanh(10ℵ)))
++
++[sea_ice]
++ice_salinity               = 6        # g/kg (default 4)
++ice_ocean_drag_coefficient = 5e-3     # (default 5.5e-3)
++ice_compressive_strength   = 20000    # P*, N/m² (default 27 500)
++albedo                     = "ccsm3"  # "constant" (0.7, default) or "ccsm3" (state-dependent, SeaIceAlbedo)
+diff --git a/config_smoke_test_queue_1.toml b/config_smoke_test_queue_1.toml
+new file mode 100644
+index 0000000..ec12dfb
+--- /dev/null
++++ b/config_smoke_test_queue_1.toml
+@@ -0,0 +1,92 @@
++# Smoke test 1 of 2 of patch 082 (the run queue: tools/submit.sh, tools/start_runners.sh, tools/runner.jl,
++# tools/qstat.sh): the 20 Nov baseline (tanh, LIM2-like sea ice) at 100 km and 20 levels, 1–3 September 2005. Submitted
++# together, the two run one after the other on one runner (the second starting warm), or at once on two; job 1 writes
++# its scorecard itself ([output] post_run_analysis = true), job 2 leaves it to the runner. The numbers are not the test.
++
++architecture = "GPU"   # "GPU" or "CPU"
++experiment   = "smoke_test_queue_1"  # name of the run: output and figures go to output_dir/<experiment> and figure_dir/<experiment>
++
++[grid]
++spacing_km = 100    # largest horizontal grid spacing [km] (at the pole; ~15% finer near the Atlantic edge)
++Nz         = 20     # vertical levels
++depth      = 5000   # maximum depth (m)
++bathymetry       = "GEBCO2026"   # "GEBCO2026" (15″, with IBCAO), "ETOPO" (ETOPO 2022, 60″) or "GLORYS" (GLORYS's own sea floor)
++bottom           = "partial"     # "partial": bottom cells cut at the sea floor; "full": whole cells
++partial_cell_fix = true          # with partial cells: flux-form momentum advection at bottom-cell thickness jumps
++                                 # (Oceananigans.jl#6533), which removes the bottom jets of issue #6532
++
++[time]
++start_date = 2005-09-01   # initial condition (GLORYS); the run starts at 00:00 on this date
++end_date   = 2005-09-03   # the run ends at 00:00 on this date; for short tests a date and time, e.g. 1993-01-01T03:00
++dt_minutes = 10           # time step
++
++[atmosphere]
++jra55 = "multi_year"   # "multi_year": JRA55 for the run's own dates; "repeat_year": the 1990–91 repeat year
++pressure = false           # true: JRA55's sea-level pressure acts on the ocean (nested_pressure_fix.jl). Off for now: with it,
++                           # Fram Strait drifts far from GLORYS (1–5 Jan 1993, 15 km: day 4 −12.4 Sv, GLORYS −2.1, −5.6
++                           # without pressure; the same at 100 km), which looks like an error in the pressure path, not
++                           # physics. Main has had no pressure on the ocean since #43.
++inverse_barometer = false  # with pressure = true: GLORYS's η carries no response to the pressure (issue #37), so add the
++                           # inverse-barometer sea level −(pᵃ − ⟨pᵃ⟩)/(ρ₀g) to GLORYS's η at the open sides (Flather) and
++                           # to the initial free surface; its domain mean is removed, so the volume is unchanged.
++                           # Keep false with pressure = false: then neither the model nor GLORYS feels the pressure
++
++[output]
++average_hours   = 24      # time-averaged output (3D ocean, free surface, sea ice), written to output_dir
++checkpoint_days = 30      # how often the full model state is saved for restarts
++restart         = false   # true: continue from the latest checkpoint in output_dir
++monitor_hours   = 1       # monitor.csv: transports through the open sides, mean η against GLORYS's, volume budget,
++                          # fastest point (plotting/volume_budget.jl, plotting/max_speed.jl); 0 = off
++mixing_depth    = 60      # daily CATKE κᶜ and e over the top this many metres in arctic_mixing.jld2; 0 = off
++post_run_analysis = true  # at the end: clear the model from memory, then the scorecard (scorecard.md)
++
++[transports]
++# Volume, heat, salt and freshwater transports through the sections below and the open boundaries (see transports.jl).
++online                = true   # true: computed every time step and averaged over average_hours, written to arctic_transports.jld2
++reference_temperature = 0      # heat transport relative to this temperature (°C)
++reference_salinity    = 34.8   # freshwater transport relative to this salinity (g/kg)
++
++# Each section is a great-circle path through (longitude, latitude) waypoints. Positive transport flows to the right,
++# walking from the first waypoint to the last; these are ordered so that positive is into the Arctic. Both ends should
++# be on land, so the section spans the whole strait on any grid. Check with plotting/transport_sections.jl.
++[transports.sections]
++# Fram Strait follows the mooring array at 78°50′N; intermediate waypoints keep the great circles on that latitude.
++fram_strait         = { lon = [15.0, 10.0, 5.0, 0.0, -5.0, -10.0, -15.0, -20.0],
++                        lat = [78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333] }
++# Barents Sea Opening follows the mooring line from Norway (Fugløya) via Bjørnøya to Sørkapp, Svalbard.
++barents_sea_opening = { lon = [20.0, 19.0, 16.5],  lat = [70.0, 74.45, 77.0] }
++bering_strait       = { lon = [-166.0, -171.0], lat = [66.0, 66.0] }
++davis_strait        = { lon = [-53.0, -63.0],   lat = [67.0, 66.5] }
++
++[paths]
++data_dir   = ""   # where downloads are stored; "" = each dataset's default cache
++output_dir = "output"    # model output: time averages (.jld2), checkpoints and the config; one folder per experiment
++figure_dir = "figures"   # figures and movies from the plotting/ scripts; one folder per experiment
++
++[boundaries]
++velocity_inflow_days = 0.0417   # oblique radiation on u, v: nudging timescale toward GLORYS on inflow (0.0417 days = 1 hour).
++                                # With 1 day, a partial bottom cell on the Atlantic open face drifted to −0.9 m/s
++                                # (GLORYS −0.26); 1 hour removes it and moves the section transports by < 0.1 Sv
++tracer_inflow_km     = 20  # T, S reservoir inflow relaxation length, both open sides
++relaxation_hours     = 6   # T, S and baroclinic u, v relax toward GLORYS in a ~2/3° band along the open sides
++                           # over this timescale; 0 = off (nested_ocean_model's default is 6)
++
++# Volume control (volume_control.jl): the net inflow through the two open sides together is pinned at every barotropic
++# substep, as NEMO and ROMS do; Flather splits it between the sides. Without it the domain's volume drifts from GLORYS's.
++follow_glorys_volume      = true   # true: the net inflow follows GLORYS's domain-mean η, with the surface freshwater handed back
++volume_relaxation_days    = 1      # with follow_glorys_volume: time over which the remaining drift from GLORYS's mean η is removed
++follow_glorys_tendency    = false  # with follow_glorys_volume: true also follows GLORYS's rate of change exactly
++# net_inflow_Sv           = 0.0    # with follow_glorys_volume = false: a constant net inflow instead (Sv, positive into the domain);
++                                   # with neither, Flather alone (no volume control)
++net_inflow_depth_exponent = 0.5    # the pin's correction to each boundary column ∝ Hᵖ: 0 uniform per length, 1 uniform velocity
++                                   # (NEMO, ROMS), 0.5 a uniform shift of GLORYS's η in Flather
++
++[ocean]
++closure = "CATKE"   # "CATKE" (default), "RiBased", "TKEDissipation" or "none"
++catke_under_ice = "tanh"   # CATKE's surface shear-driven TKE flux under ice: "none" (stock), "open_water" (× (1 − ℵ)), "tanh" (× (1 − tanh(10ℵ)))
++
++[sea_ice]
++ice_salinity               = 6        # g/kg (default 4)
++ice_ocean_drag_coefficient = 5e-3     # (default 5.5e-3)
++ice_compressive_strength   = 20000    # P*, N/m² (default 27 500)
++albedo                     = "ccsm3"  # "constant" (0.7, default) or "ccsm3" (state-dependent, SeaIceAlbedo)
+diff --git a/config_smoke_test_queue_2.toml b/config_smoke_test_queue_2.toml
+new file mode 100644
+index 0000000..7cf76ae
+--- /dev/null
++++ b/config_smoke_test_queue_2.toml
+@@ -0,0 +1,92 @@
++# Smoke test 2 of 2 of patch 082 (the run queue: tools/submit.sh, tools/start_runners.sh, tools/runner.jl,
++# tools/qstat.sh): the 20 Nov baseline (tanh, LIM2-like sea ice) at 100 km and 20 levels, 1–3 September 2005. Submitted
++# together, the two run one after the other on one runner (the second starting warm), or at once on two; job 1 writes
++# its scorecard itself ([output] post_run_analysis = true), job 2 leaves it to the runner. The numbers are not the test.
++
++architecture = "GPU"   # "GPU" or "CPU"
++experiment   = "smoke_test_queue_2"  # name of the run: output and figures go to output_dir/<experiment> and figure_dir/<experiment>
++
++[grid]
++spacing_km = 100    # largest horizontal grid spacing [km] (at the pole; ~15% finer near the Atlantic edge)
++Nz         = 20     # vertical levels
++depth      = 5000   # maximum depth (m)
++bathymetry       = "GEBCO2026"   # "GEBCO2026" (15″, with IBCAO), "ETOPO" (ETOPO 2022, 60″) or "GLORYS" (GLORYS's own sea floor)
++bottom           = "partial"     # "partial": bottom cells cut at the sea floor; "full": whole cells
++partial_cell_fix = true          # with partial cells: flux-form momentum advection at bottom-cell thickness jumps
++                                 # (Oceananigans.jl#6533), which removes the bottom jets of issue #6532
++
++[time]
++start_date = 2005-09-01   # initial condition (GLORYS); the run starts at 00:00 on this date
++end_date   = 2005-09-03   # the run ends at 00:00 on this date; for short tests a date and time, e.g. 1993-01-01T03:00
++dt_minutes = 10           # time step
++
++[atmosphere]
++jra55 = "multi_year"   # "multi_year": JRA55 for the run's own dates; "repeat_year": the 1990–91 repeat year
++pressure = false           # true: JRA55's sea-level pressure acts on the ocean (nested_pressure_fix.jl). Off for now: with it,
++                           # Fram Strait drifts far from GLORYS (1–5 Jan 1993, 15 km: day 4 −12.4 Sv, GLORYS −2.1, −5.6
++                           # without pressure; the same at 100 km), which looks like an error in the pressure path, not
++                           # physics. Main has had no pressure on the ocean since #43.
++inverse_barometer = false  # with pressure = true: GLORYS's η carries no response to the pressure (issue #37), so add the
++                           # inverse-barometer sea level −(pᵃ − ⟨pᵃ⟩)/(ρ₀g) to GLORYS's η at the open sides (Flather) and
++                           # to the initial free surface; its domain mean is removed, so the volume is unchanged.
++                           # Keep false with pressure = false: then neither the model nor GLORYS feels the pressure
++
++[output]
++average_hours   = 24      # time-averaged output (3D ocean, free surface, sea ice), written to output_dir
++checkpoint_days = 30      # how often the full model state is saved for restarts
++restart         = false   # true: continue from the latest checkpoint in output_dir
++monitor_hours   = 1       # monitor.csv: transports through the open sides, mean η against GLORYS's, volume budget,
++                          # fastest point (plotting/volume_budget.jl, plotting/max_speed.jl); 0 = off
++mixing_depth    = 60      # daily CATKE κᶜ and e over the top this many metres in arctic_mixing.jld2; 0 = off
++post_run_analysis = false # the runner writes the scorecard instead
++
++[transports]
++# Volume, heat, salt and freshwater transports through the sections below and the open boundaries (see transports.jl).
++online                = true   # true: computed every time step and averaged over average_hours, written to arctic_transports.jld2
++reference_temperature = 0      # heat transport relative to this temperature (°C)
++reference_salinity    = 34.8   # freshwater transport relative to this salinity (g/kg)
++
++# Each section is a great-circle path through (longitude, latitude) waypoints. Positive transport flows to the right,
++# walking from the first waypoint to the last; these are ordered so that positive is into the Arctic. Both ends should
++# be on land, so the section spans the whole strait on any grid. Check with plotting/transport_sections.jl.
++[transports.sections]
++# Fram Strait follows the mooring array at 78°50′N; intermediate waypoints keep the great circles on that latitude.
++fram_strait         = { lon = [15.0, 10.0, 5.0, 0.0, -5.0, -10.0, -15.0, -20.0],
++                        lat = [78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333] }
++# Barents Sea Opening follows the mooring line from Norway (Fugløya) via Bjørnøya to Sørkapp, Svalbard.
++barents_sea_opening = { lon = [20.0, 19.0, 16.5],  lat = [70.0, 74.45, 77.0] }
++bering_strait       = { lon = [-166.0, -171.0], lat = [66.0, 66.0] }
++davis_strait        = { lon = [-53.0, -63.0],   lat = [67.0, 66.5] }
++
++[paths]
++data_dir   = ""   # where downloads are stored; "" = each dataset's default cache
++output_dir = "output"    # model output: time averages (.jld2), checkpoints and the config; one folder per experiment
++figure_dir = "figures"   # figures and movies from the plotting/ scripts; one folder per experiment
++
++[boundaries]
++velocity_inflow_days = 0.0417   # oblique radiation on u, v: nudging timescale toward GLORYS on inflow (0.0417 days = 1 hour).
++                                # With 1 day, a partial bottom cell on the Atlantic open face drifted to −0.9 m/s
++                                # (GLORYS −0.26); 1 hour removes it and moves the section transports by < 0.1 Sv
++tracer_inflow_km     = 20  # T, S reservoir inflow relaxation length, both open sides
++relaxation_hours     = 6   # T, S and baroclinic u, v relax toward GLORYS in a ~2/3° band along the open sides
++                           # over this timescale; 0 = off (nested_ocean_model's default is 6)
++
++# Volume control (volume_control.jl): the net inflow through the two open sides together is pinned at every barotropic
++# substep, as NEMO and ROMS do; Flather splits it between the sides. Without it the domain's volume drifts from GLORYS's.
++follow_glorys_volume      = true   # true: the net inflow follows GLORYS's domain-mean η, with the surface freshwater handed back
++volume_relaxation_days    = 1      # with follow_glorys_volume: time over which the remaining drift from GLORYS's mean η is removed
++follow_glorys_tendency    = false  # with follow_glorys_volume: true also follows GLORYS's rate of change exactly
++# net_inflow_Sv           = 0.0    # with follow_glorys_volume = false: a constant net inflow instead (Sv, positive into the domain);
++                                   # with neither, Flather alone (no volume control)
++net_inflow_depth_exponent = 0.5    # the pin's correction to each boundary column ∝ Hᵖ: 0 uniform per length, 1 uniform velocity
++                                   # (NEMO, ROMS), 0.5 a uniform shift of GLORYS's η in Flather
++
++[ocean]
++closure = "CATKE"   # "CATKE" (default), "RiBased", "TKEDissipation" or "none"
++catke_under_ice = "tanh"   # CATKE's surface shear-driven TKE flux under ice: "none" (stock), "open_water" (× (1 − ℵ)), "tanh" (× (1 − tanh(10ℵ)))
++
++[sea_ice]
++ice_salinity               = 6        # g/kg (default 4)
++ice_ocean_drag_coefficient = 5e-3     # (default 5.5e-3)
++ice_compressive_strength   = 20000    # P*, N/m² (default 27 500)
++albedo                     = "ccsm3"  # "constant" (0.7, default) or "ccsm3" (state-dependent, SeaIceAlbedo)
+diff --git a/tools/qstat.sh b/tools/qstat.sh
+new file mode 100755
+index 0000000..a325036
+--- /dev/null
++++ b/tools/qstat.sh
+@@ -0,0 +1,20 @@
++#!/bin/bash
++# The run queue of this clone: waiting jobs, running jobs with the last lines of their status.txt, the last finished
++# jobs (queue/summary.md), and the runner sessions on this server.
++#     bash tools/qstat.sh
++cd "$(dirname "$0")/.." || exit 1
++queue=${PANARCTIC_QUEUE:-$(pwd)/queue}
++experiment() { sed -n 's/^experiment *= *"\([^"]*\)".*/\1/p' "$1" | head -1; }
++echo "== Waiting"
++for f in "$queue"/queue/*.toml; do [ -e "$f" ] && echo "  $(basename "$f")  ($(experiment "$f"))"; done
++echo "== Running"
++for f in "$queue"/running/*.toml; do
++    [ -e "$f" ] || continue
++    e=$(experiment "$f")
++    echo "  $(basename "$f")  ($e)  $(grep -E '^(host|gpu)' "$f.claim" 2>/dev/null | tr '\n' ' ')"
++    tail -n 3 "output/$e/status.txt" 2>/dev/null | sed 's/^/      /'
++done
++echo "== Finished (last 10; all in $queue/summary.md)"
++grep '^| [0-9]' "$queue/summary.md" 2>/dev/null | tail -n 10
++echo "== Runners on $(hostname -s)"
++tmux ls 2>/dev/null | grep '^runner-' || echo "  none"
+diff --git a/tools/runner.jl b/tools/runner.jl
+new file mode 100644
+index 0000000..79b38b6
+--- /dev/null
++++ b/tools/runner.jl
+@@ -0,0 +1,256 @@
++# A queue runner: one Julia process bound to one GPU that runs the queued configs one after another and writes each
++# run's scorecard, so runs can be submitted and found finished later (plan of 20 Nov 2026). Started, and restarted
++# when it exits, by tools/runner_loop.sh; tools/start_runners.sh starts one per GPU in tmux. Submit with
++# tools/submit.sh, watch with tools/qstat.sh.
++#
++#   julia --project=. tools/runner.jl <gpu>        (from the clone's top folder; <gpu> numbered as in nvidia-smi)
++#
++# The queue lives in the clone (queue/, or $PANARCTIC_QUEUE), on the RAID shared by pelee and rondeau, so one queue
++# feeds the runners of both servers, and every job runs the code of this clone:
++#   queue/queue/    configs waiting (oldest name first: tools/submit.sh prefixes the time of submission)
++#   queue/running/  configs being run, each with a .claim (host, GPU, Julia process, long, start)
++#   queue/done/     finished; queue/failed/ failed, with a .error; queue/summary.md one line per finished job
++#
++# Each job:
++#   - is claimed by renaming it from queue/ to running/ (atomic: two runners, on either server, never take the same
++#     job), but only when no other process is on this GPU (nvidia-smi) and, for a config with [queue] long = true, when
++#     fewer than $PANARCTIC_MAX_LONG (2) long jobs already run on this server;
++#   - runs panarctic.jl in a fresh anonymous module (no globals from the previous job; packages and compiled GPU
++#     kernels stay loaded, so the next job starts quickly). panarctic.jl's own lock and status.txt work as in a REPL;
++#   - is followed by its scorecard (unless the config's [output] post_run_analysis already wrote it), then the module's
++#     globals are cleared and the GPU memory freed.
++# A job whose method overrides differ from those loaded by an earlier job ([grid] partial_cell_fix, [ocean]
++# catke_under_ice on or off, [atmosphere] pressure: these redefine library methods for the whole process) makes the
++# runner exit with code 75 before claiming it; runner_loop.sh starts a fresh Julia, which takes it.
++# The runner exits (code 0) after the queue has had nothing for it for $PANARCTIC_IDLE_MINUTES (15) minutes, giving the
++# GPU back. A job left in running/ by a runner of this server that died (crash, reboot) is moved to failed/ when the
++# next runner of this server starts. Ctrl-C stops the job (status "interrupted", moved to failed/) and the runner.
++
++gpu = parse(Int, ARGS[1])
++Base.exit_on_sigint(false)   # Ctrl-C raises InterruptException, so the job is marked interrupted and the lock released
++
++using CUDA
++haskey(ENV, "CUDA_VISIBLE_DEVICES") && error("Start runners without CUDA_VISIBLE_DEVICES (tools/runner_loop.sh unsets it)")
++CUDA.device!(gpu)   # before anything else touches the GPU, so this process holds no context on the other GPUs
++
++using Dates, Printf, TOML
++
++const root = dirname(@__DIR__)
++cd(root)
++include(joinpath(root, "run_management.jl"))
++include(joinpath(root, "analysis", "scorecard_functions.jl"))
++
++const queue_root   = get(ENV, "PANARCTIC_QUEUE", joinpath(root, "queue"))
++const folders      = (; queue   = mkpath(joinpath(queue_root, "queue")),   running = mkpath(joinpath(queue_root, "running")),
++                        done    = mkpath(joinpath(queue_root, "done")),    failed  = mkpath(joinpath(queue_root, "failed")))
++const summary_file = joinpath(queue_root, "summary.md")
++const idle_minutes = parse(Float64, get(ENV, "PANARCTIC_IDLE_MINUTES", "15"))
++const max_long     = parse(Int, get(ENV, "PANARCTIC_MAX_LONG", "2"))
++const host         = Libc.gethostname()
++const exit_restart = 75
++
++say(message) = (@info "Runner $host GPU $gpu: $message"; flush(stderr))
++
++#####
++##### Files
++#####
++
++claim_file(job) = job * ".claim"
++
++function read_key_values(file)
++    values = Dict{String, String}()
++    isfile(file) || return values
++    for line in readlines(file)
++        parts = split(line, '='; limit = 2)
++        length(parts) == 2 && (values[String(strip(parts[1]))] = String(strip(parts[2])))
++    end
++    return values
++end
++
++experiment_of(config) = config === nothing ? "?" : get(config, "experiment", "?")
++read_config(path) = try TOML.parsefile(path) catch; nothing end
++
++function append_summary(line)
++    isfile(summary_file) ||
++        write(summary_file, "| Finished | Job | Experiment | Where | Result | Wall (h) |\n|---|---|---|---|---|---|\n")
++    open(io -> println(io, line), summary_file, "a")
++    return nothing
++end
++
++# Move a job out of running/ (or queue/, for an unreadable config) to done/ or failed/, and log it
++function finish_job(path, ok, message, seconds; claim_info = read_key_values(claim_file(path)))
++    config = read_config(path)
++    name = basename(path)
++    destination = ok ? folders.done : folders.failed
++    mv(path, joinpath(destination, name); force = true)
++    rm(claim_file(path); force = true)
++    ok || write(joinpath(destination, name * ".error"), message * "\n")
++    result = ok ? "done: output/$(experiment_of(config))/scorecard.md" : "FAILED: " * replace(first(message, 200), "|" => "/")
++    append_summary(@sprintf("| %s | %s | %s | %s GPU %s | %s | %.2f |", timestamp(now()), name, experiment_of(config),
++                            get(claim_info, "host", host), get(claim_info, "gpu", string(gpu)), result, seconds / 3600))
++    return nothing
++end
++
++# Jobs left in running/ by a runner of this server that no longer exists
++function recover_stale_claims()
++    for name in readdir(folders.running)
++        endswith(name, ".toml") || continue
++        path  = joinpath(folders.running, name)
++        claim_info = read_key_values(claim_file(path))
++        get(claim_info, "host", "") == host || continue
++        pid = tryparse(Int, get(claim_info, "pid", ""))
++        pid !== nothing && isdir("/proc/$pid") && continue
++        say("$name was left running by process $(something(pid, "?")), which is gone: moved to failed/")
++        finish_job(path, false, "its runner (process $(something(pid, "?")) on $host) died, from a crash or a reboot; " *
++                                "submit it again to rerun it", 0.0; claim_info)
++    end
++end
++
++long_jobs_here() = count(name -> endswith(name, ".claim") &&
++                                 (info = read_key_values(joinpath(folders.running, name));
++                                  get(info, "host", "") == host && get(info, "long", "false") == "true"),
++                         readdir(folders.running))
++
++#####
++##### The GPU and the method overrides
++#####
++
++# Processes other than this one on our GPU (empty if nvidia-smi cannot be asked)
++function other_processes_on_gpu()
++    try
++        uuid = ""
++        for line in readlines(`nvidia-smi --query-gpu=index,uuid --format=csv,noheader`)
++            index, id = strip.(split(line, ','))
++            parse(Int, index) == gpu && (uuid = id)
++        end
++        others = Int[]
++        for line in readlines(`nvidia-smi --query-compute-apps=pid,gpu_uuid --format=csv,noheader`)
++            fields = strip.(split(line, ','))
++            length(fields) == 2 || continue
++            pid = tryparse(Int, fields[1])
++            pid !== nothing && fields[2] == uuid && pid != getpid() && push!(others, pid)
++        end
++        return others
++    catch err
++        @warn "Could not ask nvidia-smi which processes use GPU $gpu" exception = err
++        return Int[]
++    end
++end
++
++# The settings that redefine library methods for the whole process
++function overrides(config)
++    fix = get(get(config, "grid", Dict{String, Any}()), "partial_cell_fix", false)
++    return (partial_cell_fix = fix === true ? "6533" : string(fix),   # true and "6533" load the same file
++            catke_under_ice  = get(get(config, "ocean", Dict{String, Any}()), "catke_under_ice", "none") != "none",
++            pressure         = get(get(config, "atmosphere", Dict{String, Any}()), "pressure", false) == true)
++end
++
++#####
++##### Taking and running a job
++#####
++
++# The first waiting job this runner may take, or nothing
++function next_job()
++    for name in sort(filter(name -> endswith(name, ".toml"), readdir(folders.queue)))
++        path = joinpath(folders.queue, name)
++        config = read_config(path)
++        if config === nothing
++            say("$name is not a readable TOML file: moved to failed/")
++            try finish_job(path, false, "not a readable TOML file", 0.0) catch end
++            continue
++        end
++        long = get(get(config, "queue", Dict{String, Any}()), "long", false) == true
++        long && long_jobs_here() ≥ max_long && continue
++        return (; name, path, config, long)
++    end
++    return nothing
++end
++
++# Rename the job into running/ (atomic: if another runner took it first, the rename fails and we return nothing)
++function claim(job)
++    target = joinpath(folders.running, job.name)
++    try
++        mv(job.path, target)
++    catch
++        return nothing
++    end
++    write(claim_file(target), "host = $host\ngpu = $gpu\npid = $(getpid())\nlong = $(job.long)\nstarted = $(timestamp(now()))\n")
++    return target
++end
++
++function run_in_fresh_module(path)
++    sandbox = Module(:panarctic_job)
++    Core.eval(sandbox, :(eval(x) = Core.eval($sandbox, x)))
++    Core.eval(sandbox, :(include(p::AbstractString) = Base.include($sandbox, p)))
++    Core.eval(sandbox, :(include(mapexpr::Function, p::AbstractString) = Base.include(mapexpr, $sandbox, p)))
++    empty!(ARGS)
++    push!(ARGS, path)
++    try
++        Base.include(sandbox, joinpath(root, "panarctic.jl"))
++    finally
++        clear_globals!(sandbox)
++        free_gpu_memory!()
++        empty!(ARGS)
++        push!(ARGS, string(gpu))
++    end
++    return nothing
++end
++
++function main()
++    recover_stale_claims()
++    say("started in $root; queue $queue_root")
++    loaded = nothing           # the overrides of the jobs run by this process
++    idle_since = time()
++    while true
++        job = next_job()
++        if job === nothing || !isempty(other_processes_on_gpu())
++            if (time() - idle_since) / 60 > idle_minutes
++                say("nothing to run here for $(idle_minutes) min: exiting")
++                exit(0)
++            end
++            job === nothing || say("GPU $gpu is used by process(es) $(join(other_processes_on_gpu(), ", ")): waiting")
++            sleep(job === nothing ? 30 : 60)
++            continue
++        end
++        needed = overrides(job.config)
++        if loaded !== nothing && needed != loaded
++            say("$(job.name) needs other method overrides ($needed; loaded $loaded): restarting Julia")
++            exit(exit_restart)
++        end
++        path = claim(job)
++        path === nothing && continue
++        loaded = needed
++        say("running $(job.name) (experiment $(experiment_of(job.config)))")
++        started = time()
++        ok, message, interrupted = true, "", false
++        try
++            run_in_fresh_module(path)
++        catch err
++            ok = false
++            interrupted = err isa InterruptException
++            message = interrupted ? "interrupted (Ctrl-C)" : first(split(sprint(showerror, err), '\n'))
++            @error "Job $(job.name) failed" exception = (err, catch_backtrace())
++        end
++        if ok && get(get(job.config, "output", Dict{String, Any}()), "post_run_analysis", false) != true
++            say("scorecard of $(job.name)")
++            try
++                scorecard(path)
++            catch err
++                @error "Scorecard of $(job.name) stopped" exception = (err, catch_backtrace())
++            end
++            free_gpu_memory!()
++        end
++        finish_job(path, ok, message, time() - started)
++        say("$(job.name): " * (ok ? "done" : "failed: $message"))
++        interrupted && exit(130)
++        idle_since = time()
++    end
++end
++
++try
++    main()
++catch err
++    err isa InterruptException || rethrow()
++    say("stopped (Ctrl-C)")
++    exit(130)   # runner_loop.sh stops on 130
++end
+diff --git a/tools/runner_loop.sh b/tools/runner_loop.sh
+new file mode 100755
+index 0000000..b98a1b3
+--- /dev/null
++++ b/tools/runner_loop.sh
+@@ -0,0 +1,21 @@
++#!/bin/bash
++# One GPU's queue runner (tools/runner.jl), started again whenever Julia exits, except when the queue has been empty
++# (exit 0) or after Ctrl-C (exit 130). Exit 75: the next job needs other method overrides, so a fresh Julia takes it.
++# Any other exit (a crash) restarts after 30 s; the crashed job goes to failed/ when the new runner starts.
++# Started by tools/start_runners.sh in a tmux session per GPU; can also be run by hand:
++#     bash tools/runner_loop.sh <gpu>
++gpu=$1
++[ -n "$gpu" ] || { echo "usage: bash tools/runner_loop.sh <gpu>"; exit 1; }
++cd "$(dirname "$0")/.." || exit 1
++unset CUDA_VISIBLE_DEVICES
++export CUDA_DEVICE_ORDER=PCI_BUS_ID   # CUDA numbers the GPUs as nvidia-smi does
++while true; do
++    julia --project=. tools/runner.jl "$gpu"
++    code=$?
++    case $code in
++        0)   echo "runner GPU $gpu: queue empty, stopping"; break ;;
++        130) echo "runner GPU $gpu: stopped (Ctrl-C)"; break ;;
++        75)  echo "runner GPU $gpu: restarting Julia for the next job's method overrides" ;;
++        *)   echo "runner GPU $gpu: Julia exited with code $code; restarting in 30 s (Ctrl-C to stop)"; sleep 30 || break ;;
++    esac
++done
+diff --git a/tools/start_runners.sh b/tools/start_runners.sh
+new file mode 100755
+index 0000000..665114f
+--- /dev/null
++++ b/tools/start_runners.sh
+@@ -0,0 +1,22 @@
++#!/bin/bash
++# Start one queue runner per GPU on this server, each in its own tmux session runner-<host>-g<gpu>, logged to
++# ~/logs/runner-<host>-g<gpu>.log. Default: all four GPUs. Runners stop by themselves after the queue has been empty for
++# 15 min ($PANARCTIC_IDLE_MINUTES), and wait while someone else uses their GPU.
++#     bash tools/start_runners.sh            # GPUs 0 1 2 3
++#     bash tools/start_runners.sh 2 3        # only GPUs 2 and 3
++cd "$(dirname "$0")/.." || exit 1
++root=$(pwd)
++host=$(hostname -s)
++gpus=${*:-0 1 2 3}
++mkdir -p ~/logs
++for g in $gpus; do
++    s="runner-$host-g$g"
++    if tmux has-session -t "$s" 2>/dev/null; then
++        echo "$s is already running"
++        continue
++    fi
++    tmux new-session -d -s "$s"
++    tmux pipe-pane -o -t "$s" "cat >> ~/logs/$s.log"
++    tmux send-keys -t "$s" "ocean_setup && cd $root && bash tools/runner_loop.sh $g; exit" Enter
++    echo "started $s (log: ~/logs/$s.log)"
++done
+diff --git a/tools/submit.sh b/tools/submit.sh
+new file mode 100755
+index 0000000..26f7172
+--- /dev/null
++++ b/tools/submit.sh
+@@ -0,0 +1,31 @@
++#!/bin/bash
++# Put configs in this clone's run queue (queue/queue/, or $PANARCTIC_QUEUE), oldest first; tools/start_runners.sh
++# starts runners that take them. A config is skipped if its experiment is already queued or running, or if its
++# output folder already has a run (arctic_ocean.jld2): --force reruns it and overwrites that output.
++#     bash tools/submit.sh config_X.toml [config_Y.toml ...]
++#     bash tools/submit.sh --force config_X.toml
++cd "$(dirname "$0")/.." || exit 1
++queue=${PANARCTIC_QUEUE:-$(pwd)/queue}
++mkdir -p "$queue"/queue "$queue"/running "$queue"/done "$queue"/failed
++force=0
++if [ "$1" = "--force" ]; then force=1; shift; fi
++setting() { sed -n "s/^$1 *= *\"\([^\"]*\)\".*/\1/p" "$2" | head -1; }
++n=0
++for c in "$@"; do
++    if [ ! -f "$c" ]; then echo "$c: no such file"; continue; fi
++    exp=$(setting experiment "$c")
++    if [ -z "$exp" ]; then echo "$c: no experiment name"; continue; fi
++    if grep -lqs "^experiment *= *\"$exp\"" "$queue"/queue/*.toml "$queue"/running/*.toml; then
++        echo "$c: experiment $exp is already queued or running; skipped"
++        continue
++    fi
++    out=$(setting output_dir "$c")
++    if [ $force -eq 0 ] && [ -e "${out:-output}/$exp/arctic_ocean.jld2" ]; then
++        echo "$c: ${out:-output}/$exp already has a run; skipped (--force to rerun it and overwrite)"
++        continue
++    fi
++    n=$((n + 1))
++    cp "$c" "$queue/queue/$(date +%Y%m%d-%H%M%S)-$(printf %02d $n)_$(basename "$c")" && echo "queued $(basename "$c") ($exp)"
++done
++echo "Waiting:"
++ls "$queue"/queue
+-- 
+2.43.0
+
