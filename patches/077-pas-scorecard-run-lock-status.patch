@@ -1,0 +1,1044 @@
+From a6a3e0d3dea13276f62e2526152fe8c1395f9c0e Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 20 Nov 2026 08:35:33 -0500
+Subject: [PATCH] Every run ends with its scorecard; one run per output folder,
+ status.txt, REPL clearing
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- analysis/scorecard_functions.jl, analysis/scorecard.jl: scorecard(config_file) runs every analysis that applies to
+  a run (salinity drift, sea ice, mixing if arctic_mixing.jld2 exists, fastest point if monitor.csv exists, GLORYS
+  transports if missing and the Tsubouchi comparison if the run overlaps their year), each in a fresh anonymous module
+  (no globals reach Main) and inside try, and writes output/<experiment>/scorecard.md: settings, a headline table by
+  region at the end of the run, the end-of-run rows of each table, the fastest point, the Tsubouchi blocks, and what
+  ran or failed. Usable on old runs (ARGS + include) and callable as a function by a batch runner.
+- run_management.jl: a RUNNING lock per output folder (atomic hard link; taken over only when its run is evidently
+  gone), status.txt per run (host, GPU, state, model day, wall minutes per model day, expected end; last three lines
+  for tail), clear_globals! and free_gpu_memory! (the REPL-clearing recipe), finish_run.
+- panarctic.jl: clears the previous run's globals and GPU memory at the top; takes the lock before writing to the
+  output folder; status at build milestones and every model hour; failures and Ctrl-C written to status.txt and the
+  lock released; [output] post_run_analysis = true clears the model and runs the scorecard at the end.
+- Units written Oceananigans.Units.x in panarctic.jl, setup.jl, monitor.jl, volume_control.jl; setup.jl's seconds()
+  renamed elapsed_seconds.
+- analysis/tsubouchi_comparison.jl brought to main's version (per-block reference θ, S of #46 with the call-site fix
+  of #47): on this branch theirs() still took three arguments while 071 passed four (MethodError).
+- config_smoke_test_scorecard.toml: 100 km, 1-8 Sep 2005, tanh, mixing output, post_run_analysis = true.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ README.md                        |   4 +
+ analysis/scorecard.jl            |  13 ++
+ analysis/scorecard_functions.jl  | 298 +++++++++++++++++++++++++++++++
+ analysis/tsubouchi_comparison.jl |  19 +-
+ config.toml                      |   2 +
+ config_smoke_test_scorecard.toml |  87 +++++++++
+ monitor.jl                       |   4 +-
+ panarctic.jl                     |  66 +++++--
+ run_management.jl                | 268 +++++++++++++++++++++++++++
+ setup.jl                         |   8 +-
+ volume_control.jl                |   4 +-
+ 11 files changed, 743 insertions(+), 30 deletions(-)
+ create mode 100644 analysis/scorecard.jl
+ create mode 100644 analysis/scorecard_functions.jl
+ create mode 100644 config_smoke_test_scorecard.toml
+ create mode 100644 run_management.jl
+
+diff --git a/README.md b/README.md
+index 02ae15a..71ac784 100644
+--- a/README.md
++++ b/README.md
+@@ -37,6 +37,10 @@ Each run has an experiment name (`experiment` in the config). Its output goes to
+ 
+ To continue a run from its latest checkpoint, set `restart = true` and run again with the same experiment name. The run still ends at `end_date`.
+ 
++While a run goes, its output folder holds `RUNNING` (which host and Julia process write there; a second run of the same experiment stops at once instead of overwriting the files) and `status.txt` (state, model day, wall minutes per model day, expected end; its last three lines are the state, the progress and the time of the update, so `tail -n 3 output/*/status.txt` lists every run). Runs can follow each other in one Julia REPL: `include("panarctic.jl")` clears the previous run's globals and GPU memory first (`run_management.jl`).
++
++With `post_run_analysis = true` in `[output]`, the run ends with its scorecard: the model is cleared from memory, every analysis that applies runs (salinity drift, sea ice, CATKE mixing, fastest point, gateways against Tsubouchi et al. 2018), and their key rows go to `scorecard.md` in the output folder. For an earlier run, `julia --project=. analysis/scorecard.jl config_X.toml`.
++
+ ## Transports
+ 
+ Volume, heat, salt and freshwater transports through Fram Strait, the Barents Sea Opening, Bering Strait and Davis Strait (Sv, TW, kg/s, Sv; positive into the Arctic), and through the two open boundaries (`atlantic_boundary`, `pacific_boundary`; positive into the domain). The sections are defined in `[transports]` in the config as longitude/latitude waypoints, so they don't depend on the grid: the faces they cross are found on whatever grid the run uses. Both ends of a section should be on land; a warning says when one isn't. Heat and freshwater are relative to `reference_temperature` and `reference_salinity`.
+diff --git a/analysis/scorecard.jl b/analysis/scorecard.jl
+new file mode 100644
+index 0000000..9ef0438
+--- /dev/null
++++ b/analysis/scorecard.jl
+@@ -0,0 +1,13 @@
++# The scorecard of a run (analysis/scorecard_functions.jl): every analysis that applies to it (salinity drift, sea ice,
++# mixing, fastest point, Tsubouchi), each in its own module and inside `try`, and their key rows in
++# output/<experiment>/scorecard.md. Works on old runs too. In a REPL, from the clone's top folder:
++#
++#     empty!(ARGS); push!(ARGS, "config_sep2005_30d_catke_ice_tanh_mixing.toml")
++#     include("analysis/scorecard.jl")
++#
++# The salinity drift regrids GLORYS on the GPU: use a REPL that holds no model (or clear it first, workflow.md).
++# A run with [output] post_run_analysis = true writes its scorecard by itself at the end.
++
++include("scorecard_functions.jl")
++
++scorecard(isempty(ARGS) ? joinpath(dirname(@__DIR__), "config.toml") : ARGS[1])
+diff --git a/analysis/scorecard_functions.jl b/analysis/scorecard_functions.jl
+new file mode 100644
+index 0000000..f1092a0
+--- /dev/null
++++ b/analysis/scorecard_functions.jl
+@@ -0,0 +1,298 @@
++# The scorecard of a run: every analysis that applies to it, and the key rows of each in one file,
++# output/<experiment>/scorecard.md, so runs compare at a glance (plan of 20 Nov 2026, issue #48).
++#
++# Functions only; analysis/scorecard.jl runs it for a config (ARGS + include in a REPL), panarctic.jl at the end of a
++# run with [output] post_run_analysis = true, and a batch runner can call it directly:
++#
++#     include("analysis/scorecard_functions.jl")
++#     scorecard("config_sep2005_30d_catke_ice_tanh_mixing.toml")
++#
++# Each analysis script runs in a fresh anonymous module, with ARGS set to the config for its duration and restored
++# afterwards: its globals (grids, fields, names like `hours`) stay in that module and never reach Main or the next run.
++# Each runs inside `try`; a failure is recorded in the scorecard and the next analysis goes on. Packages and compiled
++# code are shared, so a second scorecard in the same REPL is quick.
++#
++# What runs (in this order), and when:
++#   salinity drift   analysis/salinity_drift.jl        arctic_ocean.jld2 present            (GLORYS monthly, GPU regridding)
++#   sea ice          analysis/sea_ice_comparison.jl    arctic_sea_ice.jld2 present          (GLORYS daily, every 3 days)
++#   mixing           analysis/mixing_timeseries.jl     arctic_mixing.jld2 present ([output] mixing_depth)
++#   fastest point    plotting/max_speed.jl             monitor.csv present ([output] monitor_hours)
++#   GLORYS transports analysis/glorys_transports.jl    for the Tsubouchi comparison, if glorys_transports.jld2 is missing
++#   Tsubouchi        analysis/tsubouchi_comparison.jl  arctic_transports.jld2 present and the run overlaps Tsubouchi
++#                                                      et al.'s year (5 Sep 2005 - 4 Sep 2006)
++# Their own tables (*.md) and figures are written as when they are run by hand. scorecard.md has: the run's settings,
++# a headline table by region at the end of the run (surface and top-200 m ΔS, ΔT, ΔFWC against GLORYS; ice area,
++# volume, 95th-percentile speed against GLORYS; κᶜ near 10 and 20 m), the end-of-run rows of each table, the fastest
++# point, the Tsubouchi blocks, and what ran, how long it took, and what failed.
++
++using CUDA, Dates, Printf, TOML
++
++#####
++##### Running one analysis script in a fresh module
++#####
++
++function run_in_fresh_module(script, args)
++    saved = copy(ARGS)
++    empty!(ARGS)
++    append!(ARGS, args)
++    try
++        sandbox = Module(Symbol("scorecard_", splitext(basename(script))[1]))
++        Base.include(sandbox, script)
++    finally
++        empty!(ARGS)
++        append!(ARGS, saved)
++    end
++    return nothing
++end
++
++#####
++##### Reading the analyses' markdown tables
++#####
++
++table_cells(line) = String.(strip.(split(strip(line), '|')[2:end-1]))
++
++# Every markdown table in a file, as (header, rows)
++function markdown_tables(file)
++    tables = Tuple{Vector{String}, Vector{Vector{String}}}[]
++    lines = readlines(file)
++    n = 1
++    while n < length(lines)
++        if startswith(lines[n], "|") && startswith(lines[n+1], "|---")
++            header = table_cells(lines[n])
++            rows = Vector{String}[]
++            n += 2
++            while n ≤ length(lines) && startswith(lines[n], "|")
++                push!(rows, table_cells(lines[n]))
++                n += 1
++            end
++            push!(tables, (header, rows))
++        else
++            n += 1
++        end
++    end
++    return tables
++end
++
++# The last row of each region (the tables list each region's rows in time order)
++function last_row_per_region(header, rows)
++    k = findfirst(==("Region"), header)
++    k === nothing && return rows
++    order = String[]
++    latest = Dict{String, Vector{String}}()
++    for row in rows
++        length(row) < k && continue
++        haskey(latest, row[k]) || push!(order, row[k])
++        latest[row[k]] = row
++    end
++    return [latest[name] for name in order]
++end
++
++function markdown_table(header, rows)
++    io = IOBuffer()
++    println(io, "| ", join(header, " | "), " |")
++    println(io, "|", repeat("---|", length(header)))
++    for row in rows
++        println(io, "| ", join(row, " | "), " |")
++    end
++    return String(take!(io))
++end
++
++drop_column(header, rows, name) = (k = findfirst(==(name), header);
++                                   k === nothing ? (header, rows) : (deleteat!(copy(header), k), [deleteat!(copy(r), k) for r in rows]))
++
++# Column whose header starts with `prefix`, or nothing
++column_index(header, prefix) = findfirst(h -> startswith(h, prefix), header)
++
++#####
++##### The fastest point, from monitor.csv
++#####
++
++function fastest_point_summary(output_dir)
++    lines  = readlines(joinpath(output_dir, "monitor.csv"))
++    header = split(lines[1], ',')
++    rows   = filter(r -> all(!isnothing, r) && length(r) == length(header),
++                    [tryparse.(Float64, split(line, ',')) for line in lines[2:end] if !isempty(strip(line))])
++    isempty(rows) && return "no rows in monitor.csv"
++    column(name) = [row[findfirst(==(name), header)] for row in rows]
++    speed = max.(column("max_u"), column("max_v"))
++    n = argmax(speed)
++    sorted = sort(speed)
++    return @sprintf("largest |u|, |v| %.2f m/s at day %.2f, (i, j, k) = (%d, %d, %d), %.1f°E %.1f°N, z = %.0f m; " *
++                    "median of the hourly maxima %.2f m/s, 95th percentile %.2f m/s",
++                    speed[n], column("hour")[n] / 24, round(Int, column("fastest_i")[n]), round(Int, column("fastest_j")[n]),
++                    round(Int, column("fastest_k")[n]), column("fastest_longitude")[n], column("fastest_latitude")[n],
++                    column("fastest_z")[n], sorted[cld(length(sorted), 2)], sorted[clamp(ceil(Int, 0.95 * length(sorted)), 1, length(sorted))])
++end
++
++#####
++##### The scorecard
++#####
++
++"""
++    scorecard(config_file; on_step = step -> nothing)
++
++Run every analysis that applies to the run of `config_file` and write `scorecard.md` in its output folder. `on_step`
++is called with the name of each analysis before it starts (panarctic.jl puts it in status.txt). Returns the path of
++scorecard.md.
++"""
++function scorecard(config_file::AbstractString; on_step = step -> nothing)
++    root        = dirname(@__DIR__)
++    config_file = abspath(config_file)
++    config      = TOML.parsefile(config_file)
++    experiment  = get(config, "experiment", "")
++    output_dir  = joinpath(config["paths"]["output_dir"], experiment)
++    isdir(output_dir) || error("No output folder $output_dir for $config_file")
++    start_date  = DateTime(config["time"]["start_date"])
++    end_date    = DateTime(config["time"]["end_date"])
++    has(file)   = isfile(joinpath(output_dir, file))
++
++    # Tsubouchi et al.'s twelve blocks: 5 Sep 2005 to 5 Sep 2006 (9 × 30 days, 35, 30, 30)
++    in_tsubouchi_year = start_date < DateTime(2006, 9, 5) && end_date > DateTime(2005, 9, 5)
++    tsubouchi_reason  = !has("arctic_transports.jld2") ? "no arctic_transports.jld2 ([transports] online = false)" :
++                        !in_tsubouchi_year ? "the run does not overlap 5 Sep 2005 - 4 Sep 2006" : nothing
++
++    # (name, script, why it is skipped or nothing, its table)
++    steps = [("salinity drift", "analysis/salinity_drift.jl",
++              has("arctic_ocean.jld2") ? nothing : "no arctic_ocean.jld2", "salinity_drift.md"),
++             ("sea ice", "analysis/sea_ice_comparison.jl",
++              has("arctic_sea_ice.jld2") && has("arctic_ocean.jld2") ? nothing : "no arctic_sea_ice.jld2 or arctic_ocean.jld2",
++              "sea_ice_comparison.md"),
++             ("mixing", "analysis/mixing_timeseries.jl",
++              has("arctic_mixing.jld2") ? nothing : "no arctic_mixing.jld2 ([output] mixing_depth = 0)", "mixing_timeseries.md"),
++             ("fastest point", "plotting/max_speed.jl",
++              has("monitor.csv") ? nothing : "no monitor.csv ([output] monitor_hours = 0)", nothing),
++             ("GLORYS transports", "analysis/glorys_transports.jl",
++              tsubouchi_reason !== nothing ? tsubouchi_reason : has("glorys_transports.jld2") ? "glorys_transports.jld2 already there" : nothing,
++              nothing),
++             ("Tsubouchi", "analysis/tsubouchi_comparison.jl", tsubouchi_reason, "tsubouchi_comparison.md")]
++
++    results = Dict{String, String}()   # name => "ok (… min)", "skipped: …" or "FAILED: …"
++    for (name, script, skip, table) in steps
++        if skip !== nothing
++            results[name] = "skipped: $skip"
++            continue
++        end
++        on_step(name)
++        @info "Scorecard of $experiment: $name ($script)"
++        table === nothing || rm(joinpath(output_dir, table); force = true)   # no stale table from an earlier scorecard
++        started = time()
++        try
++            run_in_fresh_module(joinpath(root, script), [config_file])
++            results[name] = @sprintf("ok (%.1f min)", (time() - started) / 60)
++        catch err
++            @error "Scorecard of $experiment: $name failed" exception = (err, catch_backtrace())
++            message = first(split(sprint(showerror, err), '\n'))
++            results[name] = "FAILED: " * first(message, 300)
++        end
++        GC.gc(true)
++        CUDA.functional() && CUDA.reclaim()
++    end
++
++    #####
++    ##### scorecard.md
++    #####
++
++    tables(file) = has(file) ? markdown_tables(joinpath(output_dir, file)) : Tuple{Vector{String}, Vector{Vector{String}}}[]
++    salinity = tables("salinity_drift.md")
++    ice      = tables("sea_ice_comparison.md")
++    mixing   = tables("mixing_timeseries.md")
++
++    io = IOBuffer()
++    println(io, "# Scorecard: $experiment\n")
++    println(io, "Config `$(basename(config_file))`, $(Date(start_date)) to $(Date(end_date)), written $(Dates.format(now(), "yyyy-mm-dd HH:MM")). ",
++                "Settings: " * join(["[$section] " * join(["$key = $(repr(value))" for (key, value) in sort(collect(config[section]); by = first)], ", ")
++                                     for section in ("ocean", "sea_ice") if haskey(config, section)], "; ") *
++                (haskey(config, "ocean") || haskey(config, "sea_ice") ? "; " : "") *
++                "[grid] " * join(["$key = $(repr(get(config["grid"], key, "-")))" for key in ("spacing_km", "Nz", "bottom", "partial_cell_fix")], ", ") *
++                ".\n")
++
++    # Headline: one row per region, end of the run
++    headline_header = ["Region"]
++    headline = Dict{String, Dict{String, String}}()
++    region_order = String[]
++    when = String[]
++    function gather!(found, columns, label, when_column)
++        isempty(found) && return
++        header, rows = found[1]
++        latest = last_row_per_region(header, rows)
++        r = findfirst(==("Region"), header)
++        r === nothing && return
++        w = findfirst(==(when_column), header)
++        w === nothing || isempty(latest) || push!(when, "$label: $(latest[1][w])")
++        for (prefix, title) in columns
++            k = column_index(header, prefix)
++            k === nothing && continue
++            title = title === nothing ? header[k] : title
++            title in headline_header || push!(headline_header, title)
++            for row in latest
++                row[r] in region_order || push!(region_order, row[r])
++                get!(headline, row[r], Dict{String, String}())[title] = row[k]
++            end
++        end
++    end
++    gather!(salinity, [("ΔS surface", "ΔS surface"), ("ΔS top 200", "ΔS top 200 m"), ("ΔT top 200", "ΔT top 200 m (°C)"),
++                       ("ΔFWC", "ΔFWC (km³)")], "salinity", "When")
++    gather!(ice, [("Area", "Ice area (10⁶ km²)"), ("Volume", "Ice volume (10³ km³)"),
++                  ("95 % speed", "Ice speed p95 (m/s)")], "sea ice", "When")
++    if !isempty(mixing)   # κᶜ at the level interfaces of the table nearest 10 and 20 m
++        κ_columns = filter(h -> match(r"^κᶜ at [0-9.]+ m$", h) !== nothing, unique(mixing[1][1]))
++        κ_depths  = [parse(Float64, match(r"at ([0-9.]+) m", h).captures[1]) for h in κ_columns]
++        chosen = isempty(κ_columns) ? String[] : unique([κ_columns[argmin(abs.(κ_depths .- d))] for d in (10, 20)])
++        gather!(mixing, [(h, h) for h in chosen], "mixing", "Days")
++    end
++    if length(headline_header) > 1
++        println(io, "## End of the run, by region\n")
++        println(io, "Model − GLORYS for salinity, temperature and freshwater content; model / GLORYS for the sea ice; κᶜ in m²/s. ",
++                    "Periods: ", join(when, "; "), ". Regions as in each analysis.\n")
++        rows = [[name; [get(get(headline, name, Dict{String, String}()), title, "-") for title in headline_header[2:end]]]
++                for name in region_order]
++        print(io, markdown_table(headline_header, rows))
++        println(io)
++    end
++
++    # The end-of-run rows of each analysis
++    for (title, found, file, drop) in (("Salinity and temperature drift", salinity, "salinity_drift.md", "Definition"),
++                                       ("Sea ice", ice, "sea_ice_comparison.md", nothing),
++                                       ("CATKE mixing", mixing, "mixing_timeseries.md", nothing))
++        isempty(found) && continue
++        header, rows = found[1]
++        rows = last_row_per_region(header, rows)
++        if drop !== nothing
++            header, rows = drop_column(header, rows, drop)
++        end
++        println(io, "## $title (end of the run; all rows in $file)\n")
++        print(io, markdown_table(header, rows))
++        println(io)
++    end
++
++    if has("monitor.csv")
++        summary = try
++            fastest_point_summary(output_dir)
++        catch err
++            "could not read monitor.csv: " * first(split(sprint(showerror, err), '\n'))
++        end
++        println(io, "## Fastest point (monitor.csv)\n\n$summary.\n")
++    end
++
++    if has("tsubouchi_comparison.md")   # their blocks, as written by tsubouchi_comparison.jl
++        text = read(joinpath(output_dir, "tsubouchi_comparison.md"), String)
++        start = findfirst("## Against Tsubouchi", text)
++        if start !== nothing
++            section = text[first(start):end]
++            body = section[something(findfirst('\n', section), lastindex(section)):end]   # without its heading
++            println(io, "## Gateways against Tsubouchi et al. (2018), their 30-day blocks (calendar months against GLORYS in tsubouchi_comparison.md)")
++            println(io, rstrip(body), "\n")
++        end
++    end
++
++    println(io, "## What ran\n")
++    print(io, markdown_table(["Analysis", "Result"], [[name, results[name]] for (name, _, _, _) in steps]))
++    println(io, "\nFigures in $(joinpath(config["paths"]["figure_dir"], experiment)).")
++
++    text = String(take!(io))
++    file = joinpath(output_dir, "scorecard.md")
++    write(file, text)
++    print(text)
++    @info "Wrote $file"
++    return file
++end
+diff --git a/analysis/tsubouchi_comparison.jl b/analysis/tsubouchi_comparison.jl
+index f118286..2b60def 100644
+--- a/analysis/tsubouchi_comparison.jl
++++ b/analysis/tsubouchi_comparison.jl
+@@ -15,9 +15,9 @@
+ #
+ # Heat and freshwater per gateway depend on the reference values (the net over a closed boundary does not), so they are
+ # converted. With the volume Q, our heat H (relative to T₀) and our freshwater F (relative to S₀):
+-#     heat relative to 1.01 °C       = H - ρ cₚ (1.01 - T₀) Q
+-#     freshwater relative to 34.67   = Q - (S₀ / 34.67) (Q - F)          (since F = Q - Σ vS / S₀)
+-# Tsubouchi et al.'s heat reference is the monthly boundary-mean temperature, 1.01 ± 0.16 °C; the constant 1.01 is used.
++#     heat relative to T′       = H - ρ cₚ (T′ - T₀) Q
++#     freshwater relative to S′ = Q - (S₀ / S′) (Q - F)          (since F = Q - Σ vS / S₀)
++# T′ and S′ are Tsubouchi et al.'s monthly boundary-mean potential temperature and salinity (Section 2d), one per block.
+ #
+ # Tsubouchi et al.'s monthly values (analysis/references/tsubouchi2018_monthly_*.csv) are read from their Figs. 5a, 7a
+ # and 9a: about ±0.2 Sv, ±5 TW, ±5 mSv, drawn as bands. Their "months" are 30-day blocks from 5 September 2005 (the
+@@ -43,8 +43,10 @@ isempty(gateways) && error("None of davis_strait, fram_strait, barents_sea_openi
+ ##### Tsubouchi et al. (2018)
+ #####
+ 
+-const T_tsubouchi = 1.01    # °C
+-const S_tsubouchi = 34.67
++# Tsubouchi et al.'s monthly boundary-mean potential temperature (°C) and salinity, Sep 2005 - Aug 2006 (their
++# Section 2d), one per 30-day block. (The paper prints the 6th salinity as 36.67, a typo for 34.67.)
++const T_tsubouchi = [1.26, 1.15, 1.01, 0.91, 0.94, 0.91, 0.83, 0.82, 0.88, 0.99, 1.15, 1.24]
++const S_tsubouchi = [34.67, 34.64, 34.63, 34.63, 34.66, 34.67, 34.68, 34.68, 34.70, 34.68, 34.67, 34.66]
+ const tsubouchi_uncertainty = Dict("volume" => 0.2, "heat" => 5.0, "freshwater" => 5.0)   # reading the figures
+ const tsubouchi_units       = Dict("volume" => "Sv", "heat" => "TW", "freshwater" => "mSv")
+ 
+@@ -99,12 +101,13 @@ end
+ # Volume (Sv), heat (TW) and freshwater (Sv) on our reference values; heat (TW) and freshwater (mSv) on Tsubouchi's
+ ours(values, name, quantity) = values["$(name)_$quantity"]
+ 
+-function theirs(values, name, quantity)
++function theirs(values, t, name, quantity)
+     Q = values["$(name)_volume"]
+     quantity == "volume" && return Q
+-    quantity == "heat"   && return values["$(name)_heat"] .- reference.ρcₚ * (T_tsubouchi - reference.T₀) .* Q .* 1e6 ./ 1e12
++    b = clamp.(searchsortedlast.(Ref(block_first), t), 1, length(block_first))   # Tsubouchi et al.'s block at each time
++    quantity == "heat" && return values["$(name)_heat"] .- reference.ρcₚ .* (T_tsubouchi[b] .- reference.T₀) .* Q .* 1e6 ./ 1e12
+     F = values["$(name)_freshwater"]
+-    return 1000 .* (Q .- (reference.S₀ / S_tsubouchi) .* (Q .- F))
++    return 1000 .* (Q .- (reference.S₀ ./ S_tsubouchi[b]) .* (Q .- F))
+ end
+ 
+ function window_mean(t, x, a, b)
+diff --git a/config.toml b/config.toml
+index 4f434aa..ec25090 100644
+--- a/config.toml
++++ b/config.toml
+@@ -40,6 +40,8 @@ checkpoint_days = 30      # how often the full model state is saved for restarts
+ restart         = false   # true: continue from the latest checkpoint in output_dir
+ monitor_hours   = 1       # monitor.csv: transports through the open sides, mean η against GLORYS's, volume budget,
+                           # fastest point (plotting/volume_budget.jl, plotting/max_speed.jl); 0 = off
++post_run_analysis = false # true: at the end of the run, clear the model from memory and write the scorecard
++                          # (analysis/scorecard.jl: salinity drift, sea ice, mixing, fastest point, Tsubouchi) in scorecard.md
+ 
+ [transports]
+ # Volume, heat, salt and freshwater transports through the sections below and the open boundaries (see transports.jl).
+diff --git a/config_smoke_test_scorecard.toml b/config_smoke_test_scorecard.toml
+new file mode 100644
+index 0000000..47dfd8b
+--- /dev/null
++++ b/config_smoke_test_scorecard.toml
+@@ -0,0 +1,87 @@
++# Smoke test of patch 077 (run_management.jl, analysis/scorecard.jl): 100 km, 1–8 September 2005, with the tanh
++# under-ice TKE flux of the 30-day runs, the mixing output, and [output] post_run_analysis = true. It checks the RUNNING
++# lock, status.txt, and the scorecard at the end of a run: every analysis should say "ok" in the "What ran" table of
++# output/smoke_test_scorecard/scorecard.md (8 September: the run overlaps Tsubouchi et al.'s first block, so the gateway
++# comparison runs too). The numbers are not the test.
++
++architecture = "GPU"   # "GPU" or "CPU"
++experiment   = "smoke_test_scorecard"  # name of the run: output and figures go to output_dir/<experiment> and figure_dir/<experiment>
++
++[grid]
++spacing_km = 100    # largest horizontal grid spacing [km] (at the pole; ~15% finer near the Atlantic edge)
++Nz         = 20     # vertical levels
++depth      = 5000   # maximum depth (m)
++bathymetry       = "GEBCO2026"   # "GEBCO2026" (15″, with IBCAO), "ETOPO" (ETOPO 2022, 60″) or "GLORYS" (GLORYS's own sea floor)
++bottom           = "partial"     # "partial": bottom cells cut at the sea floor; "full": whole cells
++partial_cell_fix = true          # with partial cells: flux-form momentum advection at bottom-cell thickness jumps
++                                 # (Oceananigans.jl#6533), which removes the bottom jets of issue #6532
++
++[time]
++start_date = 2005-09-01   # initial condition (GLORYS); the run starts at 00:00 on this date
++end_date   = 2005-09-08   # the run ends at 00:00 on this date; for short tests a date and time, e.g. 1993-01-01T03:00
++dt_minutes = 10           # time step
++
++[atmosphere]
++jra55 = "multi_year"   # "multi_year": JRA55 for the run's own dates; "repeat_year": the 1990–91 repeat year
++pressure = false           # true: JRA55's sea-level pressure acts on the ocean (nested_pressure_fix.jl). Off for now: with it,
++                           # Fram Strait drifts far from GLORYS (1–5 Jan 1993, 15 km: day 4 −12.4 Sv, GLORYS −2.1, −5.6
++                           # without pressure; the same at 100 km), which looks like an error in the pressure path, not
++                           # physics. Main has had no pressure on the ocean since #43.
++inverse_barometer = false  # with pressure = true: GLORYS's η carries no response to the pressure (issue #37), so add the
++                           # inverse-barometer sea level −(pᵃ − ⟨pᵃ⟩)/(ρ₀g) to GLORYS's η at the open sides (Flather) and
++                           # to the initial free surface; its domain mean is removed, so the volume is unchanged.
++                           # Keep false with pressure = false: then neither the model nor GLORYS feels the pressure
++
++[output]
++average_hours   = 24      # time-averaged output (3D ocean, free surface, sea ice), written to output_dir
++checkpoint_days = 30      # how often the full model state is saved for restarts
++restart         = false   # true: continue from the latest checkpoint in output_dir
++monitor_hours   = 1       # monitor.csv: transports through the open sides, mean η against GLORYS's, volume budget,
++                          # fastest point (plotting/volume_budget.jl, plotting/max_speed.jl); 0 = off
++mixing_depth    = 60      # daily CATKE κᶜ and e over the top this many metres in arctic_mixing.jld2; 0 = off
++post_run_analysis = true  # at the end: clear the model from memory, then the scorecard (scorecard.md)
++
++[transports]
++# Volume, heat, salt and freshwater transports through the sections below and the open boundaries (see transports.jl).
++online                = true   # true: computed every time step and averaged over average_hours, written to arctic_transports.jld2
++reference_temperature = 0      # heat transport relative to this temperature (°C)
++reference_salinity    = 34.8   # freshwater transport relative to this salinity (g/kg)
++
++# Each section is a great-circle path through (longitude, latitude) waypoints. Positive transport flows to the right,
++# walking from the first waypoint to the last; these are ordered so that positive is into the Arctic. Both ends should
++# be on land, so the section spans the whole strait on any grid. Check with plotting/transport_sections.jl.
++[transports.sections]
++# Fram Strait follows the mooring array at 78°50′N; intermediate waypoints keep the great circles on that latitude.
++fram_strait         = { lon = [15.0, 10.0, 5.0, 0.0, -5.0, -10.0, -15.0, -20.0],
++                        lat = [78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333] }
++# Barents Sea Opening follows the mooring line from Norway (Fugløya) via Bjørnøya to Sørkapp, Svalbard.
++barents_sea_opening = { lon = [20.0, 19.0, 16.5],  lat = [70.0, 74.45, 77.0] }
++bering_strait       = { lon = [-166.0, -171.0], lat = [66.0, 66.0] }
++davis_strait        = { lon = [-53.0, -63.0],   lat = [67.0, 66.5] }
++
++[paths]
++data_dir   = ""   # where downloads are stored; "" = each dataset's default cache
++output_dir = "output"    # model output: time averages (.jld2), checkpoints and the config; one folder per experiment
++figure_dir = "figures"   # figures and movies from the plotting/ scripts; one folder per experiment
++
++[boundaries]
++velocity_inflow_days = 0.0417   # oblique radiation on u, v: nudging timescale toward GLORYS on inflow (0.0417 days = 1 hour).
++                                # With 1 day, a partial bottom cell on the Atlantic open face drifted to −0.9 m/s
++                                # (GLORYS −0.26); 1 hour removes it and moves the section transports by < 0.1 Sv
++tracer_inflow_km     = 20  # T, S reservoir inflow relaxation length, both open sides
++relaxation_hours     = 6   # T, S and baroclinic u, v relax toward GLORYS in a ~2/3° band along the open sides
++                           # over this timescale; 0 = off (nested_ocean_model's default is 6)
++
++# Volume control (volume_control.jl): the net inflow through the two open sides together is pinned at every barotropic
++# substep, as NEMO and ROMS do; Flather splits it between the sides. Without it the domain's volume drifts from GLORYS's.
++follow_glorys_volume      = true   # true: the net inflow follows GLORYS's domain-mean η, with the surface freshwater handed back
++volume_relaxation_days    = 1      # with follow_glorys_volume: time over which the remaining drift from GLORYS's mean η is removed
++follow_glorys_tendency    = false  # with follow_glorys_volume: true also follows GLORYS's rate of change exactly
++# net_inflow_Sv           = 0.0    # with follow_glorys_volume = false: a constant net inflow instead (Sv, positive into the domain);
++                                   # with neither, Flather alone (no volume control)
++net_inflow_depth_exponent = 0.5    # the pin's correction to each boundary column ∝ Hᵖ: 0 uniform per length, 1 uniform velocity
++                                   # (NEMO, ROMS), 0.5 a uniform shift of GLORYS's η in Flather
++
++[ocean]
++closure = "CATKE"
++catke_under_ice = "tanh"   # CATKE's surface shear-driven TKE flux under ice: "none" (stock), "open_water" (× (1 − ℵ)), "tanh" (× (1 − tanh(10ℵ)))
+diff --git a/monitor.jl b/monitor.jl
+index d8c9c29..80e2f73 100644
+--- a/monitor.jl
++++ b/monitor.jl
+@@ -30,7 +30,7 @@ function open_side_transports(child)
+     return (atlantic = Q(1) / 1e6, pacific = -Q(Ny + 1) / 1e6)
+ end
+ 
+-function add_monitor!(simulation, child, output_dir, parent_η; schedule = TimeInterval(1hours))
++function add_monitor!(simulation, child, output_dir, parent_η; schedule = TimeInterval(Oceananigans.Units.hour))
+     Nx, Ny, Nz = size(child.grid)
+     bottom = Array(interior(bottom_height_field(child.grid)))[:, :, 1]
+     wet    = bottom .< 0
+@@ -109,7 +109,7 @@ function add_monitor!(simulation, child, output_dir, parent_η; schedule = TimeI
+                    znode(i, j, k, v.grid, location...))
+ 
+         open(io -> @printf(io, "%.2f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%d,%d,%d,%d,%.3f,%.3f,%.1f\n",
+-                           t / hours, atlantic, pacific, atlantic + pacific, η̄, η̄ᵖ,
++                           t / Oceananigans.Units.hours, atlantic, pacific, atlantic + pacific, η̄, η̄ᵖ,
+                            100 * area_mean(δη, shelf, v.grid), 100 * area_mean(δη, deep, v.grid),
+                            edge_cm, surface_cm, residual, from_volume, umax, vmax, fastest...),
+              file, "a")
+diff --git a/panarctic.jl b/panarctic.jl
+index 0f3f0de..2c64451 100644
+--- a/panarctic.jl
++++ b/panarctic.jl
+@@ -1,8 +1,24 @@
+ # Pan-Arctic coupled ocean–sea ice simulation (test configuration).
+ # Settings are read from a TOML file: `julia +1.13 --project=. panarctic.jl [config.toml]`. See README.
+ # Figures and movies: scripts in plotting/ (one per figure).
++#
++# In a reused REPL (workflow.md), a new run is a new ARGS and another include: the previous run's globals are cleared and
++# its GPU memory freed first (run_management.jl). One run per output folder (a RUNNING lock), and status.txt there says
++# how far the run is. With [output] post_run_analysis = true, the model is cleared from memory at the end and the
++# scorecard written (analysis/scorecard_functions.jl, output/<experiment>/scorecard.md).
++# Units are written Oceananigans.Units.x: a global `hours` or `days` left in Main by a script cannot change this run.
++
++include("run_management.jl")
++clear_globals!(@__MODULE__)
++free_gpu_memory!()
++include("analysis/scorecard_functions.jl")
+ 
+ include("setup.jl")
++
++# One run per output folder: stop here if another run writes to it (before anything is written to it)
++acquire_run_lock(output_dir, config_file)
++run_status = new_run_status(output_dir, experiment, config_file, config, start_date, end_date)
++write_run_status(run_status, "building"; detail = "grid done")
+ include("jra55_read_fix.jl")
+ # The atmospheric pressure on the nested ocean ([atmosphere] pressure, off by default; see config.toml)
+ get(config["atmosphere"], "pressure", false) && include("nested_pressure_fix.jl")
+@@ -77,7 +93,7 @@ else
+ end
+ @info "Vertical mixing: $closure_name" * (closure_name == "CATKE" && catke_surface_tke_scale != 1 ?
+                                          " (surface shear-driven TKE flux × $catke_surface_tke_scale)" : "")
+-Δt = config["time"]["dt_minutes"] * minutes
++Δt = config["time"]["dt_minutes"] * Oceananigans.Units.minutes
+ time_discretization = AdaptiveVerticallyImplicitDiscretization(cfl=0.5)
+ net_inflow = net_inflow_setting(bc)
+ net_inflow_depth_exponent = get(bc, "net_inflow_depth_exponent", 0)
+@@ -94,9 +110,9 @@ ocean = nested_ocean_simulation(grid, dataset;
+                                 dir_kw...,
+                                 Δt,
+                                 open_sides = (:south, :north),
+-                                normal_velocity_scheme = ObliqueRadiation(inflow_timescale = bc["velocity_inflow_days"] * days),
+-                                tracer_scheme = TracerReservoir(inflow_length_scale = bc["tracer_inflow_km"] * kilometers),
+-                                relaxation_rate = bc["relaxation_hours"] > 0 ? 1 / (bc["relaxation_hours"] * hours) : nothing,
++                                normal_velocity_scheme = ObliqueRadiation(inflow_timescale = bc["velocity_inflow_days"] * Oceananigans.Units.days),
++                                tracer_scheme = TracerReservoir(inflow_length_scale = bc["tracer_inflow_km"] * Oceananigans.Units.kilometers),
++                                relaxation_rate = bc["relaxation_hours"] > 0 ? 1 / (bc["relaxation_hours"] * Oceananigans.Units.hours) : nothing,
+                                 net_inflow, net_inflow_depth_exponent,
+                                 inverse_barometer = get(config["atmosphere"], "inverse_barometer", false),
+                                 free_surface = SplitExplicitFreeSurface(grid; cfl = 0.7, fixed_Δt = Δt),
+@@ -105,6 +121,7 @@ ocean = nested_ocean_simulation(grid, dataset;
+                                 closure)
+ 
+ child = ocean.model.child   # the regional ocean model; ocean.model also holds the GLORYS parent
++write_run_status(run_status, "building"; detail = "ocean built")
+ 
+ # ## Sea ice
+ #
+@@ -141,6 +158,7 @@ no_ice = (h .== 0) .| (ℵ .== 0)
+ h[no_ice] .= 0
+ ℵ[no_ice] .= 0
+ set!(sea_ice.model, h = h, ℵ = ℵ)
++write_run_status(run_status, "building"; detail = "sea ice built")
+ 
+ # Under-ice options (issue #48; under_ice_coupling.jl): the ice concentration seen by CATKE's under-ice TKE flux, and
+ # [sea_ice] ice_ocean_friction_velocity, the u★ of the ice–ocean heat exchange.
+@@ -217,7 +235,7 @@ function progress(sim)
+     return nothing
+ end
+ 
+-add_callback!(simulation, progress, TimeInterval(1hours))
++add_callback!(simulation, progress, TimeInterval(Oceananigans.Units.hour))
+ catke_under_ice == "none" || add_callback!(simulation, sim -> copy_ice_concentration!(child, sea_ice), IterationInterval(1))
+ 
+ function ice_progress(sim)
+@@ -225,7 +243,7 @@ function ice_progress(sim)
+     @info @sprintf("    ice: max |u| = %.2f m/s, max |v| = %.2f m/s", maximum(abs, uᵢ), maximum(abs, vᵢ))
+     return nothing
+ end
+-add_callback!(simulation, ice_progress, TimeInterval(1hours))
++add_callback!(simulation, ice_progress, TimeInterval(Oceananigans.Units.hour))
+ 
+ # GLORYS's free surface over the whole domain (2D, small), for the volume control and the monitor; the run itself
+ # holds GLORYS only on strips along the open sides
+@@ -236,12 +254,12 @@ end
+ 
+ # The net inflow follows GLORYS's domain-mean η: set before every time step (volume_control.jl)
+ if net_inflow isa Ref
+-    add_glorys_volume_target!(simulation, net_inflow, child, parent_η, bc["volume_relaxation_days"] * days;
++    add_glorys_volume_target!(simulation, net_inflow, child, parent_η, bc["volume_relaxation_days"] * Oceananigans.Units.days;
+                               tendency = get(bc, "follow_glorys_tendency", false))
+ end
+ 
+ # Transports through the open sides, mean η against GLORYS's, the volume budget and the fastest point (monitor.jl)
+-monitor_hours > 0 && add_monitor!(simulation, child, output_dir, parent_η; schedule = TimeInterval(monitor_hours * hours))
++monitor_hours > 0 && add_monitor!(simulation, child, output_dir, parent_η; schedule = TimeInterval(monitor_hours * Oceananigans.Units.hours))
+ 
+ # ## Output: time averages and checkpoints
+ #
+@@ -261,12 +279,12 @@ sea_ice_outputs = (; h = sea_ice.model.ice_thickness, ℵ = sea_ice.model.ice_co
+ # On a restart, append to the existing files instead of overwriting them.
+ simulation.output_writers[:ocean] = JLD2Writer(child, ocean_outputs;
+                                          filename = ocean_output_file,
+-                                         schedule = AveragedTimeInterval(output["average_hours"] * hours),
++                                         schedule = AveragedTimeInterval(output["average_hours"] * Oceananigans.Units.hours),
+                                          overwrite_files = !restart)
+ 
+ simulation.output_writers[:sea_ice] = JLD2Writer(sea_ice.model, sea_ice_outputs;
+                                                  filename = sea_ice_output_file,
+-                                                 schedule = AveragedTimeInterval(output["average_hours"] * hours),
++                                                 schedule = AveragedTimeInterval(output["average_hours"] * Oceananigans.Units.hours),
+                                                  overwrite_files = !restart)
+ 
+ # [output] mixing_depth (m; 0, the default, = off): averages of CATKE's tracer diffusivity κᶜ and its turbulent kinetic
+@@ -278,7 +296,7 @@ if mixing_depth > 0
+     k₀ = max(1, findfirst(z -> z > -mixing_depth, zᶠ) - 1)
+     simulation.output_writers[:mixing] = JLD2Writer(child, (; κc = child.closure_fields.κc, e = child.tracers.e);
+                                                     filename = joinpath(output_dir, "arctic_mixing.jld2"),
+-                                                    schedule = AveragedTimeInterval(output["average_hours"] * hours),
++                                                    schedule = AveragedTimeInterval(output["average_hours"] * Oceananigans.Units.hours),
+                                                     indices = (:, :, k₀:Nz),
+                                                     overwrite_files = !restart)
+     @info "Mixing output: κᶜ and e above $(round(zᶠ[k₀], digits = 1)) m (levels $k₀ to $Nz) in arctic_mixing.jld2"
+@@ -296,14 +314,14 @@ if get(transport_settings(config), "online", false)
+ 
+     simulation.output_writers[:transports] = JLD2Writer(child, transports;
+                                                         filename = transport_output_file,
+-                                                        schedule = AveragedTimeInterval(output["average_hours"] * hours),
++                                                        schedule = AveragedTimeInterval(output["average_hours"] * Oceananigans.Units.hours),
+                                                         init = (file, model) -> save_transport_metadata!(file, config, sections;
+                                                                    reference_density = ρ₀, heat_capacity = cₚ),
+                                                         overwrite_files = !restart)
+ end
+ 
+ simulation.output_writers[:checkpointer] = Checkpointer(coupled_model;
+-                                                        schedule = TimeInterval(output["checkpoint_days"] * days),
++                                                        schedule = TimeInterval(output["checkpoint_days"] * Oceananigans.Units.days),
+                                                         dir = output_dir,
+                                                         prefix = checkpoint_prefix)
+ 
+@@ -312,4 +330,24 @@ simulation.output_writers[:checkpointer] = Checkpointer(coupled_model;
+ # GPU arrays (small boundary rows, so this is cheap).
+ restart && CUDA.@allowscalar set!(simulation; checkpoint = :latest)
+ 
+-run!(simulation)
++# status.txt every model hour: model day and date, iteration, wall minutes per model day, expected end
++add_callback!(simulation, sim -> write_run_status(run_status, "running"; model_time = time(sim), iteration = iteration(sim)),
++              TimeInterval(Oceananigans.Units.hour); name = :run_status)
++write_run_status(run_status, "running"; model_time = time(simulation), iteration = iteration(simulation))
++
++# A failure or Ctrl-C is written to status.txt and releases the lock
++try
++    run!(simulation)
++catch err
++    write_run_status(run_status, err isa InterruptException ? "interrupted" : "failed";
++                     model_time = time(simulation), iteration = iteration(simulation), exception = err)
++    release_run_lock(output_dir)
++    rethrow()
++end
++write_run_status(run_status, "finished"; model_time = time(simulation), iteration = iteration(simulation))
++
++# [output] post_run_analysis (default false): clear the model from memory (its GPU memory too), then run the scorecard,
++# all the analyses that apply to this run (output/<experiment>/scorecard.md). Then status "done" and the lock released.
++# The REPL keeps config, config_file, experiment, output_dir and figure_dir; the model's globals are `nothing`.
++finish_run(@__MODULE__, run_status, config_file, output_dir;
++           post_run_analysis = get(config["output"], "post_run_analysis", false))
+diff --git a/run_management.jl b/run_management.jl
+new file mode 100644
+index 0000000..c746088
+--- /dev/null
++++ b/run_management.jl
+@@ -0,0 +1,268 @@
++# Run bookkeeping for panarctic.jl: one run per output folder, a status file per run, and clearing a reused REPL.
++#
++# - RUNNING, in the experiment's output folder, names the host, Julia process and config of the run writing there. A
++#   second run of the same experiment stops at once instead of overwriting the first one's files (19 Nov: two copies of
++#   one run corrupted its JLD2 output). The lock is taken (hard link, atomic) before anything is written to the folder,
++#   and removed when the run (and its scorecard) ends, fails or is interrupted. An existing lock is taken over only when
++#   its run is evidently gone:
++#     - it was taken by this same Julia process (an earlier include in this REPL, which has stopped);
++#     - its process no longer exists (same host only: the other server's processes cannot be checked from here);
++#     - its status.txt says finished, done, failed or interrupted;
++#     - its status.txt has not been updated for `stale_minutes` (60): a run on the other server that died with the
++#       server, or a REPL whose run stopped with an error while the model was being built.
++#   Otherwise the error says who holds it; delete RUNNING by hand only when sure that run is gone.
++# - status.txt: experiment, config, host, GPU, Julia process, start; then the state, the progress (model day, date,
++#   iteration, wall minutes per model day, expected end) and the time of the last update, rewritten every model hour.
++#   The last three lines are state, progress and update, so from either server
++#       tail -n 3 /mnt/autofs/bow.math/scratch/fpoulin/software/*/output/*/status.txt
++#   shows every run and how far it is.
++# - clear_globals! and free_gpu_memory!: the REPL-clearing recipe of workflow.md, run at the top of panarctic.jl (the
++#   previous run's model leaves the GPU) and after a run with [output] post_run_analysis (before the scorecard).
++#
++# No global variables here, and no names of units (workflow.md): only functions.
++
++using CUDA, Dates, Printf
++
++run_lock_file(output_dir)   = joinpath(output_dir, "RUNNING")
++run_status_file(output_dir) = joinpath(output_dir, "status.txt")
++this_host() = Libc.gethostname()
++timestamp(t) = Dates.format(t, "yyyy-mm-dd HH:MM:SS")
++
++#####
++##### Clearing a reused REPL
++#####
++
++"""
++    clear_globals!(mod = Main; keep = ())
++
++Set every non-constant global of `mod` to `nothing`, except the names in `keep`, so that the objects they held (a
++previous model and its GPU arrays) can be garbage collected. Functions, types, constants and loaded packages are kept,
++so compiled code stays and the next `include` is fast.
++"""
++function clear_globals!(mod::Module = Main; keep = ())
++    for name in names(mod; all = true)
++        (name in keep || startswith(string(name), "#")) && continue
++        (isdefined(mod, name) && !isconst(mod, name)) || continue
++        try
++            Core.eval(mod, :($name = nothing))
++        catch   # typed globals and the like: left as they are
++        end
++    end
++    return nothing
++end
++
++"""
++    free_gpu_memory!()
++
++Two full garbage collections (one was not enough on 19 Nov) and CUDA's memory pool given back to the driver.
++Check with `nvidia-smi` in a shell: a few hundred MB should remain.
++"""
++function free_gpu_memory!()
++    GC.gc(true)
++    GC.gc(true)
++    CUDA.functional() && CUDA.reclaim()
++    return nothing
++end
++
++#####
++##### The lock
++#####
++
++function device_description(config)
++    config["architecture"] == "GPU" || return "CPU"
++    try
++        device  = CUDA.device()
++        visible = get(ENV, "CUDA_VISIBLE_DEVICES", "")
++        return "GPU $(CUDA.deviceid(device)) ($(CUDA.name(device)))" *
++               (isempty(visible) ? "" : ", CUDA_VISIBLE_DEVICES=$visible")
++    catch
++        return "GPU (unknown)"
++    end
++end
++
++# The lock's lines "key = value" as a Dict, or nothing if there is no lock
++function lock_holder(output_dir)
++    file = run_lock_file(output_dir)
++    isfile(file) || return nothing
++    holder = Dict{String, String}()
++    for line in readlines(file)
++        parts = split(line, '='; limit = 2)
++        length(parts) == 2 && (holder[String(strip(parts[1]))] = String(strip(parts[2])))
++    end
++    return holder
++end
++
++# The first word of the "state:" line of status.txt ("" if none)
++function status_state(output_dir)
++    file = run_status_file(output_dir)
++    isfile(file) || return ""
++    for line in readlines(file)
++        if startswith(line, "state:")
++            words = split(line[length("state:")+1:end])
++            return isempty(words) ? "" : String(words[1])
++        end
++    end
++    return ""
++end
++
++minutes_since_modified(file) = isfile(file) ? (time() - mtime(file)) / 60 : Inf
++
++# Why the existing lock belongs to a run that is gone, or nothing if its run may still be going
++function stale_lock_reason(output_dir, holder; stale_minutes)
++    state = status_state(output_dir)
++    state in ("finished", "done", "failed", "interrupted") && return "its status.txt says $state"
++    host = get(holder, "host", "")
++    pid  = tryparse(Int, get(holder, "pid", ""))
++    if host == this_host() && pid !== nothing
++        pid == getpid() && return "it was taken by this Julia process (an earlier include in this REPL)"
++        isdir("/proc/$pid") || return "its process $pid no longer exists on $host"
++    end
++    status = run_status_file(output_dir)
++    age = minutes_since_modified(isfile(status) ? status : run_lock_file(output_dir))
++    age > stale_minutes && return @sprintf("its status was last updated %.0f min ago (more than %d)", age, stale_minutes)
++    return nothing
++end
++
++"""
++    acquire_run_lock(output_dir, config_file; stale_minutes = 60)
++
++Take the RUNNING lock of `output_dir` for this Julia process, or stop with an error naming the run that holds it.
++"""
++function acquire_run_lock(output_dir, config_file; stale_minutes = 60)
++    lock = run_lock_file(output_dir)
++    mine = joinpath(output_dir, ".RUNNING.$(this_host()).$(getpid())")
++    write(mine, "host = $(this_host())\npid = $(getpid())\nstarted = $(timestamp(now()))\nconfig = $(abspath(config_file))\n")
++    try
++        for attempt in 1:2
++            try
++                hardlink(mine, lock)   # fails if the lock exists: two runs cannot both take it
++                return lock
++            catch err
++                err isa Base.IOError || rethrow()
++                if !ispath(lock)   # a file system without hard links: copy instead (not atomic, but a race is unlikely)
++                    cp(mine, lock)
++                    return lock
++                end
++            end
++            holder = lock_holder(output_dir)
++            holder === nothing && continue   # removed in the meantime: try again
++            reason = stale_lock_reason(output_dir, holder; stale_minutes)
++            if reason === nothing
++                status = run_status_file(output_dir)
++                last_lines = isfile(status) ? join(last(readlines(status), 3), "\n    ") : "(no status.txt)"
++                error("Another run is writing to $output_dir:\n" *
++                      "    host $(get(holder, "host", "?")), Julia process $(get(holder, "pid", "?")), " *
++                      "started $(get(holder, "started", "?"))\n    config $(get(holder, "config", "?"))\n    $last_lines\n" *
++                      "This run stops here so as not to overwrite its files. Use a config with another experiment name, " *
++                      "or, if that run is certainly gone (e.g. its server rebooted), delete $lock and include again.")
++            end
++            @warn "Taking over the lock of $output_dir: $reason" holder
++            rm(lock; force = true)
++        end
++        error("Could not take the lock $lock")
++    finally
++        rm(mine; force = true)
++    end
++end
++
++"""
++    release_run_lock(output_dir)
++
++Remove the RUNNING lock if this Julia process holds it.
++"""
++function release_run_lock(output_dir)
++    holder = lock_holder(output_dir)
++    holder === nothing && return nothing
++    if get(holder, "host", "") == this_host() && get(holder, "pid", "") == string(getpid())
++        rm(run_lock_file(output_dir); force = true)
++    else
++        @warn "Not removing $(run_lock_file(output_dir)): another run holds it" holder
++    end
++    return nothing
++end
++
++#####
++##### status.txt
++#####
++
++function new_run_status(output_dir, experiment, config_file, config, start_date, end_date)
++    return (; file = run_status_file(output_dir), experiment, config_file = abspath(config_file), host = this_host(),
++            pid = getpid(), device = device_description(config), started = now(), start_date = DateTime(start_date),
++            run_days = Dates.value(DateTime(end_date) - DateTime(start_date)) / 86400e3,
++            rate_origin = Ref{Any}(nothing),   # (wall time, model day) of the first update with a model time
++            last_progress = Ref(""))
++end
++
++"""
++    write_run_status(status, state; model_time = nothing, iteration = nothing, detail = "", exception = nothing)
++
++Rewrite status.txt: `state` is "building", "running", "finished", "scorecard", "done", "failed" or "interrupted";
++`model_time` in seconds since the start date updates the progress line; `detail` goes after the state.
++"""
++function write_run_status(status, state; model_time = nothing, iteration = nothing, detail = "", exception = nothing)
++    if model_time !== nothing
++        model_day = model_time / 86400
++        if status.rate_origin[] === nothing
++            status.rate_origin[] = (wall = time(), model_day = model_day)
++        end
++        origin = status.rate_origin[]
++        date = status.start_date + Millisecond(round(Int, 1000 * model_time))
++        progress = @sprintf("day %.2f of %g (%s)", model_day, status.run_days, Dates.format(date, "yyyy-mm-dd HH:MM"))
++        iteration === nothing || (progress *= ", iteration $iteration")
++        if model_day > origin.model_day + 1e-3
++            rate = (time() - origin.wall) / 60 / (model_day - origin.model_day)   # wall minutes per model day
++            progress *= @sprintf(", %.1f min per model day", rate)
++            remaining = (status.run_days - model_day) * rate
++            remaining > 0 && (progress *= ", ends ~" * Dates.format(now() + Second(round(Int, 60 * remaining)), "yyyy-mm-dd HH:MM"))
++        end
++        status.last_progress[] = progress
++    end
++    state_line = "state: $state" * (isempty(detail) ? "" : " ($detail)")
++    if exception !== nothing
++        message = first(split(sprint(showerror, exception), '\n'))
++        state_line *= " - " * first(message, 300)   # the state stays the first word (status_state)
++    end
++    text = """
++    experiment: $(status.experiment)
++    config: $(status.config_file)
++    host: $(status.host), $(status.device), Julia process $(status.pid)
++    started: $(timestamp(status.started))
++    $state_line
++    progress: $(isempty(status.last_progress[]) ? "-" : status.last_progress[])
++    updated: $(timestamp(now()))
++    """
++    try   # written to a temporary file and renamed, so `tail` never sees half a file
++        temporary = status.file * ".tmp"
++        write(temporary, text)
++        mv(temporary, status.file; force = true)
++    catch err
++        @warn "Could not write $(status.file)" exception = err
++    end
++    return nothing
++end
++
++#####
++##### End of a run
++#####
++
++"""
++    finish_run(mod, status, config_file, output_dir; post_run_analysis = false)
++
++After `run!`: with `post_run_analysis`, clear the globals of `mod` (the model) and free the GPU memory, then write the
++scorecard (analysis/scorecard_functions.jl); then mark the run done and release the lock.
++"""
++function finish_run(mod, status, config_file, output_dir; post_run_analysis = false)
++    if post_run_analysis
++        clear_globals!(mod; keep = (:config, :config_file, :experiment, :output_dir, :figure_dir, :run_status))
++        free_gpu_memory!()
++        write_run_status(status, "scorecard"; detail = "model cleared from memory")
++        try
++            scorecard(config_file; on_step = step -> write_run_status(status, "scorecard"; detail = step))
++        catch err
++            @error "The scorecard stopped" exception = (err, catch_backtrace())
++        end
++    end
++    write_run_status(status, "done"; detail = post_run_analysis ? "scorecard.md in the output folder" : "")
++    release_run_lock(output_dir)
++    return nothing
++end
+diff --git a/setup.jl b/setup.jl
+index 7206344..37a8257 100644
+--- a/setup.jl
++++ b/setup.jl
+@@ -19,8 +19,8 @@ arch = config["architecture"] == "GPU" ? GPU() : CPU()
+ # spacing (at the pole; cells shrink ~15% toward the Atlantic edge).
+ 
+ Nz      = config["grid"]["Nz"]
+-depth   = config["grid"]["depth"] * meters
+-spacing = config["grid"]["spacing_km"] * kilometers
++depth   = config["grid"]["depth"] * Oceananigans.Units.meters
++spacing = config["grid"]["spacing_km"] * Oceananigans.Units.kilometers
+ z       = ExponentialDiscretization(Nz, -depth, 0; scale = depth/4, mutable = true)
+ 
+ x₁, x₂  = -3280e3, 3616e3   # west–east projected extent (m)
+@@ -81,8 +81,8 @@ start_date = DateTime(config["time"]["start_date"])
+ end_date   = DateTime(config["time"]["end_date"])
+ end_date > start_date || error("end_date ($end_date) must be after start_date ($start_date).")
+ 
+-seconds(Δ) = Dates.value(Millisecond(Δ)) / 1000
+-stop_time  = seconds(end_date - start_date)
++elapsed_seconds(Δ) = Dates.value(Millisecond(Δ)) / 1000   # not `seconds`: no globals named like units (workflow)
++stop_time  = elapsed_seconds(end_date - start_date)
+ 
+ # GLORYS daily means over the run and the region they are read from, for plotting/glorys_free_surface.jl.
+ dates   = floor(start_date, Day) : Day(1) : floor(end_date, Day)
+diff --git a/volume_control.jl b/volume_control.jl
+index 69d7097..652de6a 100644
+--- a/volume_control.jl
++++ b/volume_control.jl
+@@ -126,8 +126,8 @@ end
+ function add_glorys_volume_target!(simulation, net_inflow, child, parent_η, relaxation_time; tendency = false)
+     target = GLORYSVolumeTarget(net_inflow, child, parent_η, relaxation_time, tendency)
+     add_callback!(simulation, sim -> set_net_inflow!(sim, target), IterationInterval(1); name = :glorys_volume_target)
+-    add_callback!(simulation, sim -> log_volume_target(sim, target), TimeInterval(1hours); name = :volume_log)
++    add_callback!(simulation, sim -> log_volume_target(sim, target), TimeInterval(Oceananigans.Units.hour); name = :volume_log)
+     @info @sprintf("Net inflow follows GLORYS's domain-mean η (relaxation time %.1f days, tendency %s)",
+-                   relaxation_time / days, tendency)
++                   relaxation_time / Oceananigans.Units.days, tendency)
+     return target
+ end
+-- 
+2.43.0
+
