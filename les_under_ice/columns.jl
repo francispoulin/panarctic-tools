@@ -22,14 +22,15 @@ variants = Dict("stock"            => CATKEVerticalDiffusivity(),
                 "no_surface_shear" => CATKEVerticalDiffusivity(turbulent_kinetic_energy_equation = CATKEEquation(Cᵂu★ = 0.0)))
 spacings = (1, 4, 8)
 
-for (variant, closure) in sort(collect(variants); by = first), Δz in spacings
+# CATKE adds its TKE tracer e itself (tracers = :b only). In a function, so a REPL rerun has no soft-scope warnings.
+function run_column(case_name, case, variant, closure, Δz)
     grid = RectilinearGrid(CPU(); size = round(Int, domain_depth / Δz), z = (-domain_depth, 0),
                            topology = (Flat, Flat, Bounded))
     b_bcs = FieldBoundaryConditions(top = FluxBoundaryCondition(case.Jb),
                                     bottom = GradientBoundaryCondition(three_layer.N²_deep))
     u_bcs = FieldBoundaryConditions(top = FluxBoundaryCondition(case.τx))
     model = HydrostaticFreeSurfaceModel(grid; closure, coriolis = FPlane(f = case.f),
-                                        tracers = (:b, :e), buoyancy = BuoyancyTracer(),
+                                        tracers = :b, buoyancy = BuoyancyTracer(),
                                         boundary_conditions = (u = u_bcs, b = b_bcs))
     set!(model, b = three_layer_buoyancy, e = 1e-6)
     simulation = Simulation(model; Δt = 1minute, stop_time = case.stop_time)
@@ -40,4 +41,9 @@ for (variant, closure) in sort(collect(variants); by = first), Δz in spacings
                                                       schedule = TimeInterval(10minutes), overwrite_files = true)
     run!(simulation)
     @info "Column $case_name, $variant, Δz = $Δz m: $file"
+    return file
+end
+
+for (variant, closure) in sort(collect(variants); by = first), Δz in spacings
+    run_column(case_name, case, variant, closure, Δz)
 end
