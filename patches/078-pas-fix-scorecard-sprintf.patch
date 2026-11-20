@@ -1,0 +1,46 @@
+From bed9caf2196e3767ee197f9d6fb446ac965f3a4e Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 20 Nov 2026 08:43:03 -0500
+Subject: [PATCH] Scorecard: one literal format string per @sprintf (fixes the
+ LoadError of 077)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+fastest_point_summary passed "…" * "…" as the format of @sprintf, which needs a literal string, so including
+analysis/scorecard_functions.jl failed with "First argument to `@sprintf` must be a format string". Two @sprintf calls,
+joined after formatting.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Abhhvmoet3Py5umLctXSCh
+---
+ analysis/scorecard_functions.jl | 13 ++++++++-----
+ 1 file changed, 8 insertions(+), 5 deletions(-)
+
+diff --git a/analysis/scorecard_functions.jl b/analysis/scorecard_functions.jl
+index f1092a0..e4a0028 100644
+--- a/analysis/scorecard_functions.jl
++++ b/analysis/scorecard_functions.jl
+@@ -117,11 +117,14 @@ function fastest_point_summary(output_dir)
+     speed = max.(column("max_u"), column("max_v"))
+     n = argmax(speed)
+     sorted = sort(speed)
+-    return @sprintf("largest |u|, |v| %.2f m/s at day %.2f, (i, j, k) = (%d, %d, %d), %.1f°E %.1f°N, z = %.0f m; " *
+-                    "median of the hourly maxima %.2f m/s, 95th percentile %.2f m/s",
+-                    speed[n], column("hour")[n] / 24, round(Int, column("fastest_i")[n]), round(Int, column("fastest_j")[n]),
+-                    round(Int, column("fastest_k")[n]), column("fastest_longitude")[n], column("fastest_latitude")[n],
+-                    column("fastest_z")[n], sorted[cld(length(sorted), 2)], sorted[clamp(ceil(Int, 0.95 * length(sorted)), 1, length(sorted))])
++    # @sprintf needs one literal format string (not "…" * "…")
++    location = @sprintf("largest |u|, |v| %.2f m/s at day %.2f, (i, j, k) = (%d, %d, %d), %.1f°E %.1f°N, z = %.0f m",
++                        speed[n], column("hour")[n] / 24, round(Int, column("fastest_i")[n]), round(Int, column("fastest_j")[n]),
++                        round(Int, column("fastest_k")[n]), column("fastest_longitude")[n], column("fastest_latitude")[n],
++                        column("fastest_z")[n])
++    spread = @sprintf("median of the hourly maxima %.2f m/s, 95th percentile %.2f m/s",
++                      sorted[cld(length(sorted), 2)], sorted[clamp(ceil(Int, 0.95 * length(sorted)), 1, length(sorted))])
++    return location * "; " * spread
+ end
+ 
+ #####
+-- 
+2.43.0
+
