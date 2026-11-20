@@ -85,6 +85,7 @@ Numbered in the order to apply, across repositories. Each was checked to apply w
 | 078 | PanArcticShenanigans | `fjp/test-061` (fix, on top of 077) | after 077 | `analysis/scorecard_functions.jl`: one literal format string per `@sprintf` in `fastest_point_summary` (077 failed to load: "First argument to `@sprintf` must be a format string") |
 | 079 | PanArcticShenanigans | `fjp/test-061` (fix, on top of 078) | after 078 | `analysis/scorecard_functions.jl`: each fresh analysis module gets its own `include` and `eval` (Julia 1.13's `Module()` has neither: every step failed with "`include` not defined in Main.scorecard_…") |
 | 080 | PanArcticShenanigans | `fjp/test-061` (fix, on top of 079) | after 079 | `analysis/tsubouchi_comparison.jl`: #47's fix (2fec2f2, on main) on the test branch, which has the #46 version: `theirs()` takes the times but the calls passed three arguments (MethodError in the scorecard's Tsubouchi step). Note: `fjp/test-061` holds main's #46 version of this file, not 40f2e96's |
+| 081 | PanArcticShenanigans | `fjp/test-061` (diagnostic, on top of 080) | after 080 | `analysis/mixed_layer_depth.jl`: mixed-layer depth by region, model daily vs GLORYS daily T, S every 5 days on the model grid (Δσ = 0.03 kg/m³ below 10 m, TEOS-10); `mixing_timeseries.jl` without the t = 0 state and with one column per level interface; `salinity_drift.jl` adds ΔFW unclamped (check of the FWC clamp); scorecard: mixed-layer step, MLD and ΔFW unclamped in the headline |
 
 ## Applying 001–006
 

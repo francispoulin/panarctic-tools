@@ -1,0 +1,429 @@
+From f219d9ae1297d2b9778b7bf089918a1f48879806 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 20 Nov 2026 10:19:46 -0500
+Subject: [PATCH] Mixed-layer depth against GLORYS; mixing table and FWC-clamp
+ fixes; both in the scorecard
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- analysis/mixed_layer_depth.jl: mixed-layer depth by region through the run, model (daily) against GLORYS (daily T
+  and S every 5 days, regridded onto the model grid), both on the model's levels with the same criterion: below 10 m,
+  potential density (TEOS-10) above its 10 m value by 0.03 kg/m³ (de Boyer Montégut et al. 2004), interpolated
+  between cell centres. Writes mixed_layer_depth.md (mean and median, model / GLORYS, per third of the run on the
+  paired days), mixed_layer_depth_timeseries.png and mixed_layer_depth_maps.png. Is our convection too deep at
+  freeze-up?
+- analysis/mixing_timeseries.jl: the initial state (t = 0) is left out (it gave the "−1" day label); day labels are
+  the averaging windows; one column per level interface (5 and 10 m both gave 7.8 m at 50 levels; 5, 10 and 20 m
+  all gave 20.7 m at 20 levels).
+- analysis/salinity_drift.jl: ΔFW unclamped, the freshwater difference over every cell (saltier than 34.8 counting
+  negative, i.e. minus the change in salt content): if ΔFWC is negative where this is near zero (Nordic Seas, Barents),
+  the "loss" is the clamp max(34.8 − S, 0) meeting convection, not lost fresh water.
+- analysis/scorecard_functions.jl: the mixed-layer step, and MLD and ΔFW unclamped in the headline table.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Abhhvmoet3Py5umLctXSCh
+---
+ analysis/mixed_layer_depth.jl   | 233 ++++++++++++++++++++++++++++++++
+ analysis/mixing_timeseries.jl   |  27 ++--
+ analysis/salinity_drift.jl      |  17 ++-
+ analysis/scorecard_functions.jl |   8 +-
+ 4 files changed, 268 insertions(+), 17 deletions(-)
+ create mode 100644 analysis/mixed_layer_depth.jl
+
+diff --git a/analysis/mixed_layer_depth.jl b/analysis/mixed_layer_depth.jl
+new file mode 100644
+index 0000000..5709f01
+--- /dev/null
++++ b/analysis/mixed_layer_depth.jl
+@@ -0,0 +1,233 @@
++# Is the model's mixed layer deeper than GLORYS's, and when? Mixed-layer depth by region through the run, model against
++# GLORYS, both computed the same way from daily-mean T and S on the model grid (GLORYS regridded onto it, as in
++# salinity_drift.jl), so the comparison is not about vertical resolution (8 m top cell at 50 levels): the depth below
++# 10 m where the potential density (TEOS-10, at the surface) first exceeds its value at 10 m by Δσ = 0.03 kg/m³
++# (de Boyer Montégut et al. 2004), linearly interpolated between cell centres; a column that never reaches Δσ is mixed
++# to the bottom; columns shallower than 10 m are left out.
++#
++#   julia --project=. analysis/mixed_layer_depth.jl [config.toml] [every n days, default 5] [Δσ, default 0.03]
++#
++# Reads arctic_ocean.jld2 (daily T and S) from `output_dir`; downloads GLORYS's daily T and S every n days (north of
++# 43°N, ~0.5 GB per variable and day, once) and regrids them on the config's architecture. Writes mixed_layer_depth.md
++# (region means and medians, model / GLORYS, per third of the run, on the days GLORYS is read) to `output_dir`, and
++# mixed_layer_depth_timeseries.png (model daily, GLORYS every n days, by region) and mixed_layer_depth_maps.png (model,
++# GLORYS and model − GLORYS on the last day compared) to `figure_dir`.
++#
++# How to read it: a model mixed layer deeper than GLORYS's from the day the surface starts to cool (day ~9 in the Sep
++# 2005 runs) points to too much convective mixing at freeze-up (CATKE's convective surface flux, or too much surface heat
++# loss); one deeper all month, to shear (wind or ice stress).
++
++include("../config.jl")
++
++using NumericalEarth, Oceananigans, Oceananigans.Units
++using Oceananigans.Architectures: on_architecture
++using Oceananigans.Operators: Azᶜᶜᶜ
++using Oceananigans.OutputReaders: OnDisk
++using Oceananigans.BuoyancyFormulations: SeawaterPolynomials
++using NumericalEarth.DataWrangling: BoundingBox, Metadatum
++using CopernicusMarine   # enables the GLORYS download extension
++using CairoMakie, CUDA, Dates, Printf, Statistics
++
++arch       = config["architecture"] == "GPU" ? GPU() : CPU()
++start_date = DateTime(config["time"]["start_date"])
++end_date   = DateTime(config["time"]["end_date"])
++every      = length(ARGS) ≥ 2 ? parse(Int, ARGS[2]) : 5
++Δσ         = length(ARGS) ≥ 3 ? parse(Float64, ARGS[3]) : 0.03
++z_ref      = -10.0                                            # reference depth (m)
++window     = config["output"]["average_hours"] / 24           # days
++run_days   = Dates.value(end_date - start_date) / 86400e3
++eos        = SeawaterPolynomials.TEOS10.TEOS10EquationOfState()
++
++#####
++##### The model's output and its grid
++#####
++
++St = FieldTimeSeries(ocean_output_file, "S"; backend = OnDisk())
++Tt = FieldTimeSeries(ocean_output_file, "T"; backend = OnDisk())
++grid  = St.grid
++times = St.times ./ 86400              # days; each average is saved at the end of its window
++Nx, Ny, Nz = size(grid)
++
++ug  = grid.underlying_grid
++zf  = Float64.(collect(ug.z.cᵃᵃᶠ[1:Nz+1]))
++bottom_height = grid.immersed_boundary.bottom_height
++hb  = [Float64(bottom_height[i, j, 1]) for i in 1:Nx, j in 1:Ny]
++λ   = mod.(Array(λnodes(ug, Center(), Center(), Center())) .+ 180, 360) .- 180
++φ   = Array(φnodes(ug, Center(), Center(), Center()))
++A   = [Azᶜᶜᶜ(i, j, 1, ug) for i in 1:Nx, j in 1:Ny]
++H   = max.(-hb, 0)
++ocean = H .> 0
++
++# Middle of each cell's wet part (the partial bottom cell's too); NaN where the cell is dry
++zmid = [zf[k+1] > hb[i, j] ? (max(zf[k], hb[i, j]) + zf[k+1]) / 2 : NaN for i in 1:Nx, j in 1:Ny, k in 1:Nz]
++
++# Regions as in salinity_drift.jl
++regions = [("Beaufort Gyre",    (λ, φ, H) -> 70.5 ≤ φ ≤ 80.5 && -170 ≤ λ ≤ -130 && H > 300),
++           ("Central Arctic",   (λ, φ, H) -> φ > 82),
++           ("Siberian shelves", (λ, φ, H) -> 66 ≤ φ ≤ 82 && (λ ≥ 60 || λ ≤ -170) && H < 200),
++           ("Barents Sea",      (λ, φ, H) -> 68 ≤ φ ≤ 80 && 15 ≤ λ < 60),
++           ("Nordic Seas",      (λ, φ, H) -> 62 ≤ φ ≤ 79 && -20 ≤ λ < 15),
++           ("Archipelago",      (λ, φ, H) -> 68 ≤ φ ≤ 82 && -125 ≤ λ ≤ -80),
++           ("Baffin Bay",       (λ, φ, H) -> 67 ≤ φ ≤ 78 && -80 < λ ≤ -55)]
++masks = [[ocean[i, j] && test(λ[i, j], φ[i, j], H[i, j]) for i in 1:Nx, j in 1:Ny] for (_, test) in regions]
++
++#####
++##### Mixed-layer depth of a 3-D T, S (positive, m; NaN where undefined)
++#####
++
++function mixed_layer_depth(T, S, zmid, H, eos, Δσ, z_ref)
++    Nx, Ny, Nz = size(T)
++    mld = fill(NaN, Nx, Ny)
++    σ = zeros(Nz)
++    for j in 1:Ny, i in 1:Nx
++        (H[i, j] > -z_ref && isfinite(zmid[i, j, Nz])) || continue
++        for k in 1:Nz
++            σ[k] = isfinite(zmid[i, j, k]) ? SeawaterPolynomials.ρ′(T[i, j, k], S[i, j, k], 0.0, eos) : NaN
++        end
++        # σ at the reference depth, interpolated between the wet cell centres around it
++        σ_ref = NaN
++        if zmid[i, j, Nz] ≤ z_ref
++            σ_ref = σ[Nz]
++        else
++            for k in Nz-1:-1:1
++                z = zmid[i, j, k]
++                isfinite(z) || break
++                if z ≤ z_ref
++                    w = (z_ref - z) / (zmid[i, j, k+1] - z)
++                    σ_ref = (1 - w) * σ[k] + w * σ[k+1]
++                    break
++                end
++            end
++        end
++        isfinite(σ_ref) || continue
++        # Down from the reference depth to the first centre denser by more than Δσ
++        depth = H[i, j]   # mixed to the bottom unless the criterion is met
++        z_prev, σ_prev = z_ref, σ_ref
++        for k in Nz:-1:1
++            z = zmid[i, j, k]
++            isfinite(z) || break
++            z < z_ref || continue
++            if σ[k] - σ_ref > Δσ
++                w = (σ_ref + Δσ - σ_prev) / (σ[k] - σ_prev)
++                depth = -(z_prev + w * (z - z_prev))
++                break
++            end
++            z_prev, σ_prev = z, σ[k]
++        end
++        mld[i, j] = depth
++    end
++    return mld
++end
++
++function region_stats(mld, mask)
++    m = mask .& isfinite.(mld)
++    any(m) || return (mean = NaN, median = NaN)
++    return (mean = sum(mld[m] .* A[m]) / sum(A[m]), median = median(mld[m]))
++end
++
++#####
++##### Model: every daily average
++#####
++
++saved = findall(>(0), times)               # the initial state (t = 0) is not an average
++t_mid = times[saved] .- window / 2
++model_mld = Dict{Int, Matrix{Float64}}()   # by index n in the time series
++for n in saved
++    model_mld[n] = mixed_layer_depth(Float64.(interior(Tt[n])), Float64.(interior(St[n])), zmid, H, eos, Δσ, z_ref)
++end
++model_series = [[region_stats(model_mld[n], mask) for n in saved] for mask in masks]
++@info "Model: mixed-layer depth of $(length(saved)) daily averages"
++
++#####
++##### GLORYS every n days, on the model grid, paired with the model's average over the same day
++#####
++
++region = BoundingBox(longitude = (-180, 180), latitude = (43, 90))
++target = CenterField(on_architecture(arch, grid))
++function glorys_on_grid(name, date)
++    set!(target, Metadatum(name; dataset = GLORYSDaily(), date, region, dir_kw...))
++    return Float64.(Array(interior(target)))
++end
++
++paired_days = NamedTuple[]   # (day, model index, GLORYS mld)
++for d in 0:every:floor(Int, run_days - window)
++    n = findfirst(τ -> abs(τ - (d + window)) < 1e-3, times)   # the model's average over day d
++    n === nothing && continue
++    date = start_date + Day(d)
++    T = glorys_on_grid(:temperature, date)
++    S = glorys_on_grid(:salinity, date)
++    push!(paired_days, (day = d, n = n, glorys = mixed_layer_depth(T, S, zmid, H, eos, Δσ, z_ref)))
++    @info "GLORYS $(Dates.format(date, "yyyy-mm-dd")): mixed-layer depth on the model grid"
++end
++isempty(paired_days) && error("No model daily average matches a GLORYS day (average_hours = $(window * 24))")
++
++#####
++##### Table: region means and medians per third of the run, on the paired days
++#####
++
++thirds = [(0.0, run_days / 3), (run_days / 3, 2run_days / 3), (2run_days / 3, run_days + 1)]
++io = IOBuffer()
++println(io, "# Mixed-layer depth: $experiment ($(Date(start_date)) to $(Date(end_date)))\n")
++println(io, "Depth below 10 m where the potential density first exceeds its 10 m value by $(Δσ) kg/m³ (TEOS-10), model and ",
++            "GLORYS (daily means regridded onto the model grid), both on the model's levels. Means are area-weighted; ",
++            "medians over the region's columns. Model / GLORYS on the GLORYS days of each third of the run ",
++            "(every $every days from the start; day d is the daily mean of day d).\n")
++println(io, "| Region | Days | MLD mean, model / GLORYS (m) | MLD median, model / GLORYS (m) | Δ mean (m) |")
++println(io, "|---|---|---|---|---|")
++for (r, ((name, _), mask)) in enumerate(zip(regions, masks)), (a, b) in thirds
++    sel = [p for p in paired_days if a ≤ p.day < b]
++    isempty(sel) && continue
++    m = [region_stats(model_mld[p.n], mask) for p in sel]
++    g = [region_stats(p.glorys, mask) for p in sel]
++    mm, gm = mean(getfield.(m, :mean)), mean(getfield.(g, :mean))
++    md, gd = mean(getfield.(m, :median)), mean(getfield.(g, :median))
++    println(io, @sprintf("| %s | %s | %.0f / %.0f | %.0f / %.0f | %+.0f |", name,
++                         join(string.(getfield.(sel, :day)), ", "), mm, gm, md, gd, mm - gm))
++end
++println(io)
++text = String(take!(io))
++print(text)
++table_file = joinpath(output_dir, "mixed_layer_depth.md")
++write(table_file, text)
++@info "Wrote $table_file"
++
++#####
++##### Time series by region
++#####
++
++fig = Figure(size = (1400, 700))
++for (r, ((name, _), mask)) in enumerate(zip(regions, masks))
++    ax = Axis(fig[fldmod1(r, 4)...]; title = name, xlabel = "days since $(Date(start_date))", yreversed = true,
++              ylabel = mod1(r, 4) == 1 ? "mixed-layer depth (m)" : "")
++    lines!(ax, t_mid, getfield.(model_series[r], :mean); color = :red, label = "model, mean")
++    lines!(ax, t_mid, getfield.(model_series[r], :median); color = :red, linestyle = :dash, label = "model, median")
++    gd = [p.day + 0.5 for p in paired_days]
++    scatter!(ax, gd, [region_stats(p.glorys, mask).mean for p in paired_days]; color = :black, label = "GLORYS, mean")
++    scatter!(ax, gd, [region_stats(p.glorys, mask).median for p in paired_days]; color = :black, marker = :utriangle,
++             label = "GLORYS, median")
++    r == 1 && axislegend(ax; position = :lb, framevisible = false, labelsize = 10)
++end
++Label(fig[0, :], "$experiment: mixed-layer depth (Δσ = $Δσ kg/m³ from 10 m)"; fontsize = 18)
++file = joinpath(figure_dir, "mixed_layer_depth_timeseries.png")
++save(file, fig)
++@info "Wrote $file"
++
++#####
++##### Maps on the last day compared
++#####
++
++last_pair = paired_days[end]
++mm = ifelse.(ocean, model_mld[last_pair.n], NaN)
++gm = ifelse.(ocean, last_pair.glorys, NaN)
++fig = Figure(size = (1500, 520))
++for (col, (title, values, colormap, limits)) in enumerate((("model", mm, :deep, (0, 100)), ("GLORYS", gm, :deep, (0, 100)),
++                                                        ("model − GLORYS", mm .- gm, :balance, (-50, 50))))
++    ax = Axis(fig[1, 2col - 1]; title = "$title, day $(last_pair.day)", aspect = DataAspect(), xlabel = "i", ylabel = "j")
++    hm = heatmap!(ax, 1:Nx, 1:Ny, values; colormap, colorrange = limits, highclip = colormap == :deep ? :black : :darkred,
++                  lowclip = :navy, nan_color = :lightgray)
++    Colorbar(fig[1, 2col], hm; label = "m")
++end
++Label(fig[0, :], "$experiment: mixed-layer depth on $(Dates.format(start_date + Day(last_pair.day), "yyyy-mm-dd"))"; fontsize = 18)
++file = joinpath(figure_dir, "mixed_layer_depth_maps.png")
++save(file, fig)
++@info "Wrote $file"
+diff --git a/analysis/mixing_timeseries.jl b/analysis/mixing_timeseries.jl
+index 8789075..5713054 100644
+--- a/analysis/mixing_timeseries.jl
++++ b/analysis/mixing_timeseries.jl
+@@ -19,7 +19,9 @@ mixing_file = joinpath(output_dir, "arctic_mixing.jld2")
+ et = FieldTimeSeries(mixing_file, "e";  backend = OnDisk())
+ 
+ grid  = κt.grid
+-times = κt.times ./ 86400              # days
++times = κt.times ./ 86400              # days; each average is saved at the end of its window
++window = config["output"]["average_hours"] / 24
++saved  = findall(>(0), times)          # the initial state (t = 0) is not an average: left out (it gave a "−1" day label)
+ Nx, Ny, Nz = size(grid)
+ ug = grid.underlying_grid
+ levels = κt.indices[3]                  # the saved levels, k₀:Nz
+@@ -55,12 +57,12 @@ function region_profile(c, mask, z)
+     return profile
+ end
+ 
+-Nt = length(times)
++Nt = length(saved)
+ κ = [zeros(Nt, length(zᶠ)) for _ in regions]
+ e = [zeros(Nt, length(zᶜ)) for _ in regions]
+-for t in 1:Nt
+-    κn = interior(κt[t])
+-    en = interior(et[t])
++for (t, n) in enumerate(saved)
++    κn = interior(κt[n])
++    en = interior(et[n])
+     for (r, mask) in enumerate(masks)
+         κ[r][t, :] = region_profile(κn, mask, zᶠ)
+         e[r][t, :] = region_profile(en, mask, zᶜ)
+@@ -74,17 +76,20 @@ end
+ depths = filter(d -> d < -minimum(zᶠ), [5, 10, 20, 40])
+ thirds = [(1, Nt ÷ 3), (Nt ÷ 3 + 1, 2Nt ÷ 3), (2Nt ÷ 3 + 1, Nt)]
+ nearest(d) = argmin(abs.(zᶠ .+ d))
++interfaces = unique(nearest.(depths))   # one column per level interface (5 and 10 m both gave 7.8 m at 50 levels)
++t_saved = times[saved]
+ 
+ io = IOBuffer()
+ println(io, "# CATKE mixing: $experiment\n")
+ println(io, "Region-mean tracer diffusivity κᶜ (m²/s) from the daily averages, at the level interface nearest each depth, ",
+             "averaged over each third of the run (days).\n")
+-println(io, "| Region | Days | " * join(["κᶜ at $(round(-zᶠ[nearest(d)], digits = 1)) m" for d in depths], " | ") * " |")
+-println(io, "|---|---|" * repeat("---|", length(depths)))
++println(io, "| Region | Days | " * join(["κᶜ at $(round(-zᶠ[k], digits = 1)) m" for k in interfaces], " | ") * " |")
++println(io, "|---|---|" * repeat("---|", length(interfaces)))
+ for (r, (name, _)) in enumerate(regions), (t₁, t₂) in thirds
+-    values = [mean(filter(isfinite, κ[r][t₁:t₂, nearest(d)])) for d in depths]
+-    println(io, "| $name | $(round(Int, times[t₁] - 1))–$(round(Int, times[t₂])) | " *
+-                join([@sprintf("%.1e", v) for v in values], " | ") * " |")
++    t₂ ≥ t₁ || continue
++    κ_means = [mean(filter(isfinite, κ[r][t₁:t₂, k])) for k in interfaces]
++    println(io, "| $name | $(round(Int, t_saved[t₁] - window))–$(round(Int, t_saved[t₂])) | " *
++                join([@sprintf("%.1e", v) for v in κ_means], " | ") * " |")
+ end
+ table = String(take!(io))
+ print(table)
+@@ -102,7 +107,7 @@ for (r, (name, _)) in enumerate(regions)
+                                                       (e[r], zᶜ, "log₁₀ e (m²/s²)", (-7, -3))))
+         ax = Axis(fig[row, r]; title = row == 1 ? name : "", xlabel = row == 2 ? "days" : "",
+                   ylabel = r == 1 ? "z (m)" : "")
+-        hm = heatmap!(ax, times, z, log10.(max.(field, 1e-12)); colorrange = limits, colormap = :viridis)
++        hm = heatmap!(ax, t_saved .- window / 2, z, log10.(max.(field, 1e-12)); colorrange = limits, colormap = :viridis)
+         r == length(regions) && Colorbar(fig[row, length(regions) + 1], hm; label)
+     end
+ end
+diff --git a/analysis/salinity_drift.jl b/analysis/salinity_drift.jl
+index 8876fb2..9a943e8 100644
+--- a/analysis/salinity_drift.jl
++++ b/analysis/salinity_drift.jl
+@@ -69,6 +69,10 @@ h200 = [overlap(zf[k], zf[k+1], max(hb[i, j], -200.0), 0.0) for i in 1:Nx, j in
+ top200(c) = (num = dropdims(sum(c .* h200, dims = 3), dims = 3); den = dropdims(sum(h200, dims = 3), dims = 3);
+              ifelse.(den .> 0, num ./ den, NaN))
+ column_fwc(S) = A .* dropdims(sum(h .* max.(S_ref .- S, 0), dims = 3), dims = 3) ./ S_ref
++# The same without the clamp at S_ref (every cell, saltier ones counting negative): a change in it is a change in the
++# column's salt content. Where ΔFWC is negative but this is near zero, fresh water was mixed down into water saltier
++# than S_ref (convection in the Nordic Seas), not lost: the clamp, not the model.
++column_fw_unclamped(S) = A .* dropdims(sum(h .* (S_ref .- S), dims = 3), dims = 3) ./ S_ref
+ surface(c) = ifelse.(ocean, c[:, :, Nz], NaN)
+ 
+ # Regions (longitude −180 to 180)
+@@ -154,16 +158,19 @@ io = IOBuffer()
+ println(io, "# Salinity and temperature drift: $experiment ($(Date(start_date)) to $(Date(end_date)))\n")
+ println(io, "Model (monthly means of the daily output) against GLORYS (monthly means, GLORYSMonthly), both on the model grid. ",
+             "\"start\": the model's initial state against GLORYS's daily mean of the first day. Top 200 m: thickness-weighted ",
+-            "mean over the top 200 m (or the whole column where shallower). Freshwater content relative to $S_ref, in km³.\n")
+-println(io, "| Region | Definition | When | ΔS surface | ΔS top 200 m | ΔT top 200 m (°C) | FWC model | FWC GLORYS | ΔFWC |")
+-println(io, "|---|---|---|---|---|---|---|---|---|")
++            "mean over the top 200 m (or the whole column where shallower). Freshwater content relative to $S_ref, in km³, over ",
++            "the cells fresher than $S_ref (FWC) and, as a check on that clamp, over every cell, saltier ones counting ",
++            "negative (ΔFW unclamped: minus the change in salt content, full depth).\n")
++println(io, "| Region | Definition | When | ΔS surface | ΔS top 200 m | ΔT top 200 m (°C) | FWC model | FWC GLORYS | ΔFWC | ΔFW unclamped |")
++println(io, "|---|---|---|---|---|---|---|---|---|---|")
+ for ((name, definition, _), mask) in zip(regions, masks), (label, Sm, Sg, Tm, Tg, _) in snapshots
+     dSs = region_mean(surface(Sm) .- surface(Sg), mask)
+     dS  = region_mean(top200(Sm) .- top200(Sg), mask)
+     dT  = region_mean(top200(Tm) .- top200(Tg), mask)
+     Fm, Fg = region_fwc(column_fwc(Sm), mask), region_fwc(column_fwc(Sg), mask)
+-    println(io, @sprintf("| %s | %s | %s | %+.3f | %+.3f | %+.2f | %.0f | %.0f | %+.0f |",
+-                         name, definition, label, dSs, dS, dT, Fm, Fg, Fm - Fg))
++    dU  = region_fwc(column_fw_unclamped(Sm), mask) - region_fwc(column_fw_unclamped(Sg), mask)
++    println(io, @sprintf("| %s | %s | %s | %+.3f | %+.3f | %+.2f | %.0f | %.0f | %+.0f | %+.0f |",
++                         name, definition, label, dSs, dS, dT, Fm, Fg, Fm - Fg, dU))
+ end
+ println(io)
+ 
+diff --git a/analysis/scorecard_functions.jl b/analysis/scorecard_functions.jl
+index 7bf02dd..0313fdb 100644
+--- a/analysis/scorecard_functions.jl
++++ b/analysis/scorecard_functions.jl
+@@ -15,6 +15,7 @@
+ # What runs (in this order), and when:
+ #   salinity drift   analysis/salinity_drift.jl        arctic_ocean.jld2 present            (GLORYS monthly, GPU regridding)
+ #   sea ice          analysis/sea_ice_comparison.jl    arctic_sea_ice.jld2 present          (GLORYS daily, every 3 days)
++#   mixed layer      analysis/mixed_layer_depth.jl     arctic_ocean.jld2 present            (GLORYS daily T, S every 5 days)
+ #   mixing           analysis/mixing_timeseries.jl     arctic_mixing.jld2 present ([output] mixing_depth)
+ #   fastest point    plotting/max_speed.jl             monitor.csv present ([output] monitor_hours)
+ #   GLORYS transports analysis/glorys_transports.jl    for the Tsubouchi comparison, if glorys_transports.jld2 is missing
+@@ -165,6 +166,8 @@ function scorecard(config_file::AbstractString; on_step = step -> nothing)
+              ("sea ice", "analysis/sea_ice_comparison.jl",
+               has("arctic_sea_ice.jld2") && has("arctic_ocean.jld2") ? nothing : "no arctic_sea_ice.jld2 or arctic_ocean.jld2",
+               "sea_ice_comparison.md"),
++             ("mixed layer", "analysis/mixed_layer_depth.jl",
++              has("arctic_ocean.jld2") ? nothing : "no arctic_ocean.jld2", "mixed_layer_depth.md"),
+              ("mixing", "analysis/mixing_timeseries.jl",
+               has("arctic_mixing.jld2") ? nothing : "no arctic_mixing.jld2 ([output] mixing_depth = 0)", "mixing_timeseries.md"),
+              ("fastest point", "plotting/max_speed.jl",
+@@ -204,6 +207,7 @@ function scorecard(config_file::AbstractString; on_step = step -> nothing)
+     salinity = tables("salinity_drift.md")
+     ice      = tables("sea_ice_comparison.md")
+     mixing   = tables("mixing_timeseries.md")
++    mld      = tables("mixed_layer_depth.md")
+ 
+     io = IOBuffer()
+     println(io, "# Scorecard: $experiment\n")
+@@ -239,7 +243,8 @@ function scorecard(config_file::AbstractString; on_step = step -> nothing)
+         end
+     end
+     gather!(salinity, [("ΔS surface", "ΔS surface"), ("ΔS top 200", "ΔS top 200 m"), ("ΔT top 200", "ΔT top 200 m (°C)"),
+-                       ("ΔFWC", "ΔFWC (km³)")], "salinity", "When")
++                       ("ΔFWC", "ΔFWC (km³)"), ("ΔFW unclamped", "ΔFW unclamped (km³)")], "salinity", "When")
++    gather!(mld, [("MLD mean", "MLD, model / GLORYS (m)")], "mixed layer", "Days")
+     gather!(ice, [("Area", "Ice area (10⁶ km²)"), ("Volume", "Ice volume (10³ km³)"),
+                   ("95 % speed", "Ice speed p95 (m/s)")], "sea ice", "When")
+     if !isempty(mixing)   # κᶜ at the level interfaces of the table nearest 10 and 20 m
+@@ -260,6 +265,7 @@ function scorecard(config_file::AbstractString; on_step = step -> nothing)
+ 
+     # The end-of-run rows of each analysis
+     for (title, found, file, drop) in (("Salinity and temperature drift", salinity, "salinity_drift.md", "Definition"),
++                                       ("Mixed-layer depth", mld, "mixed_layer_depth.md", nothing),
+                                        ("Sea ice", ice, "sea_ice_comparison.md", nothing),
+                                        ("CATKE mixing", mixing, "mixing_timeseries.md", nothing))
+         isempty(found) && continue
+-- 
+2.43.0
+
