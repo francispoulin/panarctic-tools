@@ -10,6 +10,9 @@ columns with CATKE variants at 1, 4 and 8 m, with the same forcing and initial s
 - `les.jl <case> [small|fine]`: the LES (GPU), 256 m deep. Default 512 × 512 m at 2 m (the calibration extent);
   `small` = 256 × 256 m at 2 m; `fine` = 256 × 256 m at 1 m.
 - `columns.jl <case>`: CATKE columns (CPU, a minute or two): stock, and without the shear-driven surface TKE flux.
+- `compare_lesbrary.jl <their case> [hours]`: step 1, our LES and columns against the calibration LES (LESbrary
+  profiles at 1, 2, 4 m from glwagner/SingleColumnModelCalibration.jl, downloaded to `data/profiles/`; see the README
+  there for the Dropbox link). Their `strong_wind` has Stokes drift: compared with our `strong_wind_stokes`.
 - `compare.jl <case> [small|fine]`: profiles at 6, 12, 24 h and a table of errors (`output/<case>_comparison.md`, `.png`).
 
 Run in a REPL from the PanArcticShenanigans clone's environment (same Oceananigans as the model):
