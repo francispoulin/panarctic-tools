@@ -4,8 +4,8 @@
 #   stock            CATKE as calibrated (surface TKE flux Cᵂu★ u★³ + CᵂwΔ (wΔ)³)
 #   no_surface_shear Cᵂu★ = 0: no shear-driven (wave-like) surface TKE flux; the convective one is kept
 #   rigid_wall       Cᵂu★ = 0 and Cˢ = 0.967 (von Kármán constant 0.4, as at the bottom): CATKE for a wall without waves
-#   k_epsilon        Oceananigans' two-equation k-ε closure (TKEDissipationVerticalDiffusivity, also calibrated by
-#                    Wagner et al. against LESbrary): a second, independent model
+#   k_epsilon        Oceananigans' two-equation k-ε closure (TKEDissipationVerticalDiffusivity, default constants;
+#                    whether they come from a calibration against LESbrary is not known here): an independent model
 # Writes b, u, v, e and κᶜ every 10 minutes to output/<case>_column_<variant>_dz<Δz>.jld2. Fast on a CPU:
 #
 #     empty!(ARGS); push!(ARGS, "free_convection")

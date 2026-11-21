@@ -1,8 +1,9 @@
 # Cases for the LES-vs-single-column comparison (claude/catke-les-plan.md). Included by les.jl, columns.jl, compare.jl.
 #
-# Step 0 (this file, for now): CATKE's own calibration regime, to check the pipeline before adding ice. Two cases of
-# the 24-hour suite of LESbrary.jl (src/IdealizedExperiments/IdealizedExperiments.jl), used by Wagner et al. (arXiv
-# 2306.13204) to calibrate CATKE, with LESbrary's "three-layer" initial stratification and a buoyancy tracer:
+# Steps 0–2: CATKE's own calibration regime, before adding ice. The 24-hour suite of LESbrary.jl
+# (src/IdealizedExperiments/IdealizedExperiments.jl), used by Wagner et al. (arXiv 2306.13204) to calibrate CATKE, with
+# LESbrary's "three-layer" initial stratification and a buoyancy tracer (rotating cases only; free_convection has no
+# wind, so no waves), e.g.:
 #   free_convection     surface buoyancy loss 2.4e-7 m² s⁻³, no wind
 #   strong_wind         wind stress 6.8e-4 m² s⁻² (u★ ≈ 0.026 m/s), no buoyancy flux, no waves
 #   strong_wind_stokes  the same with the calibration's broadband surface-wave Stokes drift (Langmuir turbulence);
@@ -12,7 +13,9 @@
 #
 # Stage 1 (sea ice, GLORYS profile, TEOS-10, ice–ocean drag) will be added here after step 0 checks out.
 
-using Oceananigans.Units
+using Oceananigans, Oceananigans.Units
+using Oceananigans.OutputReaders: FieldTimeSeries
+using JLD2
 
 three_layer = (; surface_layer_depth = 48.0, thermocline_width = 24.0,
                  N²_surface = 2e-6, N²_thermocline = 1e-5, N²_deep = 2e-6)
@@ -24,10 +27,21 @@ function three_layer_buoyancy(z; p = three_layer)
     return -p.N²_surface * h - p.N²_thermocline * w + p.N²_deep * (z + h + w)
 end
 
-cases = Dict(
-    "free_convection"    => (; τx = 0.0,     Jb = 2.4e-7, f = 1e-4, stop_time = 24hours, stokes = false),
-    "strong_wind"        => (; τx = -6.8e-4, Jb = 0.0,    f = 1e-4, stop_time = 24hours, stokes = false),
-    "strong_wind_stokes" => (; τx = -6.8e-4, Jb = 0.0,    f = 1e-4, stop_time = 24hours, stokes = true))
+# LESbrary's 24-hour suite (IdealizedExperiments.jl), each without waves (the situation under ice) and with the
+# calibration's broadband Stokes drift (suffix _stokes; this is LESbrary's own case, compared in compare_lesbrary.jl).
+# Jb > 0: buoyancy loss (cooling); τx < 0: wind towards +x. All f = 1e-4 s⁻¹, 24 hours.
+twenty_four_hour_suite = Dict(
+    "free_convection"          => (τx = 0.0,     Jb = 2.4e-7),
+    "weak_wind_strong_cooling" => (τx = -3.0e-4, Jb = 2.0e-7),
+    "med_wind_med_cooling"     => (τx = -4.5e-4, Jb = 1.6e-7),
+    "strong_wind_weak_cooling" => (τx = -5.9e-4, Jb = 1.0e-7),
+    "strong_wind"              => (τx = -6.8e-4, Jb = 0.0))
+
+cases = Dict{String, NamedTuple}()
+for (name, forcing) in twenty_four_hour_suite
+    cases[name] = (; forcing..., f = 1e-4, stop_time = 24hours, stokes = false)
+    forcing.τx == 0 || (cases[name * "_stokes"] = (; forcing..., f = 1e-4, stop_time = 24hours, stokes = true))
+end
 
 # Broadband Stokes drift of the calibration LES (LESbrary.jl's ConstantFluxStokesDrift: the Lenain and Pizzo 2020
 # spectrum for wind seas in equilibrium with a constant wind stress, peak wavenumber kᵖ = 1e-6 g / |τ|). Step 1 (21 Nov)
@@ -66,3 +80,14 @@ function case_parameters(name)
 end
 
 output_folder() = mkpath(joinpath(@__DIR__, "output"))
+
+# Profiles of a column file, either Oceananigans output (columns.jl) or a NEMO TKE column (nemo_tke.jl): centres zc
+# and faces zf (ascending), times t, and b, u, v as vectors of profiles
+function column_profiles(file)
+    is_nemo = jldopen(f -> haskey(f, "nemo_tke"), file)
+    is_nemo && return jldopen(f -> (; zc = f["zc"], zf = f["zf"], t = f["t"], b = f["b"], u = f["u"], v = f["v"]), file)
+    B, U, V = FieldTimeSeries(file, "b"), FieldTimeSeries(file, "u"), FieldTimeSeries(file, "v")
+    profiles(fts) = [vec(Array(interior(fts[n], 1, 1, :))) for n in eachindex(fts.times)]
+    return (; zc = collect(znodes(B.grid, Center())), zf = collect(znodes(B.grid, Face())), t = B.times,
+              b = profiles(B), u = profiles(U), v = profiles(V))
+end

@@ -24,8 +24,8 @@ include(joinpath(@__DIR__, "cases.jl"))
 
 their_case = isempty(ARGS) ? "strong_wind" : ARGS[1]
 suite_hours = length(ARGS) ≥ 2 ? parse(Int, ARGS[2]) : 24
-our_les_case = Dict("strong_wind" => "strong_wind_stokes", "free_convection" => "free_convection")
-our_case   = get(our_les_case, their_case, their_case)
+# LESbrary's wind cases have Stokes drift: compared with our <case>_stokes
+our_case   = haskey(cases, their_case * "_stokes") ? their_case * "_stokes" : their_case
 folder     = output_folder()
 profiles   = joinpath(@__DIR__, "data", "profiles", "$(suite_hours)_hour_suite")
 
@@ -108,7 +108,8 @@ ours = Dict{String, Any}()
 les_file = joinpath(folder, our_case * "_les.jld2")
 isfile(les_file) && (ours["our LES (2 m)"] = read_ours(les_file))
 for name in sort(filter(n -> startswith(n, our_case * "_column_") && endswith(n, ".jld2"), readdir(folder)))
-    ours["CATKE " * replace(name, our_case * "_column_" => "", ".jld2" => "")] = read_ours(joinpath(folder, name))
+    label = replace(name, our_case * "_column_" => "", ".jld2" => "")
+    ours[(startswith(label, "nemo") ? "" : "CATKE ") * label] = column_profiles(joinpath(folder, name))
 end
 
 #####

@@ -67,20 +67,18 @@ rows = String[]
 colors = Makie.wong_colors()
 for (c, name) in enumerate(column_files)
     label = replace(name, case_name * "_column_" => "", ".jld2" => "")
-    B = FieldTimeSeries(joinpath(folder, name), "b")
-    U = FieldTimeSeries(joinpath(folder, name), "u")
-    zc = collect(znodes(B.grid, Center()))
-    zᶠ = collect(znodes(B.grid, Face()))
-    style = occursin("no_surface_shear", label) ? :dash : :solid
+    col = column_profiles(joinpath(folder, name))
+    zc, zᶠ = col.zc, col.zf
+    style = occursin("nemo", label) ? :dashdot : occursin("no_surface_shear", label) ? :dash : :solid
     for (i, t) in enumerate(times)
-        n = time_index(B, t)
-        lines!(axes_b[i], profile(B, n), zc; color = colors[mod1(c, 7)], linestyle = style, label)
-        lines!(axes_u[i], profile(U, n), zc; color = colors[mod1(c, 7)], linestyle = style, label)
+        n = argmin(abs.(col.t .- t))
+        lines!(axes_b[i], col.b[n], zc; color = colors[mod1(c, 7)], linestyle = style, label)
+        lines!(axes_u[i], col.u[n], zc; color = colors[mod1(c, 7)], linestyle = style, label)
     end
     # Errors at the end of the run, over the top 160 m
-    n_col, n_les = length(B.times), time_index(B_les, B.times[end])
+    n_col, n_les = length(col.t), time_index(B_les, col.t[end])
     b_les = coarse_grain(profile(B_les, n_les), z_les, zᶠ)
-    b_col = profile(B, n_col)
+    b_col = col.b[n_col]
     b_ini = three_layer_buoyancy.(zc)
     top = zc .> -160
     err = sqrt(sum(abs2, (b_col .- b_les)[top]) / sum(abs2, (b_les .- b_ini)[top]))
@@ -88,7 +86,7 @@ for (c, name) in enumerate(column_files)
     push!(rows, @sprintf("| %s | %.0f %% | %.1f | %.1f | %+.1f |", label, 100err, h_col, h_les, h_col - h_les))
 end
 axislegend(axes_b[1]; position = :rb, labelsize = 9)
-Label(fig[0, :], "$case_name: CATKE single columns against the LES"; fontsize = 18)
+Label(fig[0, :], "$case_name: single columns against the LES"; fontsize = 18)
 figure_file = joinpath(folder, case_name * "_comparison.png")
 save(figure_file, fig)
 
