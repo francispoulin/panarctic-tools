@@ -9,7 +9,9 @@ columns with CATKE variants at 1, 4 and 8 m, with the same forcing and initial s
   TEOS-10, quadratic ice–ocean drag) follows once step 0 checks out.
 - `les.jl <case> [small|fine]`: the LES (GPU), 256 m deep. Default 512 × 512 m at 2 m (the calibration extent);
   `small` = 256 × 256 m at 2 m; `fine` = 256 × 256 m at 1 m.
-- `columns.jl <case>`: CATKE columns (CPU, a minute or two): stock, and without the shear-driven surface TKE flux.
+- `columns.jl <case>`: CATKE columns (CPU, a minute or two): stock; without the shear-driven surface TKE flux
+  (Cᵂu★ = 0); rigid wall (Cᵂu★ = 0 and Cˢ = 0.967, von Kármán constant 0.4 instead of the wave-influenced 0.47).
+- `scan.jl <case> [Δz]`: step 2, a scan of Cˢ × Cᵂu★ in columns against our LES (default strong_wind, no waves).
 - `compare_lesbrary.jl <their case> [hours]`: step 1, our LES and columns against the calibration LES (LESbrary
   profiles at 1, 2, 4 m from glwagner/SingleColumnModelCalibration.jl, downloaded to `data/profiles/`; see the README
   there for the Dropbox link). Their `strong_wind` has Stokes drift: compared with our `strong_wind_stokes`.

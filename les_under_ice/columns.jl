@@ -3,6 +3,7 @@
 # model's top cell at 50 levels). CATKE variants:
 #   stock            CATKE as calibrated (surface TKE flux Cᵂu★ u★³ + CᵂwΔ (wΔ)³)
 #   no_surface_shear Cᵂu★ = 0: no shear-driven (wave-like) surface TKE flux; the convective one is kept
+#   rigid_wall       Cᵂu★ = 0 and Cˢ = 0.967 (von Kármán constant 0.4, as at the bottom): CATKE for a wall without waves
 # Writes b, u, v, e and κᶜ every 10 minutes to output/<case>_column_<variant>_dz<Δz>.jld2. Fast on a CPU:
 #
 #     empty!(ARGS); push!(ARGS, "free_convection")
@@ -10,7 +11,7 @@
 
 using Oceananigans, Oceananigans.Units
 using Oceananigans.TurbulenceClosures: CATKEVerticalDiffusivity
-using Oceananigans.TurbulenceClosures.TKEBasedVerticalDiffusivities: CATKEEquation
+using Oceananigans.TurbulenceClosures.TKEBasedVerticalDiffusivities: CATKEEquation, CATKEMixingLength
 using JLD2, Printf
 
 include(joinpath(@__DIR__, "cases.jl"))
@@ -18,8 +19,14 @@ include(joinpath(@__DIR__, "cases.jl"))
 case_name = isempty(ARGS) ? "free_convection" : ARGS[1]
 case      = case_parameters(case_name)
 
+# rigid_wall: CATKE's surface mixing-length coefficient Cˢ = 1.131 corresponds to a von Kármán constant κ = 0.47,
+# larger than a rigid wall's 0.4 "because the large eddy simulations used to calibrate CATKE include surface wave
+# effects" (Oceananigans, catke_mixing_length.jl); its bottom coefficient Cᵇ = 0.967 gives κ = 0.4. Under ice (a rigid
+# wall, no waves): Cˢ = Cᵇ = 0.967 and no shear-driven surface TKE flux.
 variants = Dict("stock"            => CATKEVerticalDiffusivity(),
-                "no_surface_shear" => CATKEVerticalDiffusivity(turbulent_kinetic_energy_equation = CATKEEquation(Cᵂu★ = 0.0)))
+                "no_surface_shear" => CATKEVerticalDiffusivity(turbulent_kinetic_energy_equation = CATKEEquation(Cᵂu★ = 0.0)),
+                "rigid_wall"       => CATKEVerticalDiffusivity(mixing_length = CATKEMixingLength(Cˢ = 0.967),
+                                                               turbulent_kinetic_energy_equation = CATKEEquation(Cᵂu★ = 0.0)))
 spacings = (1, 4, 8)
 
 # CATKE adds its TKE tracer e itself (tracers = :b only). In a function, so a REPL rerun has no soft-scope warnings.

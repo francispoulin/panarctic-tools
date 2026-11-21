@@ -42,13 +42,14 @@ mask     = GaussianMask{:z}(center = -Lz, width = Lz / 10)
 sponge   = Relaxation(rate = 4 / hour, mask = mask)
 b_sponge = Relaxation(rate = 4 / hour, mask = mask, target = b_target)
 
-# Stokes drift shear, with its constants as parameters (no globals in GPU kernels; safe to rerun in a REPL)
-@inline monochromatic_stokes_shear(z, t, p) = 2 * p.k * p.uˢ₀ * exp(2 * p.k * z)
+# Broadband Stokes drift (cases.jl), its constants as parameters (no globals in GPU kernels; safe to rerun in a REPL)
 stokes_drift = nothing
 if case.stokes
-    stokes = (uˢ₀ = stokes_surface_velocity(case.τx), k = stokes_wavenumber)
-    stokes_drift = UniformStokesDrift(∂z_uˢ = monochromatic_stokes_shear, parameters = stokes)
-    @info @sprintf("Stokes drift: uˢ₀ = %.3f m/s, decay scale %.1f m (La_t = 0.3)", stokes.uˢ₀, 1 / 2stokes.k)
+    stokes = broadband_stokes_parameters(case.τx)
+    stokes_drift = UniformStokesDrift(∂z_uˢ = broadband_stokes_shear, parameters = stokes)
+    @info @sprintf("Broadband Stokes drift: peak wavelength %.0f m, ∂z uˢ at 1, 10, 30 m: %.2e, %.2e, %.2e s⁻¹",
+                   2π / stokes.kᵖ, broadband_stokes_shear(-1.0, 0, stokes), broadband_stokes_shear(-10.0, 0, stokes),
+                   broadband_stokes_shear(-30.0, 0, stokes))
 end
 
 model = NonhydrostaticModel(grid; coriolis = FPlane(f = case.f),
