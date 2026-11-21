@@ -6,7 +6,11 @@
 # (columns.jl). Writes a table of boundary-layer depths and b errors against their 1 m LES to
 # output/lesbrary_<case>.md and the figure to output/lesbrary_<case>.png. In a REPL (CPU is enough):
 #
-#     empty!(ARGS); push!(ARGS, "strong_wind")                 # or "free_convection"
+#     empty!(ARGS); push!(ARGS, "strong_wind")                 # or "free_convection"; a second argument: the suite
+#                                                              # length in hours (default 24)
+#
+# The case names are matched exactly (<case>_with_tracer_instantaneous_statistics.jld2); the suite's cases are listed.
+# No global named like a unit (a global `hours` here replaced Oceananigans' `hours` in the REPL on 20 Nov).
 #     include("/mnt/autofs/bow.math/scratch/fpoulin/software/panarctic-tools/les_under_ice/compare_lesbrary.jl")
 #
 # Their files are read from the raw JLD2 contents (timeseries/<field>/<iteration>, grid/...), not through
@@ -19,11 +23,11 @@ using CairoMakie, JLD2, Printf, Statistics
 include(joinpath(@__DIR__, "cases.jl"))
 
 their_case = isempty(ARGS) ? "strong_wind" : ARGS[1]
-hours      = length(ARGS) ≥ 2 ? parse(Int, ARGS[2]) : 24
+suite_hours = length(ARGS) ≥ 2 ? parse(Int, ARGS[2]) : 24
 our_les_case = Dict("strong_wind" => "strong_wind_stokes", "free_convection" => "free_convection")
 our_case   = get(our_les_case, their_case, their_case)
 folder     = output_folder()
-profiles   = joinpath(@__DIR__, "data", "profiles", "$(hours)_hour_suite")
+profiles   = joinpath(@__DIR__, "data", "profiles", "$(suite_hours)_hour_suite")
 
 #####
 ##### Their LES, from the raw JLD2
@@ -55,14 +59,20 @@ function read_lesbrary(file)
     end
 end
 
+suite_case(name) = replace(name, r"(_with_tracer)?(_instantaneous)?_statistics\.jld2$" => "")
+
+# Exactly this case (20 Nov: "strong_wind" matched strong_wind_and_sunny first)
 function their_file(resolution)
     dir = joinpath(profiles, resolution)
     isdir(dir) || return nothing
-    matches = filter(n -> startswith(n, their_case * "_") && endswith(n, "statistics.jld2"), readdir(dir))
-    preferred = filter(n -> occursin("with_tracer_instantaneous", n), matches)
-    name = isempty(preferred) ? (isempty(matches) ? nothing : first(matches)) : first(preferred)
-    return name === nothing ? nothing : joinpath(dir, name)
+    for name in (their_case * "_with_tracer_instantaneous_statistics.jld2", their_case * "_instantaneous_statistics.jld2")
+        isfile(joinpath(dir, name)) && return joinpath(dir, name)
+    end
+    return nothing
 end
+
+println("Cases in the $(suite_hours)-hour suite (1m): ",
+        join(sort(unique(suite_case.(filter(n -> endswith(n, ".jld2"), readdir(joinpath(profiles, "1m")))))), ", "))
 
 theirs = Dict{String, Any}()
 for resolution in ("1m", "2m", "4m")
@@ -73,7 +83,7 @@ end
 haskey(theirs, "1m") || error("No $their_case profile at 1m in $profiles")
 reference = theirs["1m"]
 
-println("Their $their_case ($(hours) h suite) parameters:")
+println("Their $their_case ($(suite_hours) h suite) parameters:")
 for k in sort(collect(keys(reference.parameters)))
     v = reference.parameters[k]
     v isa Union{Number, AbstractString} && println("  $k = $v")
@@ -88,18 +98,17 @@ case === nothing || println("Our $our_case: τx = $(case.τx), Jb = $(case.Jb), 
 profile(fts, n) = vec(Array(interior(fts[n], 1, 1, :)))
 nearest(times, t) = argmin(abs.(times .- t))
 
+function read_ours(file)
+    B, U = FieldTimeSeries(file, "b"), FieldTimeSeries(file, "u")
+    return (; zc = collect(znodes(B.grid, Center())), t = B.times,
+              b = [profile(B, n) for n in eachindex(B.times)], u = [profile(U, n) for n in eachindex(U.times)])
+end
+
 ours = Dict{String, Any}()
 les_file = joinpath(folder, our_case * "_les.jld2")
-if isfile(les_file)
-    B, U = FieldTimeSeries(les_file, "b"), FieldTimeSeries(les_file, "u")
-    ours["our LES (2 m)"] = (; zc = collect(znodes(B.grid, Center())), t = B.times,
-                              b = [profile(B, n) for n in eachindex(B.times)], u = [profile(U, n) for n in eachindex(U.times)])
-end
+isfile(les_file) && (ours["our LES (2 m)"] = read_ours(les_file))
 for name in sort(filter(n -> startswith(n, our_case * "_column_") && endswith(n, ".jld2"), readdir(folder)))
-    B, U = FieldTimeSeries(joinpath(folder, name), "b"), FieldTimeSeries(joinpath(folder, name), "u")
-    label = "CATKE " * replace(name, our_case * "_column_" => "", ".jld2" => "")
-    ours[label] = (; zc = collect(znodes(B.grid, Center())), t = B.times,
-                     b = [profile(B, n) for n in eachindex(B.times)], u = [profile(U, n) for n in eachindex(U.times)])
+    ours["CATKE " * replace(name, our_case * "_column_" => "", ".jld2" => "")] = read_ours(joinpath(folder, name))
 end
 
 #####
@@ -125,7 +134,7 @@ function interpolate(values, z_from, z_to)
     end
 end
 
-t_end = min(hours * hour, reference.t[end])
+t_end = min(suite_hours * Oceananigans.Units.hour, reference.t[end])
 n_ref = nearest(reference.t, t_end)
 b_ref_end = reference.b[n_ref]
 b_ref_start = reference.b[1]
@@ -146,7 +155,7 @@ for (label, data) in entries
 end
 
 io = IOBuffer()
-println(io, "# $their_case ($(hours)-hour suite): our LES and CATKE columns against the calibration LES\n")
+println(io, "# $their_case ($(suite_hours)-hour suite): our LES and CATKE columns against the calibration LES\n")
 println(io, "Reference: LESbrary 1 m. At $(round(Int, t_end / hour)) h. b error: ‖b − b_ref‖ / ‖b_ref − b_ref(0)‖ between 4 and ",
             "160 m depth, on each profile's own levels. h: first depth below 10 m where b is below its 10 m value by ",
             "more than 1e-5 m s⁻². Our LES/columns for this case: $our_case.\n")
@@ -161,12 +170,12 @@ write(joinpath(folder, "lesbrary_$(their_case).md"), text)
 ##### Figure
 #####
 
-times = [t for t in (6hours, 12hours, 24hours) if t ≤ reference.t[end] + 1]
+plot_times = [t_end / 4, t_end / 2, t_end]
 fig = Figure(size = (1500, 900))
 colors = Makie.wong_colors()
-for (i, t) in enumerate(times)
-    axb = Axis(fig[1, i]; title = "b at $(round(Int, t / hour)) h", xlabel = "b (m s⁻²)", ylabel = i == 1 ? "z (m)" : "")
-    axu = Axis(fig[2, i]; title = "u at $(round(Int, t / hour)) h", xlabel = "u (m/s)", ylabel = i == 1 ? "z (m)" : "")
+for (i, t) in enumerate(plot_times)
+    axb = Axis(fig[1, i]; title = "b at $(round(Int, t / Oceananigans.Units.hour)) h", xlabel = "b (m s⁻²)", ylabel = i == 1 ? "z (m)" : "")
+    axu = Axis(fig[2, i]; title = "u at $(round(Int, t / Oceananigans.Units.hour)) h", xlabel = "u (m/s)", ylabel = i == 1 ? "z (m)" : "")
     for (c, (label, data)) in enumerate(entries)
         n = nearest(data.t, t)
         style = startswith(label, "LESbrary") ? :solid : startswith(label, "our LES") ? :dash : :dot
@@ -177,6 +186,6 @@ for (i, t) in enumerate(times)
     ylims!(axb, -200, 0); ylims!(axu, -200, 0)
     i == 1 && axislegend(axb; position = :rb, labelsize = 9)
 end
-Label(fig[0, :], "$their_case ($(hours)-hour suite): LESbrary (solid), our LES (dashed), CATKE columns (dotted)"; fontsize = 18)
+Label(fig[0, :], "$their_case ($(suite_hours)-hour suite): LESbrary (solid), our LES (dashed), CATKE columns (dotted)"; fontsize = 18)
 save(joinpath(folder, "lesbrary_$(their_case).png"), fig)
 @info "Wrote output/lesbrary_$(their_case).md and .png"
