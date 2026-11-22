@@ -135,8 +135,6 @@ function nemo_tke_column(case_name, case, p::NEMOTKEParameters; spacing = 4, Δt
     avm, avt = fill(p.avm0, N + 1), fill(p.avt0, N + 1)
     avm[1] = avm[N+1] = avt[1] = avt[N+1] = 0.0
 
-    τx  = case.τx
-    taum = p.rho0 * abs(τx)                    # |τ| in N/m²
     zice = ice_weight(p)
     ri_cri   = 2 / (2 + p.rn_ediss / p.rn_ediff)
     rmxl_min = 1e-6 / (p.rn_ediff * sqrt(p.rn_emin))
@@ -144,8 +142,6 @@ function nemo_tke_column(case_name, case, p::NEMOTKEParameters; spacing = 4, Δt
     zraug    = p.vkarmn * 2e5 / (p.rho0 * p.grav)
     sinφ     = case.f / (2 * 7.292115e-5)
     htau     = max(0.5, min(30.0, 45 * abs(sinφ)))     # nn_htau = 1
-    zWlc2    = 0.5 * 0.016^2 / (p.rho_air * p.Cdrag) * taum   # (Langmuir velocity)² / 2, uncoupled
-    zus3     = (1 - zice) * sqrt(2zWlc2)^3
 
     t = 0.0
     times, bs, Ts, Ss, us, vs = [t], [copy(b)], [copy(T)], [copy(S)], [copy(u)], [copy(v)]
@@ -153,6 +149,18 @@ function nemo_tke_column(case_name, case, p::NEMOTKEParameters; spacing = 4, Δt
     next_output = output_interval
     nsteps = round(Int, case.stop_time / Δt)
     for _ in 1:nsteps
+        # Surface stress (kinematic, positive upward as an Oceananigans flux): constant, or quadratic drag on drifting
+        # ice from the top cell's velocity (cases.jl); |τ| in N/m² for the surface TKE, length and Langmuir terms
+        if case.ice_drag
+            Δu, Δv = case.uᵢ - u[1], case.vᵢ - v[1]
+            τx, τy = -case.Cd * hypot(Δu, Δv) * Δu, -case.Cd * hypot(Δu, Δv) * Δv
+        else
+            τx, τy = case.τx, 0.0
+        end
+        taum  = p.rho0 * hypot(τx, τy)
+        zWlc2 = 0.5 * 0.016^2 / (p.rho_air * p.Cdrag) * taum   # (Langmuir velocity)² / 2, uncoupled
+        zus3  = (1 - zice) * sqrt(2zWlc2)^3
+
         # Stratification and shear on interior faces k = 2…N (between cells k−1 above and k below)
         N² = stratification((; b, T, S), dw, Δw, seawater)
         S² = zeros(N + 1)
@@ -229,7 +237,7 @@ function nemo_tke_column(case_name, case, p::NEMOTKEParameters; spacing = 4, Δt
 
         # Momentum and tracers: implicit vertical diffusion with surface fluxes (flux positive upward)
         u = diffuse(u, avm, Δc, Δw, Δt, -τx / Δc[1])
-        v = diffuse(v, avm, Δc, Δw, Δt, 0.0)
+        v = diffuse(v, avm, Δc, Δw, Δt, -τy / Δc[1])
         if seawater
             T = diffuse(T, avt, Δc, Δw, Δt, -case.Jt / Δc[1])
             S = diffuse(S, avt, Δc, Δw, Δt, -case.Js / Δc[1])
@@ -281,9 +289,13 @@ function mixing_length(en, N², taum, p, rmxl_min, rn_mxl0, zraug, Δc)
 end
 
 nemo_case = isempty(ARGS) ? "strong_wind" : ARGS[1]
-nemo_variants = Dict("nemo"          => NEMOTKEParameters(),
-                     "nemo_no_waves" => NEMOTKEParameters(ln_lc = false, nn_etau = 0),
-                     "nemo_lc_only"  => NEMOTKEParameters(nn_etau = 0))
+# nemo_no_breaking (rung 3, 22 Nov): no wave terms and no wave breaking either: Gaspar et al.'s surface value
+# e = 3.75 u★² instead of 67.83 u★², and the fixed 0.04 m surface length instead of the Charnock-type one. NEMO under
+# ice keeps 67.83 (its ice weighting does not touch it), so this asks whether that matters under drifting ice.
+nemo_variants = Dict("nemo"             => NEMOTKEParameters(),
+                     "nemo_no_waves"    => NEMOTKEParameters(ln_lc = false, nn_etau = 0),
+                     "nemo_lc_only"     => NEMOTKEParameters(nn_etau = 0),
+                     "nemo_no_breaking" => NEMOTKEParameters(ln_lc = false, nn_etau = 0, rn_ebb = 3.75, ln_mxl0 = false))
 for (label, parameters) in sort(collect(nemo_variants); by = first), spacing in column_spacings
     nemo_tke_column(nemo_case, case_parameters(nemo_case), parameters; spacing, label)
 end

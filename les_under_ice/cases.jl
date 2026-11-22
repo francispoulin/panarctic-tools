@@ -35,20 +35,23 @@ end
 #   N²_bottom, dTdz_bottom, dSdz_bottom   bottom gradients (boundary condition and the LES sponge's linear target)
 #   depth               domain depth (m)
 #   les_spacing, les_width   the LES grid spacing and horizontal extent (m) when les.jl is given no size
+#   ice_drag, uᵢ, vᵢ, Cd     drifting ice: instead of τx, the surface stress is quadratic drag on the ice–ocean velocity
+#                       difference, τ/ρ₀ = Cd |uᵢ − u₁| (uᵢ − u₁), with the ocean's top-cell velocity u₁ (decision 1 of
+#                       the plan: as NEMO SI3 and ClimaSeaIce; Cd = 5e-3)
 function buoyancy_case(; τx = 0.0, Jb = 0.0, f = 1e-4, stop_time = 24hours, stokes = false,
                          b_init = three_layer_buoyancy, N²_bottom = three_layer.N²_deep, depth = 256.0,
-                         les_spacing = 2.0, les_width = 512.0)
+                         les_spacing = 2.0, les_width = 512.0, ice_drag = false, uᵢ = 0.0, vᵢ = 0.0, Cd = 0.0)
     return (; τx, Jb, Js = 0.0, Jt = 0.0, f, stop_time, stokes, seawater = false,
               b_init, T_init = z -> 0.0, S_init = z -> 0.0, N²_bottom, dTdz_bottom = 0.0, dSdz_bottom = 0.0,
-              depth, les_spacing, les_width)
+              depth, les_spacing, les_width, ice_drag, uᵢ, vᵢ, Cd)
 end
 
 function seawater_case(; τx = 0.0, Js = 0.0, Jt = 0.0, f = 1.4e-4, stop_time = 4days, stokes = false,
                          T_init, S_init, dTdz_bottom, dSdz_bottom, depth = 128.0,
-                         les_spacing = 1.0, les_width = 256.0)
+                         les_spacing = 1.0, les_width = 256.0, ice_drag = false, uᵢ = 0.0, vᵢ = 0.0, Cd = 0.0)
     return (; τx, Jb = 0.0, Js, Jt, f, stop_time, stokes, seawater = true,
               b_init = z -> 0.0, T_init, S_init, N²_bottom = 0.0, dTdz_bottom, dSdz_bottom,
-              depth, les_spacing, les_width)
+              depth, les_spacing, les_width, ice_drag, uᵢ, vᵢ, Cd)
 end
 
 cases = Dict{String, NamedTuple}()
@@ -92,6 +95,72 @@ arctic_salinity(z; p = arctic_profile) =
 cases["arctic_brine_convection"] = seawater_case(; Js = -1.3e-5, T_init = z -> arctic_profile.T,
                                                    S_init = arctic_salinity, dTdz_bottom = 0.0,
                                                    dSdz_bottom = -arctic_profile.dSdz_halocline)
+
+# Rung 3: stress without waves (the ice–ocean stress is shear without waves), 24 h, 128 m deep, LES 256² at 1 m.
+#   kato_phillips      constant stress u★ = 0.02 m/s (τ = 4e-4 m² s⁻²) into uniform N² = 1e-4 s⁻², no rotation: the
+#                      laboratory case with a published deepening law, h = 1.05 u★ (t/N)^½ (Price 1979; used for NEMO's
+#                      1-D tests by Reffray et al. 2015): ≈ 62 m at 24 h
+#   rotating_stress    the same with f = 1.4e-4 s⁻¹ (75° N): deepening stops after about half an inertial period
+#                      (Pollard, Rhines and Thompson 1973)
+stress_N² = 1e-4
+cases["kato_phillips"]   = buoyancy_case(; τx = -4e-4, f = 0.0, b_init = z -> stress_N² * z, N²_bottom = stress_N²,
+                                           depth = 128.0, les_spacing = 1.0, les_width = 256.0)
+cases["rotating_stress"] = buoyancy_case(; τx = -4e-4, f = 1.4e-4, b_init = z -> stress_N² * z, N²_bottom = stress_N²,
+                                           depth = 128.0, les_spacing = 1.0, les_width = 256.0)
+
+# Rungs 3, 4 and 2 in the Arctic: ice drifting at 0.2 m/s (a storm) over the rung 1 Arctic profile, quadratic drag
+# Cd = 5e-3 (initial u★ ≈ 0.014 m/s), 4 days, f = 1.4e-4:
+#   arctic_ice_drag        stress only (rung 3)
+#   arctic_ice_drag_brine  with the brine of 5 cm/day ice growth, as arctic_brine_convection (rung 4: freeze-up under
+#                          drifting ice, the regime of the pan-Arctic bias)
+#   arctic_ice_drag_melt   with the freshwater of 2 cm/day melt, Js = +2.3e-7 m/s × 25 g/kg × 0.9 ≈ +5.2e-6 g/kg m/s
+#                          (rung 2: a stabilising flux under drifting ice)
+arctic_drag = (; ice_drag = true, uᵢ = 0.2, vᵢ = 0.0, Cd = 5e-3)
+arctic_initial = (; T_init = z -> arctic_profile.T, S_init = arctic_salinity, dTdz_bottom = 0.0,
+                    dSdz_bottom = -arctic_profile.dSdz_halocline)
+cases["arctic_ice_drag"]       = seawater_case(; arctic_initial..., arctic_drag...)
+cases["arctic_ice_drag_brine"] = seawater_case(; arctic_initial..., arctic_drag..., Js = -1.3e-5)
+cases["arctic_ice_drag_melt"]  = seawater_case(; arctic_initial..., arctic_drag..., Js = 5.2e-6)
+rung3_cases = ["kato_phillips", "rotating_stress", "arctic_ice_drag", "arctic_ice_drag_brine", "arctic_ice_drag_melt"]
+
+# Quadratic ice–ocean drag as top momentum fluxes (positive upward: the ocean gains momentum towards the ice velocity
+# when the flux is negative). Discrete form: the top cell's velocity, the other component interpolated to the point.
+# LES (3-D, staggered) and column (one point: no interpolation) versions.
+using Oceananigans.Operators: ℑxyᶠᶜᵃ, ℑxyᶜᶠᵃ
+@inline function ice_drag_u(i, j, grid, clock, fields, p)
+    k = grid.Nz
+    Δu = p.uᵢ - @inbounds(fields.u[i, j, k])
+    Δv = p.vᵢ - ℑxyᶠᶜᵃ(i, j, k, grid, fields.v)
+    return -p.Cd * sqrt(Δu^2 + Δv^2) * Δu
+end
+@inline function ice_drag_v(i, j, grid, clock, fields, p)
+    k = grid.Nz
+    Δu = p.uᵢ - ℑxyᶜᶠᵃ(i, j, k, grid, fields.u)
+    Δv = p.vᵢ - @inbounds(fields.v[i, j, k])
+    return -p.Cd * sqrt(Δu^2 + Δv^2) * Δv
+end
+@inline function column_ice_drag_u(i, j, grid, clock, fields, p)
+    k = grid.Nz
+    Δu, Δv = p.uᵢ - @inbounds(fields.u[i, j, k]), p.vᵢ - @inbounds(fields.v[i, j, k])
+    return -p.Cd * sqrt(Δu^2 + Δv^2) * Δu
+end
+@inline function column_ice_drag_v(i, j, grid, clock, fields, p)
+    k = grid.Nz
+    Δu, Δv = p.uᵢ - @inbounds(fields.u[i, j, k]), p.vᵢ - @inbounds(fields.v[i, j, k])
+    return -p.Cd * sqrt(Δu^2 + Δv^2) * Δv
+end
+
+# Momentum boundary conditions of a case: constant τx, or ice drag (column = true for single columns)
+function momentum_boundary_conditions(case; column = false)
+    if case.ice_drag
+        p = (; uᵢ = case.uᵢ, vᵢ = case.vᵢ, Cd = case.Cd)
+        fu, fv = column ? (column_ice_drag_u, column_ice_drag_v) : (ice_drag_u, ice_drag_v)
+        return (u = FieldBoundaryConditions(top = FluxBoundaryCondition(fu, discrete_form = true, parameters = p)),
+                v = FieldBoundaryConditions(top = FluxBoundaryCondition(fv, discrete_form = true, parameters = p)))
+    else
+        return (; u = FieldBoundaryConditions(top = FluxBoundaryCondition(case.τx)))
+    end
+end
 
 # Broadband Stokes drift of the calibration LES (LESbrary.jl's ConstantFluxStokesDrift: the Lenain and Pizzo 2020
 # spectrum for wind seas in equilibrium with a constant wind stress, peak wavenumber kᵖ = 1e-6 g / |τ|). Step 1 (21 Nov)
@@ -188,3 +257,27 @@ function column_faces(spacing, depth)
 end
 spacing_label(spacing) = spacing isa Number ? "dz$(round(Int, spacing))" : String(spacing)
 column_spacings = (1, 4, 8, "nz50", "nz100")
+
+# Base of the mixed layer for a uniform background N²: the shallowest depth below 5 m where N² exceeds half the
+# background (searching downward; zc ascending). `interpolate = true` places it between faces by linear interpolation
+# of N² across the threshold, so coarse grids are not limited to whole cells (rung 1: nz50 cells are 11–14 m at 70–100 m).
+function mixed_layer_base(b, zc, depth, N²_background; interpolate = false)
+    threshold = 0.5N²_background
+    previous_N², previous_z = NaN, NaN
+    for k in length(b)-1:-1:1
+        zf = (zc[k] + zc[k+1]) / 2
+        -zf < 5 && continue
+        -zf > 0.8depth && break
+        N² = (b[k+1] - b[k]) / (zc[k+1] - zc[k])
+        if N² > threshold
+            (interpolate && isfinite(previous_N²)) || return -zf
+            w = (threshold - previous_N²) / (N² - previous_N²)
+            return -(previous_z + w * (zf - previous_z))
+        end
+        previous_N², previous_z = N², zf
+    end
+    return NaN
+end
+
+# The thickness of the column cell containing depth h (for the "one cell" part of the pass criterion)
+cell_thickness_at(h, zf) = (k = findlast(z -> z ≤ -h, zf); k === nothing || k == length(zf) || isnan(h) ? 0.0 : zf[k+1] - zf[k])

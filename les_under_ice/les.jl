@@ -32,7 +32,7 @@ grid = RectilinearGrid(arch; size = (round(Int, Lh / Δ), round(Int, Lh / Δ), r
                        topology = (Periodic, Periodic, Bounded))
 
 # Surface fluxes (positive upward: Jb > 0 is a buoyancy loss, Js < 0 adds salt, τx < 0 pushes the water towards +x)
-u_bcs = FieldBoundaryConditions(top = FluxBoundaryCondition(case.τx))
+momentum_bcs = momentum_boundary_conditions(case)   # constant τx, or quadratic drag on drifting ice (cases.jl)
 
 # Sponge over the bottom tenth, relaxing to the deep (linear) part of the initial profile (as LESbrary)
 linear_target(value_at_bottom, gradient) = LinearTarget{:z}(intercept = value_at_bottom + gradient * Lz, gradient = gradient)
@@ -71,13 +71,13 @@ model = NonhydrostaticModel(grid; coriolis = FPlane(f = case.f),
                             tracers = tracer_names, buoyancy = buoyancy_model,
                             stokes_drift,
                             forcing = (; u = sponge, v = sponge, w = sponge, tracer_sponges...),
-                            boundary_conditions = (; u = u_bcs, tracer_bcs...))
+                            boundary_conditions = (; momentum_bcs..., tracer_bcs...))
 
 # Initial state at rest, with noise in the top 4 m to start the turbulence (buoyancy noise 2.56e-5 m s⁻², as the
 # three-layer cases had: 1e-2 × N²_thermocline × 256 m; for seawater as salinity noise of 3e-3 g/kg ≈ 2.2e-5 m s⁻²)
 Random.seed!(1234)
 noise(z) = randn() * exp(z / 4)
-u★ = max(sqrt(abs(case.τx)), 1e-3)
+u★ = max(sqrt(abs(case.τx)), sqrt(case.Cd) * hypot(case.uᵢ, case.vᵢ), 1e-3)
 if case.seawater
     set!(model, T = (x, y, z) -> case.T_init(z), S = (x, y, z) -> case.S_init(z) + 3e-3 * noise(z),
                 u = (x, y, z) -> 1e-1 * u★ * noise(z), w = (x, y, z) -> 1e-1 * u★ * noise(z))

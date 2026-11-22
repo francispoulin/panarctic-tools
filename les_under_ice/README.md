@@ -19,6 +19,8 @@ columns with CATKE variants, k-ε and NEMO's TKE at 1, 4 and 8 m, with the same 
   `run_suite.jl rung1`: rung 1 of the validation ladder (plan doc): five free-convection cases into uniform N²
   (entrainment law h² N² = 2(1 + 2A) Jb t) and `arctic_brine_convection` (brine rejection at freeze-up, TEOS-10,
   weak mixed layer over a strong halocline, 4 days), then `scaling.jl` (tables and pass/fail per column).
+  `run_suite.jl rung3`: stress without waves: Kato–Phillips (Price's law), rotating stress, and drifting ice
+  (quadratic drag) over the Arctic profile alone, with brine and with melt; then `stress_scaling.jl`.
 - Columns run at 1, 4, 8 m and on the pan-Arctic model's vertical grids (`nz50`, `nz100`: setup.jl's exponential
   grid cut at the domain depth).
 - `scan.jl <case> [Δz]`: step 2, a scan of Cˢ × Cᵂu★ in columns against our LES (default strong_wind, no waves).

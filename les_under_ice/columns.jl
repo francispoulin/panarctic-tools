@@ -37,7 +37,7 @@ spacings = column_spacings
 function run_column(case_name, case, variant, closure, spacing)
     grid = RectilinearGrid(CPU(); size = length(column_faces(spacing, case.depth)) - 1,
                            z = column_faces(spacing, case.depth), topology = (Flat, Flat, Bounded))
-    u_bcs = FieldBoundaryConditions(top = FluxBoundaryCondition(case.τx))
+    momentum_bcs = momentum_boundary_conditions(case; column = true)
     if case.seawater
         tracers  = (:T, :S)
         buoyancy = SeawaterBuoyancy(equation_of_state = teos10)
@@ -52,7 +52,7 @@ function run_column(case_name, case, variant, closure, spacing)
                                                     bottom = GradientBoundaryCondition(case.N²_bottom)))
     end
     model = HydrostaticFreeSurfaceModel(grid; closure, coriolis = FPlane(f = case.f), tracers, buoyancy,
-                                        boundary_conditions = (; u = u_bcs, tracer_bcs...))
+                                        boundary_conditions = (; momentum_bcs..., tracer_bcs...))
     if case.seawater
         set!(model, T = case.T_init, S = case.S_init, e = 1e-6)
         tracer_outputs = (; T = model.tracers.T, S = model.tracers.S)

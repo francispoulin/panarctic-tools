@@ -9,6 +9,8 @@
 # No arguments: the three wind-and-cooling cases of the 24-hour suite, without and with waves (6 LES, ~50 min each).
 # "rung1": the five free-convection scaling cases (~50 min each) and arctic_brine_convection (4 days at 1 m, a few
 # hours), then scaling.jl.
+# "rung3": kato_phillips, rotating_stress (24 h at 1 m) and arctic_ice_drag[_brine, _melt] (4 days at 1 m), then
+# stress_scaling.jl; about a day on one A100.
 # A case whose LES output exists is not rerun (delete output/<case>_les.jld2 to rerun it).
 
 include(joinpath(@__DIR__, "cases.jl"))
@@ -18,7 +20,7 @@ rung1_cases = vcat([convection_case_name(N², Jb) for (N², Jb) in convection_su
 requested   = isempty(ARGS) ? ["weak_wind_strong_cooling", "med_wind_med_cooling", "strong_wind_weak_cooling",
                                "weak_wind_strong_cooling_stokes", "med_wind_med_cooling_stokes",
                                "strong_wind_weak_cooling_stokes"] : copy(ARGS)
-suite_cases = reduce(vcat, [name == "rung1" ? rung1_cases : [name] for name in requested])
+suite_cases = reduce(vcat, [name == "rung1" ? rung1_cases : name == "rung3" ? rung3_cases : [name] for name in requested])
 
 function run_script(script, args...)
     empty!(ARGS)
@@ -40,5 +42,6 @@ for name in suite_cases
     endswith(name, "_stokes") && run_script("compare_lesbrary.jl", replace(name, "_stokes" => ""))
 end
 any(startswith("convection_"), suite_cases) && run_script("scaling.jl")
+any(in(("kato_phillips", "rotating_stress")), suite_cases) && run_script("stress_scaling.jl")
 empty!(ARGS)
 @info "Suite done: $(join(suite_cases, ", ")). Tables in $(output_folder())"
