@@ -121,6 +121,11 @@ arctic_initial = (; T_init = z -> arctic_profile.T, S_init = arctic_salinity, dT
 cases["arctic_ice_drag"]       = seawater_case(; arctic_initial..., arctic_drag...)
 cases["arctic_ice_drag_brine"] = seawater_case(; arctic_initial..., arctic_drag..., Js = -1.3e-5)
 cases["arctic_ice_drag_melt"]  = seawater_case(; arctic_initial..., arctic_drag..., Js = 5.2e-6)
+# Rung 2 proper: melt under calm conditions (ice at rest, no stress, no convection). There is no turbulence source, so
+# the truth needs no LES: the freshwater stays where it enters, spreading only by molecular diffusion (√(κ t) ≈ 2 cm
+# in 4 days). The test is whether a scheme mixes when it should not (TKE floors, NEMO's surface minimum e ≥ 1e-4,
+# background diffusivities). Columns only: calm_melt.jl.
+cases["arctic_calm_melt"] = seawater_case(; arctic_initial..., Js = 5.2e-6)
 rung3_cases = ["kato_phillips", "rotating_stress", "arctic_ice_drag", "arctic_ice_drag_brine", "arctic_ice_drag_melt"]
 
 # Quadratic ice–ocean drag as top momentum fluxes (positive upward: the ocean gains momentum towards the ice velocity

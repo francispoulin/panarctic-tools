@@ -21,6 +21,8 @@ columns with CATKE variants, k-ε and NEMO's TKE at 1, 4 and 8 m, with the same 
   weak mixed layer over a strong halocline, 4 days), then `scaling.jl` (tables and pass/fail per column).
   `run_suite.jl rung3`: stress without waves: Kato–Phillips (Price's law), rotating stress, and drifting ice
   (quadratic drag) over the Arctic profile alone, with brine and with melt; then `stress_scaling.jl`.
+- `calm_melt.jl`: rung 2, melt under calm conditions (columns only, CPU): does any scheme mix the freshwater
+  below the top cell when nothing drives turbulence?
 - Columns run at 1, 4, 8 m and on the pan-Arctic model's vertical grids (`nz50`, `nz100`: setup.jl's exponential
   grid cut at the domain depth).
 - `scan.jl <case> [Δz]`: step 2, a scan of Cˢ × Cᵂu★ in columns against our LES (default strong_wind, no waves).
