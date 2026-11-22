@@ -16,6 +16,11 @@ columns with CATKE variants, k-ε and NEMO's TKE at 1, 4 and 8 m, with the same 
   convection) as a standalone column (CPU, seconds): `nemo` (Langmuir cells and TKE penetration on), `nemo_no_waves`,
   `nemo_lc_only`, at 1, 4, 8 m. Picked up by compare.jl and compare_lesbrary.jl (dash-dot lines).
 - `run_suite.jl [cases...]`: LES (skipped if done), columns, NEMO columns and comparisons for several cases.
+  `run_suite.jl rung1`: rung 1 of the validation ladder (plan doc): five free-convection cases into uniform N²
+  (entrainment law h² N² = 2(1 + 2A) Jb t) and `arctic_brine_convection` (brine rejection at freeze-up, TEOS-10,
+  weak mixed layer over a strong halocline, 4 days), then `scaling.jl` (tables and pass/fail per column).
+- Columns run at 1, 4, 8 m and on the pan-Arctic model's vertical grids (`nz50`, `nz100`: setup.jl's exponential
+  grid cut at the domain depth).
 - `scan.jl <case> [Δz]`: step 2, a scan of Cˢ × Cᵂu★ in columns against our LES (default strong_wind, no waves).
 - `compare_lesbrary.jl <their case> [hours]`: step 1, our LES and columns against the calibration LES (LESbrary
   profiles at 1, 2, 4 m from glwagner/SingleColumnModelCalibration.jl, downloaded to `data/profiles/`; see the README

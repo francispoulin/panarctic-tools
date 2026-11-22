@@ -20,6 +20,7 @@
 #   nemo          the reference namelist (Langmuir cells and penetration on)
 #   nemo_no_waves base scheme only (ln_lc = false, nn_etau = 0): NEMO under compact ice, or wind without waves
 #   nemo_lc_only  Langmuir cells on, penetration off
+# each at 1, 4, 8 m and on the pan-Arctic grids at 50 and 100 levels; buoyancy cases or seawater (T, S, TEOS-10) cases.
 #
 #     empty!(ARGS); push!(ARGS, "strong_wind")
 #     include("/mnt/autofs/bow.math/scratch/fpoulin/software/panarctic-tools/les_under_ice/nemo_tke.jl")
@@ -86,25 +87,49 @@ function tridiagonal_solve(a, d, c, r)
     return x
 end
 
-# Implicit vertical diffusion of a cell variable with diffusivities κ on faces (top-down) and a surface tendency
-function diffuse(ϕ, κ, Δz, Δt, surface_tendency)
+# Implicit vertical diffusion of a cell variable with diffusivities κ on faces (top-down: face j above cell j), cell
+# thicknesses Δc, distances between centres Δw (on faces), and a surface tendency
+function diffuse(ϕ, κ, Δc, Δw, Δt, surface_tendency)
     N = length(ϕ)
     a, d, c = zeros(N), ones(N), zeros(N)
     for j in 1:N
-        j > 1 && (a[j] = -Δt * κ[j] / Δz^2; d[j] -= a[j])      # face j above cell j
-        j < N && (c[j] = -Δt * κ[j+1] / Δz^2; d[j] -= c[j])    # face j+1 below
+        j > 1 && (a[j] = -Δt * κ[j] / (Δc[j] * Δw[j]); d[j] -= a[j])
+        j < N && (c[j] = -Δt * κ[j+1] / (Δc[j] * Δw[j+1]); d[j] -= c[j])
     end
     r = copy(ϕ)
     r[1] += Δt * surface_tendency
     return tridiagonal_solve(a, d, c, r)
 end
 
-function nemo_tke_column(case_name, case, p::NEMOTKEParameters; Δz = 4.0, Δt = 60.0, label = "nemo",
+# N² on the interior faces k = 2…N, between cell k−1 above and cell k below: from b, or for seawater from the
+# density difference at the face's depth (TEOS-10, locally referenced)
+function stratification(state, dw, Δw, seawater)
+    N = length(dw) - 1
+    N² = zeros(N + 1)
+    for k in 2:N
+        if seawater
+            Z = -dw[k]
+            Δρ = seawater_density_anomaly(state.T[k], state.S[k], Z) - seawater_density_anomaly(state.T[k-1], state.S[k-1], Z)
+            N²[k] = gravity * Δρ / (reference_density * Δw[k])
+        else
+            N²[k] = (state.b[k-1] - state.b[k]) / Δw[k]
+        end
+    end
+    return N²
+end
+
+# A column on the faces of cases.jl's column_faces (uniform spacing in m, or "nz50" / "nz100": the pan-Arctic grids)
+function nemo_tke_column(case_name, case, p::NEMOTKEParameters; spacing = 4, Δt = 60.0, label = "nemo",
                          output_interval = 600.0)
-    N  = round(Int, domain_depth / Δz)
-    dw = [(k - 1) * Δz for k in 1:N+1]         # face depths (positive down), top-down
-    dt = [(j - 0.5) * Δz for j in 1:N]         # cell-centre depths
-    b  = three_layer_buoyancy.(-dt)
+    dw = reverse(-column_faces(spacing, case.depth))    # face depths (positive down), top-down; dw[1] = 0
+    N  = length(dw) - 1
+    dt = [(dw[j] + dw[j+1]) / 2 for j in 1:N]           # cell-centre depths
+    Δc = diff(dw)                                       # cell thicknesses (e3t)
+    Δw = vcat(dt[1], diff(dt), dw[N+1] - dt[N])         # distances between centres, on faces (e3w)
+    seawater = case.seawater
+    b = seawater ? zeros(N) : case.b_init.(-dt)
+    T = seawater ? case.T_init.(-dt) : zeros(N)
+    S = seawater ? case.S_init.(-dt) : zeros(N)
     u, v = zeros(N), zeros(N)
     en = fill(p.rn_emin, N + 1)
     avm, avt = fill(p.avm0, N + 1), fill(p.avt0, N + 1)
@@ -122,23 +147,22 @@ function nemo_tke_column(case_name, case, p::NEMOTKEParameters; Δz = 4.0, Δt =
     zWlc2    = 0.5 * 0.016^2 / (p.rho_air * p.Cdrag) * taum   # (Langmuir velocity)² / 2, uncoupled
     zus3     = (1 - zice) * sqrt(2zWlc2)^3
 
-    times, bs, us, vs = Float64[], Vector{Float64}[], Vector{Float64}[], Vector{Float64}[]
-    save!() = (push!(times, t); push!(bs, reverse(b)); push!(us, reverse(u)); push!(vs, reverse(v)))
     t = 0.0
-    save!()
+    times, bs, Ts, Ss, us, vs = [t], [copy(b)], [copy(T)], [copy(S)], [copy(u)], [copy(v)]
+    seawater && (bs[1] = seawater_buoyancy.(T, S))
     next_output = output_interval
     nsteps = round(Int, case.stop_time / Δt)
     for _ in 1:nsteps
         # Stratification and shear on interior faces k = 2…N (between cells k−1 above and k below)
-        N² = zeros(N + 1); S² = zeros(N + 1)
+        N² = stratification((; b, T, S), dw, Δw, seawater)
+        S² = zeros(N + 1)
         for k in 2:N
-            N²[k] = (b[k-1] - b[k]) / Δz
-            S²[k] = ((u[k-1] - u[k])^2 + (v[k-1] - v[k])^2) / Δz^2
+            S²[k] = ((u[k-1] - u[k])^2 + (v[k-1] - v[k])^2) / Δw[k]^2
         end
         sh2 = avm .* S²
 
         # Mixing length (dissipation) from the current TKE, for the dissipation term
-        ℓ = mixing_length(en, N², taum, p, rmxl_min, rn_mxl0, zraug, Δz)
+        ℓ = mixing_length(en, N², taum, p, rmxl_min, rn_mxl0, zraug, Δc)
         dissl = sqrt.(en) ./ ℓ
 
         # Surface and bottom values
@@ -151,7 +175,7 @@ function nemo_tke_column(case_name, case, p::NEMOTKEParameters; Δz = 4.0, Δt =
             imlc = N + 1
             pe = zeros(N + 1)
             for k in 2:N+1
-                zpelc += max(N²[k], 0.0) * dw[k] * Δz
+                zpelc += max(N²[k], 0.0) * dw[k] * Δw[k]
                 pe[k] = zpelc
             end
             for k in N:-1:2
@@ -166,12 +190,12 @@ function nemo_tke_column(case_name, case, p::NEMOTKEParameters; Δz = 4.0, Δt =
             end
         end
 
-        # Implicit TKE equation on interior faces k = 2…N
+        # Implicit TKE equation on interior faces k = 2…N (NEMO: e3t(k) is the cell below face k, here Δc[k])
         n = N - 1
         a, d, c, r = zeros(n), ones(n), zeros(n), zeros(n)
         for (i, k) in enumerate(2:N)
-            zd_up = -0.5Δt * max(avm[k+1] + avm[k], 2e-5) / Δz^2
-            zd_lw = -0.5Δt * max(avm[k] + avm[k-1], 2e-5) / Δz^2
+            zd_up = -0.5Δt * max(avm[k+1] + avm[k], 2e-5) / (Δc[k] * Δw[k])
+            zd_lw = -0.5Δt * max(avm[k] + avm[k-1], 2e-5) / (Δc[k-1] * Δw[k])
             a[i], c[i] = zd_lw, zd_up
             d[i] = 1 - zd_lw - zd_up + 1.5Δt * p.rn_ediss * dissl[k]
             r[i] = en[k] + Δt * (sh2[k] - avt[k] * N²[k] + 0.5 * p.rn_ediss * dissl[k] * en[k])
@@ -189,7 +213,7 @@ function nemo_tke_column(case_name, case, p::NEMOTKEParameters; Δz = 4.0, Δt =
         en .= max.(en, p.rn_emin)
 
         # Diffusivities from the new TKE (tke_avn)
-        ℓ = mixing_length(en, N², taum, p, rmxl_min, rn_mxl0, zraug, Δz)
+        ℓ = mixing_length(en, N², taum, p, rmxl_min, rn_mxl0, zraug, Δc)
         for k in 2:N
             zav = p.rn_ediff * ℓ[k] * sqrt(en[k])
             avm[k] = max(zav, p.avm0)
@@ -203,44 +227,55 @@ function nemo_tke_column(case_name, case, p::NEMOTKEParameters; Δz = 4.0, Δt =
             end
         end
 
-        # Momentum and buoyancy: implicit vertical diffusion with surface fluxes (flux positive upward)
-        u = diffuse(u, avm, Δz, Δt, -τx / Δz)
-        v = diffuse(v, avm, Δz, Δt, 0.0)
-        b = diffuse(b, avt, Δz, Δt, -case.Jb / Δz)
+        # Momentum and tracers: implicit vertical diffusion with surface fluxes (flux positive upward)
+        u = diffuse(u, avm, Δc, Δw, Δt, -τx / Δc[1])
+        v = diffuse(v, avm, Δc, Δw, Δt, 0.0)
+        if seawater
+            T = diffuse(T, avt, Δc, Δw, Δt, -case.Jt / Δc[1])
+            S = diffuse(S, avt, Δc, Δw, Δt, -case.Js / Δc[1])
+        else
+            b = diffuse(b, avt, Δc, Δw, Δt, -case.Jb / Δc[1])
+        end
         θ = case.f * Δt
         u, v = u .* cos(θ) .+ v .* sin(θ), -u .* sin(θ) .+ v .* cos(θ)
 
         t += Δt
         if t ≥ next_output - 1e-6
-            save!()
+            push!(times, t); push!(us, copy(u)); push!(vs, copy(v)); push!(Ts, copy(T)); push!(Ss, copy(S))
+            push!(bs, seawater ? seawater_buoyancy.(T, S) : copy(b))
             next_output += output_interval
         end
     end
 
-    file = joinpath(output_folder(), @sprintf("%s_column_%s_dz%d.jld2", case_name, label, round(Int, Δz)))
+    # Saved bottom-up (ascending z), as Oceananigans
+    file = joinpath(output_folder(), @sprintf("%s_column_%s_%s.jld2", case_name, label, spacing_label(spacing)))
     jldopen(file, "w") do f
         f["nemo_tke"] = true
         f["parameters"] = Dict(String(n) => getfield(p, n) for n in fieldnames(NEMOTKEParameters))
         f["zc"] = reverse(-dt)
         f["zf"] = reverse(-dw)
         f["t"] = times
-        f["b"] = bs; f["u"] = us; f["v"] = vs
+        f["b"] = reverse.(bs); f["u"] = reverse.(us); f["v"] = reverse.(vs)
+        if seawater
+            f["T"] = reverse.(Ts); f["S"] = reverse.(Ss)
+        end
     end
-    @info "NEMO TKE column $case_name, $label, Δz = $Δz m: $file"
+    @info "NEMO TKE column $case_name, $label, $(spacing_label(spacing)): $file"
     return file
 end
 
-# nn_mxl = 2: ℓ = √(2e)/N, surface value from the stress (ln_mxl0), limited by the distance to the boundaries
-function mixing_length(en, N², taum, p, rmxl_min, rn_mxl0, zraug, Δz)
+# nn_mxl = 2: ℓ = √(2e)/N, surface value from the stress (ln_mxl0), limited by the distance to the boundaries (growing
+# by at most the cell thickness from one face to the next)
+function mixing_length(en, N², taum, p, rmxl_min, rn_mxl0, zraug, Δc)
     K = length(en)
     ℓ = [max(rmxl_min, sqrt(2en[k] / max(N²[k], 1e-20))) for k in 1:K]
     ℓ[1] = p.ln_mxl0 ? max(rn_mxl0, zraug * taum) : rn_mxl0
     ℓ[K] = rmxl_min
     for k in 2:K-1
-        ℓ[k] = min(ℓ[k-1] + Δz, ℓ[k])
+        ℓ[k] = min(ℓ[k-1] + Δc[k-1], ℓ[k])
     end
     for k in K-1:-1:2
-        ℓ[k] = min(ℓ[k+1] + Δz, ℓ[k])
+        ℓ[k] = min(ℓ[k+1] + Δc[k], ℓ[k])
     end
     return ℓ
 end
@@ -249,6 +284,6 @@ nemo_case = isempty(ARGS) ? "strong_wind" : ARGS[1]
 nemo_variants = Dict("nemo"          => NEMOTKEParameters(),
                      "nemo_no_waves" => NEMOTKEParameters(ln_lc = false, nn_etau = 0),
                      "nemo_lc_only"  => NEMOTKEParameters(nn_etau = 0))
-for (label, parameters) in sort(collect(nemo_variants); by = first), Δz in (1.0, 4.0, 8.0)
-    nemo_tke_column(nemo_case, case_parameters(nemo_case), parameters; Δz, label)
+for (label, parameters) in sort(collect(nemo_variants); by = first), spacing in column_spacings
+    nemo_tke_column(nemo_case, case_parameters(nemo_case), parameters; spacing, label)
 end
