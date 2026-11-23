@@ -289,3 +289,24 @@ end
 
 # The thickness of the column cell containing depth h (for the "one cell" part of the pass criterion)
 cell_thickness_at(h, zf) = (k = findlast(z -> z ≤ -h, zf); k === nothing || k == length(zf) || isnan(h) ? 0.0 : zf[k+1] - zf[k])
+
+# Mixed-layer depth from a buoyancy profile b on centres zc (ascending), as in compare.jl: the first depth below z_ref
+# where b is below its value at z_ref by more than Δb. interpolate = true places it between centres (smooth in the
+# parameters, for screening and calibration).
+function threshold_depth(b, z; Δb = 1e-5, z_ref = -10.0, interpolate = false)
+    reference = b[argmin(abs.(z .- z_ref))]
+    k = findlast(k -> z[k] < z_ref && b[k] < reference - Δb, eachindex(b))
+    k === nothing && return -z[1]
+    (interpolate && k < length(b) && b[k+1] != b[k]) || return -z[k]
+    w = (reference - Δb - b[k+1]) / (b[k] - b[k+1])
+    return -(z[k+1] + w * (z[k] - z[k+1]))
+end
+
+# The depth measure of each kind of case: the base of the mixed layer for uniform N² (stress and convection cases), the
+# threshold depth otherwise
+uniform_N²(name) = name in ("kato_phillips", "rotating_stress") ? stress_N² :
+                   startswith(name, "convection_") ? first(p[1] for p in convection_suite if convection_case_name(p...) == name) :
+                   nothing
+case_depth(name, case, b, zc; interpolate = true) =
+    (N² = uniform_N²(name);
+     N² === nothing ? threshold_depth(b, zc; interpolate) : mixed_layer_base(b, zc, case.depth, N²; interpolate))

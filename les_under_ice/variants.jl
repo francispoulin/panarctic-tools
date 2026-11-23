@@ -57,17 +57,7 @@ guard_cases  = ["kato_phillips", convection_case_name(1e-5, 2.4e-7), convection_
                 "arctic_brine_convection", "weak_wind_strong_cooling_stokes", "med_wind_med_cooling_stokes",
                 "strong_wind_weak_cooling_stokes", "strong_wind_stokes"]
 
-# The depth measure of each kind of case (as stress_scaling.jl / scaling.jl / compare.jl)
-uniform_N²(name) = name in ("kato_phillips", "rotating_stress") ? stress_N² :
-                   startswith(name, "convection_") ? first(p[1] for p in convection_suite if convection_case_name(p...) == name) :
-                   nothing
-function threshold_depth(b, z; Δb = 1e-5, z_ref = -10.0)
-    reference = b[argmin(abs.(z .- z_ref))]
-    k = findlast(k -> z[k] < z_ref && b[k] < reference - Δb, eachindex(b))
-    return k === nothing ? -z[1] : -z[k]
-end
-case_depth(name, case, b, zc) = (N² = uniform_N²(name);
-                                 N² === nothing ? threshold_depth(b, zc) : mixed_layer_base(b, zc, case.depth, N²; interpolate = true))
+# case_depth, threshold_depth and uniform_N² are in cases.jl (interpolated between levels since 23 Nov)
 
 function variant_coarse_grain(values, z_fine, zᶠ)
     return map(1:length(zᶠ)-1) do k

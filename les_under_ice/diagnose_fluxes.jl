@@ -12,8 +12,9 @@
 # inertial oscillations and noise); κ is left out where the gradient is weak (N² or S² below 2 % of the profile's
 # maximum). The LES fluxes are resolved fluxes only (implicit LES): too small within a few metres of the surface.
 #
-# Writes output/diagnose_<case>.png and output/diagnose_fluxes.md: at the base of the mixed layer in the LES (the depth
-# of the maximum of N²), Ri, κc, κu and Pr for the LES and each column, and each column's κ / κ_LES.
+# Writes output/diagnose_<case>.png and output/diagnose_fluxes.md: κc and κu in two bands relative to the LES mixed-layer
+# depth h(t) (interior 0.3–0.8 h, base 0.8–1.1 h; 23 Nov: the first version sampled one depth below the layer, in
+# quiet water), for the LES and each column, and the ratios to the LES.
 #
 #     empty!(ARGS)                       # or case names; default: kato_phillips, rotating_stress, arctic_ice_drag,
 #                                        # med_wind_med_cooling
@@ -51,8 +52,9 @@ profile_series(file, name) = (fts = FieldTimeSeries(file, name); [vec(Array(inte
 density_derivatives(T, S) = ((seawater_density_anomaly(T + 1e-3, S, 0.0) - seawater_density_anomaly(T - 1e-3, S, 0.0)) / 2e-3,
                              (seawater_density_anomaly(T, S + 1e-3, 0.0) - seawater_density_anomaly(T, S - 1e-3, 0.0)) / 2e-3)
 
-# Median profiles over the second half of the run on interior faces: Ri, κc, κu (NaN where the gradient is weak)
-function median_diffusivities(zc, t, b, u, v, flux_b, flux_u, flux_v)
+# Profiles on interior faces at each output time of the second half of the run: Ri, κc, κu (NaN where the gradient is
+# weak: N² or S² below 2 % of the profile's maximum). Returned as matrices (face × time) with the times.
+function diffusivity_matrices(zc, t, b, u, v, flux_b, flux_u, flux_v)
     zf = (zc[1:end-1] .+ zc[2:end]) ./ 2
     Δz = diff(zc)
     late = findall(≥(t[end] / 2), t)
@@ -62,11 +64,16 @@ function median_diffusivities(zc, t, b, u, v, flux_b, flux_u, flux_v)
         S² = (diff(u[n]) ./ Δz) .^ 2 .+ (diff(v[n]) ./ Δz) .^ 2
         strong_N², strong_S² = N² .> 0.02maximum(N²), S² .> 0.02maximum(S²)
         Ri[:, m] = ifelse.(strong_S², N² ./ S², NaN)
-        κc[:, m] = ifelse.(strong_N², -flux_b[n] ./ N², NaN)
-        momentum = -(flux_u[n] .* diff(u[n]) ./ Δz .+ flux_v[n] .* diff(v[n]) ./ Δz)
-        κu[:, m] = ifelse.(strong_S², momentum ./ S², NaN)
+        if flux_b === nothing                    # a column: its own diffusivities
+            κc[:, m] = flux_u[n]
+            κu[:, m] = flux_v[n]
+        else
+            κc[:, m] = ifelse.(strong_N², -flux_b[n] ./ N², NaN)
+            momentum = -(flux_u[n] .* diff(u[n]) ./ Δz .+ flux_v[n] .* diff(v[n]) ./ Δz)
+            κu[:, m] = ifelse.(strong_S², momentum ./ S², NaN)
+        end
     end
-    return (; zf, Ri = map(nanmedian, eachrow(Ri)), κc = map(nanmedian, eachrow(κc)), κu = map(nanmedian, eachrow(κu)))
+    return (; zf, t = t[late], Ri, κc, κu)
 end
 
 function les_diffusivities(file, case)
@@ -86,56 +93,60 @@ function les_diffusivities(file, case)
     end
     fu = [to_interior_faces(f, Nz) for f in wu]
     fv = [to_interior_faces(f, Nz) for f in wv]
-    return median_diffusivities(les.zc, les.t, les.b, les.u, les.v, wb, fu, fv)
+    return les, diffusivity_matrices(les.zc, les.t, les.b, les.u, les.v, wb, fu, fv)
 end
 
-# Column diffusivities are saved on all faces zf (ascending): keep the interior ones, median over the second half
-function column_diffusivities(col)
-    zf = col.zf[2:end-1]
-    late = findall(≥(col.t[end] / 2), col.t)
-    κc = [nanmedian([col.κc[n][k+1] for n in late]) for k in eachindex(zf)]
-    κu = col.κu === nothing ? fill(NaN, length(zf)) : [nanmedian([col.κu[n][k+1] for n in late]) for k in eachindex(zf)]
-    Δz = diff(col.zc)
-    Ri = map(eachindex(zf)) do k
-        values = map(late) do n
-            N² = (col.b[n][k+1] - col.b[n][k]) / Δz[k]
-            S² = ((col.u[n][k+1] - col.u[n][k])^2 + (col.v[n][k+1] - col.v[n][k])^2) / Δz[k]^2
-            S² > 0 ? N² / S² : NaN
+# A column's own diffusivities on its interior faces (saved on all faces), as matrices like the LES's
+column_diffusivities(col) =
+    diffusivity_matrices(col.zc, col.t, col.b, col.u, col.v, nothing,
+                         [κ[2:end-1] for κ in col.κc],
+                         col.κu === nothing ? [fill(NaN, length(col.zc) - 1) for _ in col.κc] : [κ[2:end-1] for κ in col.κu])
+
+# Median of a quantity over the band lo h(t) < depth < hi h(t), all times of the second half; h(t) from the LES
+function band_median(matrix, zf, times, h_of_time, lo, hi)
+    values = Float64[]
+    for (m, t) in enumerate(times)
+        h = h_of_time(t)
+        for k in eachindex(zf)
+            lo * h < -zf[k] < hi * h && push!(values, matrix[k, m])
         end
-        nanmedian(values)
     end
-    return (; zf, Ri, κc, κu)
+    return nanmedian(values)
 end
+row_median(matrix) = map(nanmedian, eachrow(matrix))
 
-nearest_value(zf, values, z) = values[argmin(abs.(zf .- z))]
+# Two bands, relative to the LES mixed-layer depth h(t): the interior of the boundary layer (0.3–0.8 h), where the
+# resolved fluxes are reliable, and the base (0.8–1.1 h), where entrainment happens
+bands = (interior = (0.3, 0.8), base = (0.8, 1.1))
 
 function diagnose(case_name, folder, rows)
     case = case_parameters(case_name)
     les_file = joinpath(folder, case_name * "_les.jld2")
     isfile(les_file) || (@warn "No LES for $case_name: skipped"; return)
-    les = les_diffusivities(les_file, case)
+    les, D = les_diffusivities(les_file, case)
+    h_les = [case_depth(case_name, case, b, les.zc) for b in les.b]
+    h_of_time(t) = h_les[argmin(abs.(les.t .- t))]
+    h_end = h_les[end]
 
-    # Base of the mixed layer in the LES: the depth of the maximum of N², from the final profile
-    les_end = les_profiles(les_file)
-    N²_end = diff(les_end.b[end]) ./ diff(les_end.zc)
-    zf_end = (les_end.zc[1:end-1] .+ les_end.zc[2:end]) ./ 2
-    below = findall(z -> z < -5, zf_end)
-    z_base = zf_end[below[argmax(N²_end[below])]]
-    κc_les, κu_les = nearest_value(les.zf, les.κc, z_base), nearest_value(les.zf, les.κu, z_base)
-    push!(rows, @sprintf("| %s | LES | %.1f | %.2f | %.2e | %.2e | %.2f | | |", case_name, -z_base,
-                         nearest_value(les.zf, les.Ri, z_base), κc_les, κu_les, κu_les / κc_les))
+    band_values(M) = ([band_median(M.κc, M.zf, M.t, h_of_time, bands[k]...) for k in keys(bands)],
+                      [band_median(M.κu, M.zf, M.t, h_of_time, bands[k]...) for k in keys(bands)],
+                      band_median(M.Ri, M.zf, M.t, h_of_time, bands.base...))
+    κc_les, κu_les, Ri_les = band_values(D)
+    push!(rows, @sprintf("| %s | LES | %.1f | %.2f | %.1e | %.1e | %.1e | %.1e | | | | |", case_name, h_end, Ri_les,
+                         κc_les[1], κc_les[2], κu_les[1], κu_les[2]))
 
     fig = Figure(size = (1600, 650))
     titles = ["Ri = N² / S²", "κc (m²/s), tracers", "κu (m²/s), momentum", "Pr = κu / κc"]
     panels = [Axis(fig[1, i]; title = titles[i], ylabel = i == 1 ? "z (m)" : "", xscale = i == 1 ? identity : log10)
-            for i in 1:4]
-    depth_shown = -0.6case.depth
+              for i in 1:4]
+    depth_shown = -min(0.6case.depth, 2h_end)
     plot_profile!(ax, x, z; kw...) = (keep = isfinite.(x) .& (x .> 0) .& (z .> depth_shown);
                                       any(keep) && lines!(ax, x[keep], z[keep]; kw...))
-    plot_profile!(panels[1], clamp.(les.Ri, 1e-3, 10), les.zf; color = :black, linewidth = 3, label = "LES")
-    plot_profile!(panels[2], les.κc, les.zf; color = :black, linewidth = 3)
-    plot_profile!(panels[3], les.κu, les.zf; color = :black, linewidth = 3)
-    plot_profile!(panels[4], les.κu ./ les.κc, les.zf; color = :black, linewidth = 3)
+    plot_all!(M; kw...) = (plot_profile!(panels[1], clamp.(row_median(M.Ri), 1e-3, 10), M.zf; kw...);
+                           plot_profile!(panels[2], row_median(M.κc), M.zf; kw...);
+                           plot_profile!(panels[3], row_median(M.κu), M.zf; kw...);
+                           plot_profile!(panels[4], row_median(M.κu) ./ row_median(M.κc), M.zf; kw...))
+    plot_all!(D; color = :black, linewidth = 3, label = "LES")
 
     colours = Makie.wong_colors()
     for (c, (label, variant, spacing)) in enumerate(diagnosed_columns)
@@ -144,24 +155,22 @@ function diagnose(case_name, folder, rows)
         else
             file = run_column(case_name, case, variant, column_closures[variant], spacing)
         end
-        col = column_diffusivities(column_profiles(file))
-        style = spacing == 1 ? :solid : :dash
-        plot_profile!(panels[1], clamp.(col.Ri, 1e-3, 10), col.zf; color = colours[c], linestyle = style, label)
-        plot_profile!(panels[2], col.κc, col.zf; color = colours[c], linestyle = style)
-        plot_profile!(panels[3], col.κu, col.zf; color = colours[c], linestyle = style)
-        plot_profile!(panels[4], col.κu ./ col.κc, col.zf; color = colours[c], linestyle = style)
-        κc_col, κu_col = nearest_value(col.zf, col.κc, z_base), nearest_value(col.zf, col.κu, z_base)
-        push!(rows, @sprintf("| %s | %s | | %.2f | %.2e | %.2e | %.2f | %.1f | %.1f |", case_name, label,
-                             nearest_value(col.zf, col.Ri, z_base), κc_col, κu_col, κu_col / κc_col,
-                             κc_col / κc_les, κu_col / κu_les))
+        col = column_profiles(file)
+        C = column_diffusivities(col)
+        plot_all!(C; color = colours[c], linestyle = spacing == 1 ? :solid : :dash, label)
+        κc_col, κu_col, Ri_col = band_values(C)
+        h_col = case_depth(case_name, case, col.b[end], col.zc)
+        push!(rows, @sprintf("| %s | %s | %.1f | %.2f | %.1e | %.1e | %.1e | %.1e | %.1f | %.1f | %.1f | %.1f |",
+                             case_name, label, h_col, Ri_col, κc_col[1], κc_col[2], κu_col[1], κu_col[2],
+                             κc_col[1] / κc_les[1], κc_col[2] / κc_les[2], κu_col[1] / κu_les[1], κu_col[2] / κu_les[2]))
     end
     for ax in panels
-        hlines!(ax, [z_base]; color = :gray, linestyle = :dot)
+        hlines!(ax, [-h_end, -0.3h_end]; color = :gray, linestyle = :dot)
         ylims!(ax, depth_shown, 0)
     end
     axislegend(panels[1]; position = :rb, labelsize = 9)
     Label(fig[0, :], "$case_name: diffusivities from the LES fluxes (black) and the columns, median over the second half " *
-                     "(dotted line: base of the LES mixed layer)"; fontsize = 15)
+                     "(dotted: 0.3 h and h of the LES at the end)"; fontsize = 15)
     save(joinpath(folder, "diagnose_$(case_name).png"), fig)
     return nothing
 end
@@ -172,11 +181,13 @@ function diagnose_report(case_names, folder)
         diagnose(name, folder, rows)
     end
     io = IOBuffer()
-    println(io, "# Diffusivities at the base of the mixed layer: LES fluxes against the columns\n")
-    println(io, "At the depth of the LES's maximum N² at the end of the run; medians over the second half. κ_LES from the ",
-                "resolved fluxes. Ratios > 1: the column mixes more than the LES at the base.\n")
-    println(io, "| Case | Profile | base (m) | Ri | κc (m²/s) | κu (m²/s) | Pr | κc / κc_LES | κu / κu_LES |")
-    println(io, "|---|---|---|---|---|---|---|---|---|")
+    println(io, "# Eddy diffusivities in the boundary layer: LES fluxes against the columns\n")
+    println(io, "Medians over the second half of the run, in two bands relative to the LES mixed-layer depth h(t): interior ",
+                "0.3–0.8 h and base 0.8–1.1 h. κ_LES from the resolved fluxes (negative or tiny values: no resolved mixing). ",
+                "h: each profile's own depth at the end. Ri at the base band. Ratios > 1: the column mixes more than the LES.\n")
+    println(io, "| Case | Profile | h (m) | Ri base | κc interior | κc base | κu interior | κu base | κc/LES interior | ",
+                "κc/LES base | κu/LES interior | κu/LES base |")
+    println(io, "|---|---|---|---|---|---|---|---|---|---|---|---|")
     foreach(r -> println(io, r), rows)
     text = String(take!(io))
     print(text)
