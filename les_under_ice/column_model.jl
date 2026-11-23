@@ -29,9 +29,9 @@ function column_model(case, closure, spacing)
 end
 
 # The buoyancy profile at the end of a run (b, or from T and S for seawater), without writing output: for screen.jl
-function final_buoyancy(case, closure, spacing)
+function final_buoyancy(case, closure, spacing; Δt = 1minute)
     model = column_model(case, closure, spacing)
-    simulation = Simulation(model; Δt = 1minute, stop_time = case.stop_time, verbose = false)
+    simulation = Simulation(model; Δt, stop_time = case.stop_time, verbose = false)
     run!(simulation)
     if case.seawater
         T, S = vec(Array(interior(model.tracers.T))), vec(Array(interior(model.tracers.S)))
@@ -42,11 +42,11 @@ function final_buoyancy(case, closure, spacing)
 end
 
 # CATKE adds its TKE tracer e itself. In a function, so a REPL rerun has no soft-scope warnings.
-function run_column(case_name, case, variant, closure, spacing;
+function run_column(case_name, case, variant, closure, spacing; Δt = 1minute,
                     file = joinpath(output_folder(), @sprintf("%s_column_%s_%s.jld2", case_name, variant, spacing_label(spacing))))
     model = column_model(case, closure, spacing)
     tracer_outputs = case.seawater ? (; T = model.tracers.T, S = model.tracers.S) : (; b = model.tracers.b)
-    simulation = Simulation(model; Δt = 1minute, stop_time = case.stop_time)
+    simulation = Simulation(model; Δt, stop_time = case.stop_time)
     # Diffusivities on faces: κc for tracers, κu for momentum (both CATKE and k-ε have them), for diagnose_fluxes.jl
     diffusivities = (; κc = model.closure_fields.κc,
                        (hasproperty(model.closure_fields, :κu) ? (; κu = model.closure_fields.κu) : (;))...)
