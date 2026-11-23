@@ -25,7 +25,8 @@ columns with CATKE variants, k-ε and NEMO's TKE at 1, 4 and 8 m, with the same 
   below the top cell when nothing drives turbulence?
 - CATKE recalibration, step 1: `diagnose_fluxes.jl` (eddy diffusivities from the LES fluxes against the columns'
   diffusivities, at the base of the mixed layer); step 2: `variants.jl` (CATKE with one suspect parameter changed at a
-  time, on no-wave targets and guard cases). `column_model.jl` and `nemo_model.jl` hold the column models.
+  time, on no-wave targets and guard cases). Step 3: `screen.jl` (Morris screening of the 24 active CATKE parameters, Distributed workers). `column_model.jl` and
+  `nemo_model.jl` hold the column models.
 - Columns run at 1, 4, 8 m and on the pan-Arctic model's vertical grids (`nz50`, `nz100`: setup.jl's exponential
   grid cut at the domain depth).
 - `scan.jl <case> [Δz]`: step 2, a scan of Cˢ × Cᵂu★ in columns against our LES (default strong_wind, no waves).
