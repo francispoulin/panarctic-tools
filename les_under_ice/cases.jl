@@ -223,7 +223,8 @@ function column_profiles(file)
     if is_nemo
         return jldopen(file) do f
             (; zc = f["zc"], zf = f["zf"], t = f["t"], b = f["b"], u = f["u"], v = f["v"],
-               T = haskey(f, "T") ? f["T"] : nothing, S = haskey(f, "S") ? f["S"] : nothing)
+               T = haskey(f, "T") ? f["T"] : nothing, S = haskey(f, "S") ? f["S"] : nothing,
+               κc = haskey(f, "κc") ? f["κc"] : nothing, κu = haskey(f, "κu") ? f["κu"] : nothing)
         end
     end
     seawater = jldopen(f -> haskey(f["timeseries"], "S"), file)
@@ -239,8 +240,10 @@ function column_profiles(file)
         b, T, S = profiles(B), nothing, nothing
         grid, times = B.grid, B.times
     end
+    # Diffusivities on faces, when the file has them (columns since 22 Nov)
+    diffusivity(name) = jldopen(f -> haskey(f["timeseries"], name), file) ? profiles(FieldTimeSeries(file, name)) : nothing
     return (; zc = collect(znodes(grid, Center())), zf = collect(znodes(grid, Face())), t = times,
-              b, u = profiles(U), v = profiles(V), T, S)
+              b, u = profiles(U), v = profiles(V), T, S, κc = diffusivity("κc"), κu = diffusivity("κu"))
 end
 
 # The LES's horizontally averaged output is read the same way
