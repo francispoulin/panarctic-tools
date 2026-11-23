@@ -35,48 +35,7 @@ include(joinpath(@__DIR__, "column_model.jl"))
 cap_spacings = (!isempty(ARGS) && ARGS[1] == "dz4") ? (4,) : (4, "nz50")
 empty!(ARGS)
 
-const TKEModule = Oceananigans.TurbulenceClosures.TKEBasedVerticalDiffusivities
-
-# Once per process: redefining a method again invalidates compiled code (workflow.md)
-if !isdefined(TKEModule, :rotation_cap)
-    @eval TKEModule begin
-        const rotation_cap = Ref((Cᶠ = 0.0, f = 0.0))
-
-        @inline function rotation_mixing_length(w★, FT)
-            Cᶠ, f = rotation_cap[]
-            off = (Cᶠ == 0) | (f == 0)
-            return ifelse(off, FT(Inf), FT(Cᶠ * w★ / abs(f)))
-        end
-
-        @inline function stable_length_scaleᶜᶜᶠ(i, j, k, grid, closure, e, velocities, tracers, buoyancy)
-            Cˢ = closure.mixing_length.Cˢ
-            Cᵇ = closure.mixing_length.Cᵇ
-            d_up   = Cˢ * depthᶜᶜᶠ(i, j, k, grid)
-            d_down = Cᵇ * height_above_bottomᶜᶜᶠ(i, j, k, grid)
-            d = min(d_up, d_down)
-            ℓᴺ = stratification_mixing_lengthᶜᶜᶠ(i, j, k, grid, closure, e, tracers, buoyancy)
-            w★ = ℑzᵃᵃᶠ(i, j, k, grid, turbulent_velocityᶜᶜᶜ, closure, e)
-            ℓᶠ = rotation_mixing_length(w★, eltype(grid))
-            ℓ = min(d, ℓᴺ, ℓᶠ)
-            ℓ = ifelse(isnan(ℓ), d, ℓ)
-            return ℓ
-        end
-
-        @inline function stable_length_scaleᶜᶜᶜ(i, j, k, grid, closure, e, velocities, tracers, buoyancy)
-            Cˢ = closure.mixing_length.Cˢ
-            Cᵇ = closure.mixing_length.Cᵇ
-            d_up   = Cˢ * depthᶜᶜᶜ(i, j, k, grid)
-            d_down = Cᵇ * height_above_bottomᶜᶜᶜ(i, j, k, grid)
-            d = min(d_up, d_down)
-            ℓᴺ = stratification_mixing_lengthᶜᶜᶜ(i, j, k, grid, closure, e, tracers, buoyancy)
-            w★ = turbulent_velocityᶜᶜᶜ(i, j, k, grid, closure, e)
-            ℓᶠ = rotation_mixing_length(w★, eltype(grid))
-            ℓ = min(d, ℓᴺ, ℓᶠ)
-            ℓ = ifelse(isnan(ℓ), d, ℓ)
-            return ℓ
-        end
-    end
-end
+include(joinpath(@__DIR__, "rotation_cap_override.jl"))     # once per process; set_rotation_cap!
 
 cap_catke(; mixing_length = (;)) = CATKEVerticalDiffusivity(mixing_length = CATKEMixingLength(; mixing_length...),
                                                             turbulent_kinetic_energy_equation = CATKEEquation())
@@ -119,11 +78,11 @@ function run_rotation_cap(folder)
         for (variant, (closure, Cᶠ)) in cap_variants
             file = joinpath(cap_folder, "$(name)_$(variant)_$(grid).jld2")
             if !isfile(file)
-                TKEModule.rotation_cap[] = (Cᶠ = Cᶠ, f = case.f)
+                set_rotation_cap!(Cᶠ, case.f)
                 try
                     run_column(name, case, variant, closure, spacing; file)
                 finally
-                    TKEModule.rotation_cap[] = (Cᶠ = 0.0, f = 0.0)
+                    set_rotation_cap!(0, 0)
                 end
             end
             col = column_profiles(file)

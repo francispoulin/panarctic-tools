@@ -252,12 +252,24 @@ les_profiles(file) = column_profiles(file)
 # Vertical grids for the columns: a uniform spacing (m), or the pan-Arctic model's grid ("nz50", "nz100": setup.jl's
 # ExponentialDiscretization(Nz, −5000, 0; scale = 1250) cut at the case's depth; its bottom face moved to the domain
 # bottom). Faces ascending.
+# A function, not a const: cases.jl is included again in reused REPLs.
+# "glorys50": GLORYS12's 50 levels (NEMO ORCA standard; T-point depths below), faces halfway between them, top face at 0:
+# top cell ~1 m, ~2 m at 10 m depth, ~4 m at 25 m (Greg Wagner on #48, 23 Nov: more vertical resolution, as GLORYS).
+glorys_centres() = [0.494, 1.541, 2.646, 3.819, 5.078, 6.441, 7.930, 9.573, 11.405, 13.467, 15.810, 18.496, 21.599,
+                        25.211, 29.445, 34.434, 40.344, 47.374, 55.764, 65.807, 77.854, 92.326, 109.729, 130.666, 155.851,
+                        186.126, 222.475, 266.040, 318.127, 380.213, 453.938, 541.089, 643.567, 763.333, 902.339,
+                        1062.440, 1245.291, 1452.251, 1684.284, 1941.893, 2225.078, 2533.336, 2865.703, 3220.820,
+                        3597.032, 3992.484, 4405.224, 4833.291, 5274.784, 5727.917]
 function column_faces(spacing, depth)
     spacing isa Number && return collect(range(-depth, 0; length = round(Int, depth / spacing) + 1))
-    Nz = parse(Int, replace(String(spacing), "nz" => ""))
-    model_grid = RectilinearGrid(CPU(); size = Nz, z = ExponentialDiscretization(Nz, -5000, 0; scale = 1250),
-                                 topology = (Flat, Flat, Bounded))
-    faces = collect(znodes(model_grid, Face()))
+    if String(spacing) == "glorys50"
+        faces = sort(-vcat(0.0, (glorys_centres()[1:end-1] .+ glorys_centres()[2:end]) ./ 2))
+    else
+        Nz = parse(Int, replace(String(spacing), "nz" => ""))
+        model_grid = RectilinearGrid(CPU(); size = Nz, z = ExponentialDiscretization(Nz, -5000, 0; scale = 1250),
+                                     topology = (Flat, Flat, Bounded))
+        faces = collect(znodes(model_grid, Face()))
+    end
     faces = faces[faces .> -depth + 1e-6]
     # no sliver at the bottom: the lowest cell at least half the one above it
     length(faces) > 1 && faces[1] + depth < 0.5 * (faces[2] - faces[1]) && (faces = faces[2:end])
