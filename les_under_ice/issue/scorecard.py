@@ -2,7 +2,7 @@
 # (written by scorecard_numbers.jl on pelee, 23 Nov: every depth with the current, interpolated measure).
 #   scorecard.png        CATKE, k-ε and NEMO's TKE against the LES, 4 m columns, Δt = 1 min
 #   scorecard_catke.png  default against adapted CATKE (rotation limit C^f = 0.1, Cˢ = 0.991, half the surface TKE flux),
-#                        4 m and GLORYS's 50 levels, Δt = 10 min
+#                        4 m and GLORYS's vertical grid (1 m top cell), Δt = 10 min
 # python3 scorecard.py
 import csv
 import matplotlib
@@ -117,9 +117,9 @@ draw(["catke_dz4_dt1", "k_epsilon_dz4_dt1", "nemo_dz4_dt1"], ["CATKE", "k-ε", "
      "scorecard.png")
 
 draw(["catke_stock_dz4_dt10", "catke_adapted_dz4_dt10", "catke_stock_glorys50_dt10", "catke_adapted_glorys50_dt10"],
-     ["Default\n4 m", "Adapted\n4 m", "Default\nGLORYS levels", "Adapted\nGLORYS levels"],
+     ["Default\n4 m", "Adapted\n4 m", "Default\n1 m top cell", "Adapted\n1 m top cell"],
      "Adapting CATKE to no waves and rotation: default against adapted",
      units + "\nΔt = 10 min. Adapted: rotation limit ℓ ≤ 0.1 √e/|f|, Cˢ = 0.991 (κ = 0.41), half the surface TKE flux.\n"
-     "GLORYS levels: 1 m top cell, 2 m at 10 m depth, 4 m at 25 m.",
+     "Left: uniform 4 m cells. Right: the same columns on GLORYS's vertical grid (1 m top cell, 2 m at 10 m, 4 m at 25 m).",
      "scorecard_catke.png", mark_targets=True, separator=2.0)
 print("wrote scorecard.png and scorecard_catke.png")
