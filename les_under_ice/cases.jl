@@ -128,6 +128,50 @@ cases["arctic_ice_drag_melt"]  = seawater_case(; arctic_initial..., arctic_drag.
 cases["arctic_calm_melt"] = seawater_case(; arctic_initial..., Js = 5.2e-6)
 rung3_cases = ["kato_phillips", "rotating_stress", "arctic_ice_drag", "arctic_ice_drag_brine", "arctic_ice_drag_melt"]
 
+# Calibration matrix (23 Nov): 21 LES at 1 m, 4 days (rotating stress 1 day), each one setting away from the cases above,
+# so the fit has to follow the scaling with drift speed, latitude, surface flux and stratification. Run by les_matrix.jl.
+#   drift speed    uᵢ = 0.1, 0.3 (drag, brine, melt) and 0.4 m/s (drag, brine); 0.2 m/s are the cases above
+#   latitude       f = 0 (drag), 0.7e-4 and 1.0e-4 s⁻¹ (drag, brine): is the rotation limit about rotation?
+#   halocline      half and double the salinity gradient (drag, brine)
+#   mixed layer    20 m instead of 40 m (drag, melt)
+#   stress         rotating_stress at f = 0.5e-4 and 1.0e-4 s⁻¹ (with kato_phillips, f = 0, and rotating_stress, 1.4e-4)
+# Same initial profile as the cases above (idealised Beaufort winter: 40 m mixed layer at −1.6 °C, S = 30, halocline).
+arctic_flux(flux) = flux == :brine ? -1.3e-5 : flux == :melt ? 5.2e-6 : 0.0
+function arctic_matrix_case(; uᵢ = 0.2, flux = :drag, f = 1.4e-4, dSdz_halocline = arctic_profile.dSdz_halocline,
+                              mixed_layer_depth = arctic_profile.mixed_layer_depth)
+    p = merge(arctic_profile, (; dSdz_halocline, mixed_layer_depth))
+    return seawater_case(; T_init = z -> p.T, S_init = z -> arctic_salinity(z; p), dTdz_bottom = 0.0,
+                           dSdz_bottom = -p.dSdz_halocline, ice_drag = true, uᵢ, vᵢ = 0.0, Cd = 5e-3,
+                           Js = arctic_flux(flux), f)
+end
+flux_suffix(flux) = flux == :drag ? "" : "_" * String(flux)
+les_matrix = String[]
+function add_matrix_case!(name, case)
+    cases[name] = case
+    push!(les_matrix, name)
+end
+for (uᵢ, fluxes) in ((0.1, (:drag, :brine, :melt)), (0.3, (:drag, :brine, :melt)), (0.4, (:drag, :brine)))
+    for flux in fluxes
+        add_matrix_case!("arctic_ice_drag_u$(uᵢ)" * flux_suffix(flux), arctic_matrix_case(; uᵢ, flux))
+    end
+end
+add_matrix_case!("arctic_ice_drag_f0", arctic_matrix_case(; f = 0.0))
+for (label, f) in (("0.7e-4", 0.7e-4), ("1.0e-4", 1.0e-4)), flux in (:drag, :brine)
+    add_matrix_case!("arctic_ice_drag_f$(label)" * flux_suffix(flux), arctic_matrix_case(; f, flux))
+end
+for (label, factor) in (("weak", 0.5), ("strong", 2.0)), flux in (:drag, :brine)
+    add_matrix_case!("arctic_ice_drag_$(label)_halocline" * flux_suffix(flux),
+                     arctic_matrix_case(; flux, dSdz_halocline = factor * arctic_profile.dSdz_halocline))
+end
+for flux in (:drag, :melt)
+    add_matrix_case!("arctic_ice_drag_ml20" * flux_suffix(flux), arctic_matrix_case(; flux, mixed_layer_depth = 20.0))
+end
+for (label, f) in (("0.5e-4", 0.5e-4), ("1.0e-4", 1.0e-4))
+    add_matrix_case!("rotating_stress_f$(label)",
+                     buoyancy_case(; τx = -4e-4, f, b_init = z -> stress_N² * z, N²_bottom = stress_N²,
+                                     depth = 128.0, les_spacing = 1.0, les_width = 256.0))
+end
+
 # Quadratic ice–ocean drag as top momentum fluxes (positive upward: the ocean gains momentum towards the ice velocity
 # when the flux is negative). Discrete form: the top cell's velocity, the other component interpolated to the point.
 # LES (3-D, staggered) and column (one point: no interpolation) versions.
@@ -316,7 +360,7 @@ end
 
 # The depth measure of each kind of case: the base of the mixed layer for uniform N² (stress and convection cases), the
 # threshold depth otherwise
-uniform_N²(name) = name in ("kato_phillips", "rotating_stress") ? stress_N² :
+uniform_N²(name) = (name == "kato_phillips" || startswith(name, "rotating_stress")) ? stress_N² :
                    startswith(name, "convection_") ? first(p[1] for p in convection_suite if convection_case_name(p...) == name) :
                    nothing
 case_depth(name, case, b, zc; interpolate = true) =
