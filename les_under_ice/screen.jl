@@ -89,14 +89,15 @@ end
                                     turbulent_kinetic_energy_equation = CATKEEquation(; eq...))
 end
 
+# Returns the final buoyancy profile, or the error text (a parameter set that blows up is recorded as missing, but the
+# error is kept so that a bug that fails every run is reported instead of becoming NaN everywhere)
 @everywhere function screened_run(case_name, names, values, constructors, spacing)
     case = case_parameters(case_name)
-    closure = screened_closure(names, values, constructors)
     b = with_logger(NullLogger()) do
         try
-            final_buoyancy(case, closure, spacing)
+            final_buoyancy(case, screened_closure(names, values, constructors), spacing)
         catch err
-            nothing                                       # a parameter set that blows up: recorded as missing
+            sprint(showerror, err)
         end
     end
     return b
@@ -126,14 +127,31 @@ function run_screen(folder, r)
         name => case_depth(name, case_parameters(name), b, zc[name])
     end)
 
-    jobs = [(name, i) for name in screen_cases for i in 1:size(points, 1)]
+    # Everything a worker needs is computed here and sent as plain data: the function given to pmap must not call
+    # functions or read globals that exist only on this process (Julia ≥ 1.12 refuses to rebuild it on the worker:
+    # "UndefVarError: `#parameter_value` not defined in `Main`", 23 Nov)
+    spacing = screen_spacing
+    parameter_sets = [values_of(points[i, :]) for i in 1:size(points, 1)]
+    jobs = [(name, parameter_sets[i]) for name in screen_cases for i in 1:size(points, 1)]
+    job_keys = [(name, i) for name in screen_cases for i in 1:size(points, 1)]
+
+    # Fail fast: one column with the default parameters on a worker, errors not caught (~1 min)
+    check = remotecall_fetch(screened_run, first(workers()), "kato_phillips", names, defaults, constructors, spacing)
+    check isa AbstractString && error("Default-parameter column failed on a worker:\n$check")
+    @info "Check passed (default parameters, kato_phillips, on worker $(first(workers())))"
+
     @info "Screening: $(length(jobs)) columns on $(nworkers()) workers"
-    profiles = pmap(jobs) do (name, i)
-        screened_run(name, names, values_of(points[i, :]), constructors, screen_spacing)
+    profiles = pmap(jobs) do (name, parameters)
+        screened_run(name, names, parameters, constructors, spacing)
+    end
+    failures = [b for b in profiles if b isa AbstractString]
+    if !isempty(failures)
+        @warn "$(length(failures)) of $(length(jobs)) columns failed; distinct errors:"
+        foreach(m -> println("  ", first(m, 300)), unique(failures))
     end
     errors = Dict{Tuple{String, Int}, Float64}()
-    for ((name, i), b) in zip(jobs, profiles)
-        errors[(name, i)] = b === nothing ? NaN :
+    for ((name, i), b) in zip(job_keys, profiles)
+        errors[(name, i)] = b isa AbstractString ? NaN :
                             abs(case_depth(name, case_parameters(name), b, zc[name]) - h_les[name]) / h_les[name]
     end
 
