@@ -11,6 +11,8 @@
 #           256 × 256 m at 1 m for arctic_brine_convection (8.4 million cells)
 #   small   256 × 256 m at 2 m (2.1 million cells; a few minutes): a quick check
 #   fine    256 × 256 m at 1 m (16.8 million cells): when the top metres matter (1 m columns)
+# A third argument "cpu" runs on the CPU even when a GPU is there (23 Nov: CPU cost of the LES matrix), e.g.
+#     empty!(ARGS); push!(ARGS, "arctic_ice_drag", "small", "cpu")
 # Horizontally the domain must stay several times wider than the boundary layer (plumes as wide as it is deep).
 
 using Oceananigans, Oceananigans.Units
@@ -22,7 +24,8 @@ case_name = isempty(ARGS) ? "free_convection" : ARGS[1]
 size_name = length(ARGS) ≥ 2 ? ARGS[2] : "default"
 size_name in ("default", "small", "fine") || error("Size must be small or fine (or nothing), not $size_name")
 case      = case_parameters(case_name)
-arch      = CUDA.functional() ? GPU() : CPU()
+arch_name = length(ARGS) ≥ 3 ? ARGS[3] : "auto"     # "cpu" forces the CPU (threads: julia -t N)
+arch      = arch_name == "cpu" ? CPU() : CUDA.functional() ? GPU() : CPU()
 
 Δ  = size_name == "fine" ? 1.0 : size_name == "small" ? 2.0 : case.les_spacing   # grid spacing (m)
 Lh = size_name == "default" ? case.les_width : 256.0                               # horizontal extent (m)
