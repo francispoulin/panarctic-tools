@@ -1,0 +1,92 @@
+From 3ba72019579cfb9d780931f3d33b70892ed83582 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 24 Nov 2026 07:40:47 -0500
+Subject: [PATCH] NEMO TKE: load the closure at the top level of
+ nemo_tke_presets.jl (world age), and only for closure = "NEMO"
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Loading it inside nemo_tke_closure() left the calling function in an older world, so CATKE's own κuᶜᶜᶠ ran with a
+NEMOMixingLength ("type NEMOMixingLength has no field Cᶜu"). Now loaded when the file is included.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AbhhvoXen2vZSP4ZrEkbYa
+---
+ nemo_tke_presets.jl | 26 +++++++++++++++-----------
+ panarctic.jl        | 12 +++++++-----
+ 2 files changed, 22 insertions(+), 16 deletions(-)
+
+diff --git a/nemo_tke_presets.jl b/nemo_tke_presets.jl
+index 0bbd2f8..764d1a2 100644
+--- a/nemo_tke_presets.jl
++++ b/nemo_tke_presets.jl
+@@ -15,6 +15,17 @@
+ #     Not included: the TKE penetration below the mixed layer (nn_etau; "mixing length set to 10 m" in the QUID is
+ #     most likely its decay depth, nn_htau = 0), which NEMO multiplies by (1 − ice fraction), and Langmuir cells.
+ 
++# Load the closure into Oceananigans now, at the top level of this file, so that every later top-level call sees its
++# methods (Julia's world age: a function that is already running when the methods are defined keeps dispatching to
++# the old ones, e.g. CATKE's own κuᶜᶜᶠ, which fails with "NEMOMixingLength has no field Cᶜu").
++let TKE = Oceananigans.TurbulenceClosures.TKEBasedVerticalDiffusivities
++    if !isdefined(TKE, :NEMOTKEVerticalDiffusivity)
++        Base.include(TKE, joinpath(@__DIR__, "nemo_tke_vertical_diffusivity.jl"))
++    end
++end
++:ℓ₀ᵐⁱⁿ in fieldnames(Oceananigans.TurbulenceClosures.TKEBasedVerticalDiffusivities.NEMOMixingLength) ||
++    error("This Julia process has an older NEMO closure loaded (before patch 087): start a new REPL")
++
+ function nemo_tke_preset(name)
+     if name == "reference"
+         return (mixing_length = NamedTuple(), tke_equation = NamedTuple(), minimum_tke = 1e-6)
+@@ -27,20 +38,13 @@ function nemo_tke_preset(name)
+     end
+ end
+ 
+-# The closure for a preset; `κᵉᵛᵈ` and `Cᵉᵇ` (nothing: the preset's) override it. Loads the closure into Oceananigans
+-# if needed (the vendored copy next to this file).
++# The closure for a preset; `κᵉᵛᵈ` and `Cᵉᵇ` (nothing: the preset's) override it.
+ function nemo_tke_closure(name = "reference"; κᵉᵛᵈ = nothing, Cᵉᵇ = nothing)
+     TKE = Oceananigans.TurbulenceClosures.TKEBasedVerticalDiffusivities
+-    if !isdefined(TKE, :NEMOTKEVerticalDiffusivity)
+-        Base.include(TKE, joinpath(@__DIR__, "nemo_tke_vertical_diffusivity.jl"))
+-    end
+-    :ℓ₀ᵐⁱⁿ in Base.invokelatest(fieldnames, TKE.NEMOMixingLength) ||
+-        error("This Julia process has an older NEMO closure loaded (before patch 087): start a new REPL")
+     preset = nemo_tke_preset(name)
+     mixing_length = isnothing(κᵉᵛᵈ) ? preset.mixing_length : merge(preset.mixing_length, (; κᵉᵛᵈ = Float64(κᵉᵛᵈ)))
+     tke_equation = isnothing(Cᵉᵇ) ? preset.tke_equation : merge(preset.tke_equation, (; Cᵉᵇ = Float64(Cᵉᵇ)))
+-    return Base.invokelatest(TKE.NEMOTKEVerticalDiffusivity;
+-                             mixing_length = Base.invokelatest(TKE.NEMOMixingLength; mixing_length...),
+-                             turbulent_kinetic_energy_equation = Base.invokelatest(TKE.NEMOTKEEquation; tke_equation...),
+-                             minimum_tke = preset.minimum_tke)
++    return TKE.NEMOTKEVerticalDiffusivity(; mixing_length = TKE.NEMOMixingLength(; mixing_length...),
++                                          turbulent_kinetic_energy_equation = TKE.NEMOTKEEquation(; tke_equation...),
++                                          minimum_tke = preset.minimum_tke)
+ end
+diff --git a/panarctic.jl b/panarctic.jl
+index d6da73d..452f36b 100644
+--- a/panarctic.jl
++++ b/panarctic.jl
+@@ -102,11 +102,13 @@ TKEClosures = Oceananigans.TurbulenceClosures.TKEBasedVerticalDiffusivities
+ #                                                surface mixing length 0.4 m, background 1e-4 / 1e-5 m²/s)
+ #   [ocean] nemo_surface_tke                     surface TKE = this × u★² (rn_ebb; default: the preset's, 67.83 or 3.75)
+ #   [ocean] nemo_convective_diffusivity = 100    tracer diffusivity (m²/s) where N² < 0 (rn_evd; 0 = off)
+-include(joinpath(@__DIR__, "nemo_tke_presets.jl"))
+-nemo_parameters = get(ocean_settings, "nemo_parameters", "reference")
+-nemo_preset_surface_tke = get(nemo_tke_preset(nemo_parameters).tke_equation, :Cᵉᵇ, 67.83)   # also checks the name
+-nemo_surface_tke = Float64(get(ocean_settings, "nemo_surface_tke", nemo_preset_surface_tke))
+-nemo_convective_diffusivity = Float64(get(ocean_settings, "nemo_convective_diffusivity", 100.0))
++if closure_name == "NEMO"
++    include(joinpath(@__DIR__, "nemo_tke_presets.jl"))   # loads the closure into Oceananigans (at the top level)
++    nemo_parameters = get(ocean_settings, "nemo_parameters", "reference")
++    nemo_preset_surface_tke = get(nemo_tke_preset(nemo_parameters).tke_equation, :Cᵉᵇ, 67.83)   # also checks the name
++    nemo_surface_tke = Float64(get(ocean_settings, "nemo_surface_tke", nemo_preset_surface_tke))
++    nemo_convective_diffusivity = Float64(get(ocean_settings, "nemo_convective_diffusivity", 100.0))
++end
+ # [ocean] catke_surface_tke_scale multiplies CATKE's surface shear-driven TKE flux coefficient Cᵂu★ (3.179 by
+ # default): the turbulence put in at the surface by the wind and ice stress, ∝ u★³. 1 (default) is stock CATKE; 0
+ # switches that source off while CATKE still mixes by convection and by shear below the surface.
+-- 
+2.43.0
+

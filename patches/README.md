@@ -92,6 +92,7 @@ Numbered in the order to apply, across repositories. Each was checked to apply w
 | 085 | PanArcticShenanigans | `fjp/test-061` (option, on top of 083) | after 083 | `[ocean] closure = "NEMO"` (`nemo_tke_vertical_diffusivity.jl`, identical to 084's, loaded into Oceananigans once per process; no Manifest change), `nemo_surface_tke`, `nemo_convective_diffusivity`; `under_ice_coupling.jl` safe for it; `config_smoke_test_nemo.toml`, `config_sep2005_30d_nemo_lim2.toml`, `config_sep2005_30d_nemo_lim2_nz100.toml` |
 | 086 | Oceananigans | `fjp/nemo-tke` | after 084 | `NEMOMixingLength`: separate surface floor `ℓ₀ᵐⁱⁿ` (surface length max(ℓ₀ᵐⁱⁿ, Cᴿ u★²); default unchanged), so NEMO 3.1-3.2's `ln_mxl0 = false`, `rn_lmin0 = 0.4`, `rn_lmin = 0.1` can be set; test added |
 | 087 | PanArcticShenanigans | `fjp/test-061` (option, on top of 085) | after 085 | `[ocean] nemo_parameters = "reference"` / `"glorys12"` (`nemo_tke_presets.jl`: GLORYS12's NEMO 3.1 TKE defaults, surface TKE 3.75 u★², surface mixing length 0.4 m, background 1e-4 / 1e-5); closure file updated as 086; `config_sep2005_30d_nemo_glorys12_lim2.toml`, `..._nz100.toml`. A REPL that loaded 085's closure must be restarted |
+| 088 | PanArcticShenanigans | `fjp/test-061` (fix, on top of 087) | after 087 | NEMO closure loaded at the top level of `nemo_tke_presets.jl` (Julia world age: loading it inside `nemo_tke_closure()` made CATKE's own κuᶜᶜᶠ run with a `NEMOMixingLength`, "no field Cᶜu"); presets only included for `closure = "NEMO"` |
 
 ## Applying 001–006
 
