@@ -65,7 +65,7 @@ done
 echo
 echo "== Run queue in $PAS/queue =="
 for state in running queue failed; do
-    files=$(ls "$PAS/queue/$state" 2>/dev/null)
+    files=$(ls "$PAS/queue/$state" 2>/dev/null | grep -v '\.claim$')     # .claim: the runner's lock file
     echo "  $state ($(echo -n "$files" | grep -c .)):"
     [ -n "$files" ] && echo "$files" | sed 's/^/    /'
 done
