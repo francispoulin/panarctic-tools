@@ -1,0 +1,399 @@
+From ff35e1d42837f316dd395e95b75f2a046739b856 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 24 Nov 2026 06:46:08 -0500
+Subject: [PATCH] NEMO TKE: [ocean] nemo_parameters = "glorys12" preset
+ (GLORYS12's NEMO 3.1 TKE defaults) and two 30-day configs
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+nemo_tke_presets.jl: "reference" (NEMO 3.6-4.x reference namelist, as before) and "glorys12" (zdftke2.F90 of NEMO 3.1:
+surface TKE 3.75 u★², surface mixing length 0.4 m, minimum length 0.1 m, Prandtl number max(0.1, 0.2/max(0.2, Ri)),
+background 1e-4 / 1e-5 m²/s, emin 0.7071e-6), and nemo_tke_closure(), which loads the closure if needed and refuses an
+older one loaded in the same process. nemo_tke_vertical_diffusivity.jl updated as in Oceananigans fjp/nemo-tke (surface
+floor ℓ₀ᵐⁱⁿ). Configs config_sep2005_30d_nemo_glorys12_lim2.toml and ..._nz100.toml.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AbhhvoXen2vZSP4ZrEkbYa
+---
+ config_sep2005_30d_nemo_glorys12_lim2.toml    | 95 +++++++++++++++++++
+ ..._sep2005_30d_nemo_glorys12_lim2_nz100.toml | 95 +++++++++++++++++++
+ nemo_tke_presets.jl                           | 46 +++++++++
+ nemo_tke_vertical_diffusivity.jl              | 13 ++-
+ panarctic.jl                                  | 29 +++---
+ 5 files changed, 260 insertions(+), 18 deletions(-)
+ create mode 100644 config_sep2005_30d_nemo_glorys12_lim2.toml
+ create mode 100644 config_sep2005_30d_nemo_glorys12_lim2_nz100.toml
+ create mode 100644 nemo_tke_presets.jl
+
+diff --git a/config_sep2005_30d_nemo_glorys12_lim2.toml b/config_sep2005_30d_nemo_glorys12_lim2.toml
+new file mode 100644
+index 0000000..e96c050
+--- /dev/null
++++ b/config_sep2005_30d_nemo_glorys12_lim2.toml
+@@ -0,0 +1,95 @@
++# config_sep2005_30d_nemo_lim2.toml with NEMO's TKE parameters as GLORYS12 most likely runs them ([ocean] nemo_parameters = "glorys12",
++# patch 087: surface TKE 3.75 u★², surface mixing length 0.4 m, background 1e-4 / 1e-5 m²/s; see
++# nemo_tke_presets.jl). The sanity check: the same scheme and settings as GLORYS, so what still differs from GLORYS
++# is grid (50 levels here, GLORYS's top cell is 1 m), forcing, sea ice and assimilation. Ends with its scorecard.
++#   bash tools/submit.sh config_sep2005_30d_nemo_glorys12_lim2.toml
++
++architecture = "GPU"   # "GPU" or "CPU"
++experiment   = "sep2005_30d_nemo_glorys12_lim2"  # name of the run: output and figures go to output_dir/<experiment> and figure_dir/<experiment>
++
++[grid]
++spacing_km = 15     # largest horizontal grid spacing [km] (at the pole; ~15% finer near the Atlantic edge)
++Nz         = 50     # vertical levels
++depth      = 5000   # maximum depth (m)
++bathymetry       = "GEBCO2026"   # "GEBCO2026" (15″, with IBCAO), "ETOPO" (ETOPO 2022, 60″) or "GLORYS" (GLORYS's own sea floor)
++bottom           = "partial"     # "partial": bottom cells cut at the sea floor; "full": whole cells
++partial_cell_fix = true          # with partial cells: flux-form momentum advection at bottom-cell thickness jumps
++                                 # (Oceananigans.jl#6533), which removes the bottom jets of issue #6532
++
++[time]
++start_date = 2005-09-01   # initial condition (GLORYS); the run starts at 00:00 on this date
++end_date   = 2005-10-01   # the run ends at 00:00 on this date; for short tests a date and time, e.g. 1993-01-01T03:00
++dt_minutes = 10           # time step
++
++[atmosphere]
++jra55 = "multi_year"   # "multi_year": JRA55 for the run's own dates; "repeat_year": the 1990–91 repeat year
++pressure = false           # true: JRA55's sea-level pressure acts on the ocean (nested_pressure_fix.jl). Off for now: with it,
++                           # Fram Strait drifts far from GLORYS (1–5 Jan 1993, 15 km: day 4 −12.4 Sv, GLORYS −2.1, −5.6
++                           # without pressure; the same at 100 km), which looks like an error in the pressure path, not
++                           # physics. Main has had no pressure on the ocean since #43.
++inverse_barometer = false  # with pressure = true: GLORYS's η carries no response to the pressure (issue #37), so add the
++                           # inverse-barometer sea level −(pᵃ − ⟨pᵃ⟩)/(ρ₀g) to GLORYS's η at the open sides (Flather) and
++                           # to the initial free surface; its domain mean is removed, so the volume is unchanged.
++                           # Keep false with pressure = false: then neither the model nor GLORYS feels the pressure
++
++[output]
++average_hours   = 24      # time-averaged output (3D ocean, free surface, sea ice), written to output_dir
++checkpoint_days = 30      # how often the full model state is saved for restarts
++restart         = false   # true: continue from the latest checkpoint in output_dir
++monitor_hours   = 1       # monitor.csv: transports through the open sides, mean η against GLORYS's, volume budget,
++                          # fastest point (plotting/volume_budget.jl, plotting/max_speed.jl); 0 = off
++mixing_depth    = 60      # daily CATKE κᶜ and e over the top this many metres in arctic_mixing.jld2; 0 = off
++post_run_analysis = true  # at the end: clear the model from memory, then the scorecard (scorecard.md)
++
++[transports]
++# Volume, heat, salt and freshwater transports through the sections below and the open boundaries (see transports.jl).
++online                = true   # true: computed every time step and averaged over average_hours, written to arctic_transports.jld2
++reference_temperature = 0      # heat transport relative to this temperature (°C)
++reference_salinity    = 34.8   # freshwater transport relative to this salinity (g/kg)
++
++# Each section is a great-circle path through (longitude, latitude) waypoints. Positive transport flows to the right,
++# walking from the first waypoint to the last; these are ordered so that positive is into the Arctic. Both ends should
++# be on land, so the section spans the whole strait on any grid. Check with plotting/transport_sections.jl.
++[transports.sections]
++# Fram Strait follows the mooring array at 78°50′N; intermediate waypoints keep the great circles on that latitude.
++fram_strait         = { lon = [15.0, 10.0, 5.0, 0.0, -5.0, -10.0, -15.0, -20.0],
++                        lat = [78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333] }
++# Barents Sea Opening follows the mooring line from Norway (Fugløya) via Bjørnøya to Sørkapp, Svalbard.
++barents_sea_opening = { lon = [20.0, 19.0, 16.5],  lat = [70.0, 74.45, 77.0] }
++bering_strait       = { lon = [-166.0, -171.0], lat = [66.0, 66.0] }
++davis_strait        = { lon = [-53.0, -63.0],   lat = [67.0, 66.5] }
++
++[paths]
++data_dir   = ""   # where downloads are stored; "" = each dataset's default cache
++output_dir = "output"    # model output: time averages (.jld2), checkpoints and the config; one folder per experiment
++figure_dir = "figures"   # figures and movies from the plotting/ scripts; one folder per experiment
++
++[boundaries]
++velocity_inflow_days = 0.0417   # oblique radiation on u, v: nudging timescale toward GLORYS on inflow (0.0417 days = 1 hour).
++                                # With 1 day, a partial bottom cell on the Atlantic open face drifted to −0.9 m/s
++                                # (GLORYS −0.26); 1 hour removes it and moves the section transports by < 0.1 Sv
++tracer_inflow_km     = 20  # T, S reservoir inflow relaxation length, both open sides
++relaxation_hours     = 6   # T, S and baroclinic u, v relax toward GLORYS in a ~2/3° band along the open sides
++                           # over this timescale; 0 = off (nested_ocean_model's default is 6)
++
++# Volume control (volume_control.jl): the net inflow through the two open sides together is pinned at every barotropic
++# substep, as NEMO and ROMS do; Flather splits it between the sides. Without it the domain's volume drifts from GLORYS's.
++follow_glorys_volume      = true   # true: the net inflow follows GLORYS's domain-mean η, with the surface freshwater handed back
++volume_relaxation_days    = 1      # with follow_glorys_volume: time over which the remaining drift from GLORYS's mean η is removed
++follow_glorys_tendency    = false  # with follow_glorys_volume: true also follows GLORYS's rate of change exactly
++# net_inflow_Sv           = 0.0    # with follow_glorys_volume = false: a constant net inflow instead (Sv, positive into the domain);
++                                   # with neither, Flather alone (no volume control)
++net_inflow_depth_exponent = 0.5    # the pin's correction to each boundary column ∝ Hᵖ: 0 uniform per length, 1 uniform velocity
++                                   # (NEMO, ROMS), 0.5 a uniform shift of GLORYS's η in Flather
++
++[ocean]
++closure = "NEMO"   # NEMO's TKE scheme (patch 085): "CATKE" (default), "NEMO", "RiBased", "TKEDissipation" or "none"
++nemo_parameters = "glorys12"          # "reference" (NEMO 3.6-4.x namelist) or "glorys12" (NEMO 3.1 code defaults; patch 087)
++# nemo_surface_tke = 3.75             # surface TKE = this × u★² (NEMO's rn_ebb; default: the preset's)
++# nemo_convective_diffusivity = 100   # m²/s where N² < 0 (NEMO's rn_evd; 0 = off)
++
++[sea_ice]
++ice_salinity               = 6        # g/kg (default 4)
++ice_ocean_drag_coefficient = 5e-3     # (default 5.5e-3)
++ice_compressive_strength   = 20000    # P*, N/m² (default 27 500)
++albedo                     = "ccsm3"  # "constant" (0.7, default) or "ccsm3" (state-dependent, SeaIceAlbedo)
+diff --git a/config_sep2005_30d_nemo_glorys12_lim2_nz100.toml b/config_sep2005_30d_nemo_glorys12_lim2_nz100.toml
+new file mode 100644
+index 0000000..f768d7e
+--- /dev/null
++++ b/config_sep2005_30d_nemo_glorys12_lim2_nz100.toml
+@@ -0,0 +1,95 @@
++# config_sep2005_30d_nemo_lim2_nz100.toml with NEMO's TKE parameters as GLORYS12 most likely runs them ([ocean] nemo_parameters = "glorys12",
++# patch 087: surface TKE 3.75 u★², surface mixing length 0.4 m, background 1e-4 / 1e-5 m²/s; see
++# nemo_tke_presets.jl). The sanity check: the same scheme and settings as GLORYS, so what still differs from GLORYS
++# is grid (100 levels here, GLORYS's top cell is 1 m), forcing, sea ice and assimilation. Ends with its scorecard.
++#   bash tools/submit.sh config_sep2005_30d_nemo_glorys12_lim2_nz100.toml
++
++architecture = "GPU"   # "GPU" or "CPU"
++experiment   = "sep2005_30d_nemo_glorys12_lim2_nz100"  # name of the run: output and figures go to output_dir/<experiment> and figure_dir/<experiment>
++
++[grid]
++spacing_km = 15     # largest horizontal grid spacing [km] (at the pole; ~15% finer near the Atlantic edge)
++Nz         = 100    # vertical levels
++depth      = 5000   # maximum depth (m)
++bathymetry       = "GEBCO2026"   # "GEBCO2026" (15″, with IBCAO), "ETOPO" (ETOPO 2022, 60″) or "GLORYS" (GLORYS's own sea floor)
++bottom           = "partial"     # "partial": bottom cells cut at the sea floor; "full": whole cells
++partial_cell_fix = true          # with partial cells: flux-form momentum advection at bottom-cell thickness jumps
++                                 # (Oceananigans.jl#6533), which removes the bottom jets of issue #6532
++
++[time]
++start_date = 2005-09-01   # initial condition (GLORYS); the run starts at 00:00 on this date
++end_date   = 2005-10-01   # the run ends at 00:00 on this date; for short tests a date and time, e.g. 1993-01-01T03:00
++dt_minutes = 10           # time step
++
++[atmosphere]
++jra55 = "multi_year"   # "multi_year": JRA55 for the run's own dates; "repeat_year": the 1990–91 repeat year
++pressure = false           # true: JRA55's sea-level pressure acts on the ocean (nested_pressure_fix.jl). Off for now: with it,
++                           # Fram Strait drifts far from GLORYS (1–5 Jan 1993, 15 km: day 4 −12.4 Sv, GLORYS −2.1, −5.6
++                           # without pressure; the same at 100 km), which looks like an error in the pressure path, not
++                           # physics. Main has had no pressure on the ocean since #43.
++inverse_barometer = false  # with pressure = true: GLORYS's η carries no response to the pressure (issue #37), so add the
++                           # inverse-barometer sea level −(pᵃ − ⟨pᵃ⟩)/(ρ₀g) to GLORYS's η at the open sides (Flather) and
++                           # to the initial free surface; its domain mean is removed, so the volume is unchanged.
++                           # Keep false with pressure = false: then neither the model nor GLORYS feels the pressure
++
++[output]
++average_hours   = 24      # time-averaged output (3D ocean, free surface, sea ice), written to output_dir
++checkpoint_days = 30      # how often the full model state is saved for restarts
++restart         = false   # true: continue from the latest checkpoint in output_dir
++monitor_hours   = 1       # monitor.csv: transports through the open sides, mean η against GLORYS's, volume budget,
++                          # fastest point (plotting/volume_budget.jl, plotting/max_speed.jl); 0 = off
++mixing_depth    = 60      # daily CATKE κᶜ and e over the top this many metres in arctic_mixing.jld2; 0 = off
++post_run_analysis = true  # at the end: clear the model from memory, then the scorecard (scorecard.md)
++
++[transports]
++# Volume, heat, salt and freshwater transports through the sections below and the open boundaries (see transports.jl).
++online                = true   # true: computed every time step and averaged over average_hours, written to arctic_transports.jld2
++reference_temperature = 0      # heat transport relative to this temperature (°C)
++reference_salinity    = 34.8   # freshwater transport relative to this salinity (g/kg)
++
++# Each section is a great-circle path through (longitude, latitude) waypoints. Positive transport flows to the right,
++# walking from the first waypoint to the last; these are ordered so that positive is into the Arctic. Both ends should
++# be on land, so the section spans the whole strait on any grid. Check with plotting/transport_sections.jl.
++[transports.sections]
++# Fram Strait follows the mooring array at 78°50′N; intermediate waypoints keep the great circles on that latitude.
++fram_strait         = { lon = [15.0, 10.0, 5.0, 0.0, -5.0, -10.0, -15.0, -20.0],
++                        lat = [78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333] }
++# Barents Sea Opening follows the mooring line from Norway (Fugløya) via Bjørnøya to Sørkapp, Svalbard.
++barents_sea_opening = { lon = [20.0, 19.0, 16.5],  lat = [70.0, 74.45, 77.0] }
++bering_strait       = { lon = [-166.0, -171.0], lat = [66.0, 66.0] }
++davis_strait        = { lon = [-53.0, -63.0],   lat = [67.0, 66.5] }
++
++[paths]
++data_dir   = ""   # where downloads are stored; "" = each dataset's default cache
++output_dir = "output"    # model output: time averages (.jld2), checkpoints and the config; one folder per experiment
++figure_dir = "figures"   # figures and movies from the plotting/ scripts; one folder per experiment
++
++[boundaries]
++velocity_inflow_days = 0.0417   # oblique radiation on u, v: nudging timescale toward GLORYS on inflow (0.0417 days = 1 hour).
++                                # With 1 day, a partial bottom cell on the Atlantic open face drifted to −0.9 m/s
++                                # (GLORYS −0.26); 1 hour removes it and moves the section transports by < 0.1 Sv
++tracer_inflow_km     = 20  # T, S reservoir inflow relaxation length, both open sides
++relaxation_hours     = 6   # T, S and baroclinic u, v relax toward GLORYS in a ~2/3° band along the open sides
++                           # over this timescale; 0 = off (nested_ocean_model's default is 6)
++
++# Volume control (volume_control.jl): the net inflow through the two open sides together is pinned at every barotropic
++# substep, as NEMO and ROMS do; Flather splits it between the sides. Without it the domain's volume drifts from GLORYS's.
++follow_glorys_volume      = true   # true: the net inflow follows GLORYS's domain-mean η, with the surface freshwater handed back
++volume_relaxation_days    = 1      # with follow_glorys_volume: time over which the remaining drift from GLORYS's mean η is removed
++follow_glorys_tendency    = false  # with follow_glorys_volume: true also follows GLORYS's rate of change exactly
++# net_inflow_Sv           = 0.0    # with follow_glorys_volume = false: a constant net inflow instead (Sv, positive into the domain);
++                                   # with neither, Flather alone (no volume control)
++net_inflow_depth_exponent = 0.5    # the pin's correction to each boundary column ∝ Hᵖ: 0 uniform per length, 1 uniform velocity
++                                   # (NEMO, ROMS), 0.5 a uniform shift of GLORYS's η in Flather
++
++[ocean]
++closure = "NEMO"   # NEMO's TKE scheme (patch 085): "CATKE" (default), "NEMO", "RiBased", "TKEDissipation" or "none"
++nemo_parameters = "glorys12"          # "reference" (NEMO 3.6-4.x namelist) or "glorys12" (NEMO 3.1 code defaults; patch 087)
++# nemo_surface_tke = 3.75             # surface TKE = this × u★² (NEMO's rn_ebb; default: the preset's)
++# nemo_convective_diffusivity = 100   # m²/s where N² < 0 (NEMO's rn_evd; 0 = off)
++
++[sea_ice]
++ice_salinity               = 6        # g/kg (default 4)
++ice_ocean_drag_coefficient = 5e-3     # (default 5.5e-3)
++ice_compressive_strength   = 20000    # P*, N/m² (default 27 500)
++albedo                     = "ccsm3"  # "constant" (0.7, default) or "ccsm3" (state-dependent, SeaIceAlbedo)
+diff --git a/nemo_tke_presets.jl b/nemo_tke_presets.jl
+new file mode 100644
+index 0000000..0bbd2f8
+--- /dev/null
++++ b/nemo_tke_presets.jl
+@@ -0,0 +1,46 @@
++# Parameter sets for NEMO's TKE scheme ([ocean] closure = "NEMO", [ocean] nemo_parameters), used by panarctic.jl and
++# by panarctic-tools/les_under_ice/nemo_closure_columns.jl. Each returns the keyword arguments of NEMOMixingLength and
++# NEMOTKEEquation and the minimum TKE (NEMOTKEVerticalDiffusivity's minimum_tke).
++#
++# "reference": NEMO 3.6-4.x's reference namelist (namzdf_tke), the closure's defaults: surface TKE 67.83 u★² with the
++#     stress-dependent surface mixing length (ln_mxl0 = true), minimum length 0.01 m, Riᶜ = 2/9, background
++#     1.2e-4 / 1.2e-5 m²/s.
++# "glorys12": what GLORYS12V1 most likely runs. GLORYS12 is NEMO 3.1 (Copernicus QUID GLO-001-030; Lellouche et al.
++#     2018, 2021) and its TKE module is zdftke2.F90 of September 2008 (which became zdftke.F90 in NEMO 3.2). Its
++#     defaults: rn_ebb = 3.75 (written 0.5 rn_ebb |τ| with τ summed over two u points, so e₀ = 3.75 u★²), ln_mxl0 =
++#     false (surface mixing length fixed at rn_lmin0 = 0.4 m), rn_lmin = 0.1 m in the interior and at the sea floor,
++#     Prandtl number max(0.1, 0.2 / max(0.2, Ri)), rn_emin = 0.7071e-6. Background avm0 = 1e-4, avt0 = 1e-5 m²/s and
++#     convection by enhanced vertical diffusion: Mercator's GLORYS12 product sheet (rn_avevd not published; NEMO's
++#     default 100 m²/s is kept). Mercator does not publish its namelist: these are the code defaults, an assumption.
++#     Not included: the TKE penetration below the mixed layer (nn_etau; "mixing length set to 10 m" in the QUID is
++#     most likely its decay depth, nn_htau = 0), which NEMO multiplies by (1 − ice fraction), and Langmuir cells.
++
++function nemo_tke_preset(name)
++    if name == "reference"
++        return (mixing_length = NamedTuple(), tke_equation = NamedTuple(), minimum_tke = 1e-6)
++    elseif name == "glorys12"
++        return (mixing_length = (Cᴿ = 0.0, ℓᵐⁱⁿ = 0.1, ℓ₀ᵐⁱⁿ = 0.4, Riᶜ = 0.2, Prᵐᵃˣ = 10.0, νᵇ = 1e-4, κᵇ = 1e-5),
++                tke_equation = (Cᴰ = 0.7, Cᵉᵇ = 3.75, e₀ᵐⁱⁿ = 1e-4),
++                minimum_tke = 0.7071e-6)
++    else
++        error("[ocean] nemo_parameters must be \"reference\" or \"glorys12\", not \"$name\"")
++    end
++end
++
++# The closure for a preset; `κᵉᵛᵈ` and `Cᵉᵇ` (nothing: the preset's) override it. Loads the closure into Oceananigans
++# if needed (the vendored copy next to this file).
++function nemo_tke_closure(name = "reference"; κᵉᵛᵈ = nothing, Cᵉᵇ = nothing)
++    TKE = Oceananigans.TurbulenceClosures.TKEBasedVerticalDiffusivities
++    if !isdefined(TKE, :NEMOTKEVerticalDiffusivity)
++        Base.include(TKE, joinpath(@__DIR__, "nemo_tke_vertical_diffusivity.jl"))
++    end
++    :ℓ₀ᵐⁱⁿ in Base.invokelatest(fieldnames, TKE.NEMOMixingLength) ||
++        error("This Julia process has an older NEMO closure loaded (before patch 087): start a new REPL")
++    preset = nemo_tke_preset(name)
++    mixing_length = isnothing(κᵉᵛᵈ) ? preset.mixing_length : merge(preset.mixing_length, (; κᵉᵛᵈ = Float64(κᵉᵛᵈ)))
++    tke_equation = isnothing(Cᵉᵇ) ? preset.tke_equation : merge(preset.tke_equation, (; Cᵉᵇ = Float64(Cᵉᵇ)))
++    return Base.invokelatest(TKE.NEMOTKEVerticalDiffusivity;
++                             mixing_length = Base.invokelatest(TKE.NEMOMixingLength; mixing_length...),
++                             turbulent_kinetic_energy_equation = Base.invokelatest(TKE.NEMOTKEEquation; tke_equation...),
++                             minimum_tke = preset.minimum_tke)
++end
+diff --git a/nemo_tke_vertical_diffusivity.jl b/nemo_tke_vertical_diffusivity.jl
+index bb7c232..10188b2 100644
+--- a/nemo_tke_vertical_diffusivity.jl
++++ b/nemo_tke_vertical_diffusivity.jl
+@@ -8,7 +8,8 @@
+ #   ∂t e = ∂z(κᵉ ∂z e) + νᵉ S² − κᶜ N² − Cᴰ e^{3/2} / ℓ,       κᵉ = νᵉ,  νᵉ = max(Cᵏ ℓ √e, νᵇ)
+ #   κᶜ = max(Pr⁻¹ max(Cᵏ ℓ √e, κᵇ), κᵇ),   Pr⁻¹ = max(1 / Prᵐᵃˣ, Riᶜ / max(Riᶜ, Ri))                (nn_pdl = 1)
+ #   ℓ = √(2e) / N on faces, then limited so that it grows by at most the distance between faces away from the sea
+-#       floor (ℓᵐⁱⁿ) and the surface (ℓ₀ = Cᴿ u★², the stress-dependent surface length of ln_mxl0)         (nn_mxl = 2)
++#       floor (ℓᵐⁱⁿ) and the surface (ℓ₀ = max(ℓ₀ᵐⁱⁿ, Cᴿ u★²), the stress-dependent surface length of ln_mxl0;
++#       Cᴿ = 0 and ℓ₀ᵐⁱⁿ = 0.4 m is NEMO 3.1-3.2's default, ln_mxl0 = false)                            (nn_mxl = 2)
+ #   e = e₀ = max(e₀ᵐⁱⁿ, Cᵉᵇ u★²) at the surface (rn_ebb: wave breaking, kept under ice as in NEMO), e ≥ minimum_tke
+ #   κᶜ = κᵉᵛᵈ where N² < −10⁻¹² (enhanced vertical diffusion, ln_zdfevd; νᵉᵛᵈ for momentum, off by default: nn_evdm = 0)
+ #
+@@ -34,7 +35,10 @@ with NEMO's reference values as defaults:
+ 
+ - `Cᵏ`: eddy diffusivity coefficient, νᵉ = Cᵏ ℓ √e (`rn_ediff` = 0.1)
+ - `Cᴿ`: surface mixing length ℓ₀ = Cᴿ u★², the von Kármán constant times Stacey's 2 × 10⁵ over g (`ln_mxl0`)
+-- `ℓᵐⁱⁿ`: smallest mixing length, 10⁻⁶ / (rn_ediff √rn_emin) = 0.01 m
++- `ℓᵐⁱⁿ`: smallest mixing length in the interior and at the sea floor, 10⁻⁶ / (rn_ediff √rn_emin) = 0.01 m
++  (NEMO 3.1-3.2: `rn_lmin` = 0.1 m)
++- `ℓ₀ᵐⁱⁿ`: smallest mixing length at the surface (0.01 m; NEMO 3.1-3.2: `rn_lmin0` = 0.4 m, and with
++  `ln_mxl0 = false` the surface length is this value: `Cᴿ = 0`)
+ - `Riᶜ`: critical Richardson number of the Prandtl number, 2 / (2 + rn_ediss / rn_ediff) = 2/9
+ - `Prᵐᵃˣ`: largest Prandtl number (10)
+ - `νᵇ`, `κᵇ`: background viscosity and diffusivity (`rn_avm0` = 1.2 × 10⁻⁴, `rn_avt0` = 1.2 × 10⁻⁵ m² s⁻¹)
+@@ -45,6 +49,7 @@ Base.@kwdef struct NEMOMixingLength{FT}
+     Cᵏ    :: FT = 0.1
+     Cᴿ    :: FT = 0.4 * 2e5 / 9.80665
+     ℓᵐⁱⁿ  :: FT = 0.01
++    ℓ₀ᵐⁱⁿ :: FT = 0.01
+     Riᶜ   :: FT = 2 / 9
+     Prᵐᵃˣ :: FT = 10.0
+     νᵇ    :: FT = 1.2e-4
+@@ -245,6 +250,7 @@ end
+     closure_ij = getclosure(i, j, closure)
+     ℓᵐⁱⁿ = closure_ij.mixing_length.ℓᵐⁱⁿ
+     Cᴿ = closure_ij.mixing_length.Cᴿ
++    ℓ₀ᵐⁱⁿ = closure_ij.mixing_length.ℓ₀ᵐⁱⁿ
+     Cᵉᵇ = closure_ij.turbulent_kinetic_energy_equation.Cᵉᵇ
+     e₀ᵐⁱⁿ = closure_ij.turbulent_kinetic_energy_equation.e₀ᵐⁱⁿ
+     eᵐⁱⁿ = closure_ij.minimum_tke
+@@ -261,7 +267,7 @@ end
+     end
+ 
+     # ... and down from the surface, where ℓ = ℓ₀
+-    @inbounds ℓ[i, j, Nz+1] = max(ℓᵐⁱⁿ, Cᴿ * u★^2)
++    @inbounds ℓ[i, j, Nz+1] = max(ℓ₀ᵐⁱⁿ, Cᴿ * u★^2)
+     for k in Nz:-1:2
+         @inbounds ℓ[i, j, k] = min(ℓ[i, j, k], ℓ[i, j, k+1] + Δzᶜᶜᶜ(i, j, k, grid))
+     end
+@@ -401,6 +407,7 @@ function Base.show(io::IO, closure::NEMOTKEVD)
+               "│   ├── Cᵏ:    ", prettysummary(ℓ.Cᵏ), '\n',
+               "│   ├── Cᴿ:    ", prettysummary(ℓ.Cᴿ), '\n',
+               "│   ├── ℓᵐⁱⁿ:  ", prettysummary(ℓ.ℓᵐⁱⁿ), '\n',
++              "│   ├── ℓ₀ᵐⁱⁿ: ", prettysummary(ℓ.ℓ₀ᵐⁱⁿ), '\n',
+               "│   ├── Riᶜ:   ", prettysummary(ℓ.Riᶜ), '\n',
+               "│   ├── Prᵐᵃˣ: ", prettysummary(ℓ.Prᵐᵃˣ), '\n',
+               "│   ├── νᵇ:    ", prettysummary(ℓ.νᵇ), '\n',
+diff --git a/panarctic.jl b/panarctic.jl
+index d148482..d6da73d 100644
+--- a/panarctic.jl
++++ b/panarctic.jl
+@@ -93,17 +93,19 @@ bc = config["boundaries"]
+ closure_name = get(get(config, "ocean", Dict{String, Any}()), "closure", "CATKE")
+ ocean_settings = get(config, "ocean", Dict{String, Any}())
+ TKEClosures = Oceananigans.TurbulenceClosures.TKEBasedVerticalDiffusivities
+-# "NEMO": the base scheme of NEMO's zdftke.F90 with its reference namelist (no Langmuir or penetration terms, which NEMO
+-# switches off under ice), as a flavour of CATKEVerticalDiffusivity: nemo_tke_vertical_diffusivity.jl (patch 085), the
+-# same file as Oceananigans branch fjp/nemo-tke (patch 084), loaded into Oceananigans once per Julia process unless the
+-# installed Oceananigans already has it. Options:
+-#   [ocean] nemo_surface_tke = 67.83             surface TKE = this × u★² (rn_ebb; NEMO's wave-breaking value, also kept
+-#                                                under ice; Gaspar et al.'s 3.75 without waves)
++# "NEMO": the base scheme of NEMO's zdftke.F90 (no Langmuir or penetration terms, which NEMO switches off under ice), as
++# a flavour of CATKEVerticalDiffusivity: nemo_tke_vertical_diffusivity.jl (patches 085, 087), the same file as
++# Oceananigans branch fjp/nemo-tke (patches 084, 086), loaded into Oceananigans once per Julia process unless the
++# installed Oceananigans already has it. Parameter sets in nemo_tke_presets.jl. Options:
++#   [ocean] nemo_parameters = "reference"        "reference" (NEMO 3.6-4.x reference namelist) or "glorys12" (the
++#                                                defaults of the NEMO 3.1 TKE code GLORYS12 runs: surface TKE 3.75 u★²,
++#                                                surface mixing length 0.4 m, background 1e-4 / 1e-5 m²/s)
++#   [ocean] nemo_surface_tke                     surface TKE = this × u★² (rn_ebb; default: the preset's, 67.83 or 3.75)
+ #   [ocean] nemo_convective_diffusivity = 100    tracer diffusivity (m²/s) where N² < 0 (rn_evd; 0 = off)
+-if closure_name == "NEMO" && !isdefined(TKEClosures, :NEMOTKEVerticalDiffusivity)
+-    Base.include(TKEClosures, joinpath(@__DIR__, "nemo_tke_vertical_diffusivity.jl"))
+-end
+-nemo_surface_tke = Float64(get(ocean_settings, "nemo_surface_tke", 67.83))
++include(joinpath(@__DIR__, "nemo_tke_presets.jl"))
++nemo_parameters = get(ocean_settings, "nemo_parameters", "reference")
++nemo_preset_surface_tke = get(nemo_tke_preset(nemo_parameters).tke_equation, :Cᵉᵇ, 67.83)   # also checks the name
++nemo_surface_tke = Float64(get(ocean_settings, "nemo_surface_tke", nemo_preset_surface_tke))
+ nemo_convective_diffusivity = Float64(get(ocean_settings, "nemo_convective_diffusivity", 100.0))
+ # [ocean] catke_surface_tke_scale multiplies CATKE's surface shear-driven TKE flux coefficient Cᵂu★ (3.179 by
+ # default): the turbulence put in at the surface by the wind and ice stress, ∝ u★³. 1 (default) is stock CATKE; 0
+@@ -116,10 +118,7 @@ elseif closure_name == "CATKE"
+     CATKEVerticalDiffusivity(; turbulent_kinetic_energy_equation =
+                                TKEClosures.CATKEEquation(; Cᵂu★ = catke_surface_tke_scale * stock.Cᵂu★))
+ elseif closure_name == "NEMO"
+-    Base.invokelatest(TKEClosures.NEMOTKEVerticalDiffusivity;
+-                      mixing_length = Base.invokelatest(TKEClosures.NEMOMixingLength; κᵉᵛᵈ = nemo_convective_diffusivity),
+-                      turbulent_kinetic_energy_equation = Base.invokelatest(TKEClosures.NEMOTKEEquation;
+-                                                                            Cᵉᵇ = nemo_surface_tke))
++    nemo_tke_closure(nemo_parameters; κᵉᵛᵈ = nemo_convective_diffusivity, Cᵉᵇ = nemo_surface_tke)
+ elseif closure_name == "RiBased"
+     Oceananigans.TurbulenceClosures.RiBasedVerticalDiffusivity()
+ elseif closure_name == "TKEDissipation"
+@@ -132,7 +131,7 @@ end
+ @info "Vertical mixing: $closure_name" * (closure_name == "CATKE" && catke_surface_tke_scale != 1 ?
+                                          " (surface shear-driven TKE flux × $catke_surface_tke_scale)" :
+                                          closure_name == "NEMO" ?
+-                                         " (TKE scheme: surface TKE $nemo_surface_tke u★², convective diffusivity " *
++                                         " (TKE scheme, $nemo_parameters parameters: surface TKE $nemo_surface_tke u★², convective diffusivity " *
+                                          "$nemo_convective_diffusivity m²/s)" : "")
+ Δt = config["time"]["dt_minutes"] * Oceananigans.Units.minutes
+ time_discretization = AdaptiveVerticallyImplicitDiscretization(cfl=0.5)
+-- 
+2.43.0
+
