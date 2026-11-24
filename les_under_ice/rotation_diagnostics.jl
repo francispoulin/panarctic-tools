@@ -6,8 +6,9 @@
 #    so the stress is rotated from the shear by θ with tan θ = L² f / K. From the LES, on interior faces at every output
 #    time of the second half of the run:
 #        K∥ = τ · S / |S|²,   K⊥ = (ẑ × S) · τ / |S|² = (S_x τ_y − S_y τ_x) / |S|²,   θ = atan(K⊥, K∥),   L = √(|K⊥| / |f|)
-#    θ > 0: stress rotated anticlockwise (to the left) of the shear. Values are kept where |S| and |τ| exceed 5 % of their
-#    maximum at that time, and below 3 m (the resolved fluxes of an implicit LES are too small near the surface).
+#    θ > 0: stress rotated anticlockwise (to the left) of the shear. Values are kept below 3 m where |S| and |τ| exceed
+#    1 % of their maximum below 3 m at that time (23 Nov: 5 % of the whole-column maximum dropped every interior point of
+#    well-mixed layers, where the shear under the ice dominates) (the resolved fluxes of an implicit LES are too small near the surface).
 #    Binned by depth relative to the LES mixed-layer depth h(t); medians in the interior (0.3–0.8 h) and at the base
 #    (0.8–1.1 h), as diagnose_fluxes.jl.
 # 2. Depth against rotating boundary-layer scalings, over the second half of the run:
@@ -72,7 +73,8 @@ function rotation_diagnostics(name, folder)
         Sx, Sy = diff(les.u[n]) ./ Δz, diff(les.v[n]) ./ Δz
         τx, τy = -rd_interior_faces(wu[n], Nz), -rd_interior_faces(wv[n], Nz)
         S, τ = hypot.(Sx, Sy), hypot.(τx, τy)
-        keep = (S .> 0.05maximum(S)) .& (τ .> 0.05maximum(τ)) .& (zf .< -3)
+        below = zf .< -3                     # maxima below the top 3 m: the surface shear would hide the interior
+        keep = below .& (S .> 0.01maximum(S[below])) .& (τ .> 0.01maximum(τ[below]))
         K_par = (τx .* Sx .+ τy .* Sy) ./ S .^ 2
         K_perp = (Sx .* τy .- Sy .* τx) ./ S .^ 2
         θ = atand.(K_perp, K_par)
@@ -110,6 +112,7 @@ function rotation_diagnostics(name, folder)
     return (; name, f, flux = rd_flux_label(name), angle_profile,
               θ_interior = rd_nanmedian(θ_interior), θ_interior_q = (rd_quantile(θ_interior, 0.25), rd_quantile(θ_interior, 0.75)),
               θ_base = rd_nanmedian(θ_base), ratio_interior = rd_nanmedian(ratio_interior),
+              n_interior = length(θ_interior), n_base = length(θ_base),
               L_interior = rd_nanmedian(L_interior), h, u★, N, ekman, prt, price,
               t = les.t, h_t, u★_t)
 end
@@ -125,12 +128,12 @@ function run_rotation_diagnostics(folder)
                 "(0 = down-gradient; > 0 to the left); K⊥/K∥ = tan θ; L = √(|K⊥|/|f|), the length in Greg's L² f term. ",
                 "Interior 0.3–0.8 h, base 0.8–1.1 h.\n")
     println(io, "## 1. Stress–shear angle\n")
-    println(io, "| Case | f (s⁻¹) | surface flux | θ interior (25–75 %) | θ base | K⊥/K∥ interior | L interior (m) | h (m) |")
-    println(io, "|---|---|---|---|---|---|---|---|")
+    println(io, "| Case | f (s⁻¹) | surface flux | θ interior (25–75 %) | θ base | K⊥/K∥ interior | L interior (m) | h (m) | points interior / base |")
+    println(io, "|---|---|---|---|---|---|---|---|---|")
     for r in results
-        println(io, @sprintf("| %s | %.1e | %s | %+.0f° (%+.0f° to %+.0f°) | %+.0f° | %+.2f | %s | %.1f |", r.name, r.f, r.flux,
+        println(io, @sprintf("| %s | %.1e | %s | %+.0f° (%+.0f° to %+.0f°) | %+.0f° | %+.2f | %s | %.1f | %d / %d |", r.name, r.f, r.flux,
                              r.θ_interior, r.θ_interior_q..., r.θ_base, r.ratio_interior,
-                             isfinite(r.L_interior) ? @sprintf("%.1f", r.L_interior) : "–", r.h))
+                             isfinite(r.L_interior) ? @sprintf("%.1f", r.L_interior) : "–", r.h, r.n_interior, r.n_base))
     end
     println(io, "\n## 2. Depth against rotating boundary-layer scalings\n")
     println(io, "h, u★ (from the LES), N below the layer (initial profile): medians over the second half. ",
