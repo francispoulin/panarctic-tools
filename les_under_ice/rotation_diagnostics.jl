@@ -73,16 +73,16 @@ function rotation_diagnostics(name, folder)
         τx, τy = -rd_interior_faces(wu[n], Nz), -rd_interior_faces(wv[n], Nz)
         S, τ = hypot.(Sx, Sy), hypot.(τx, τy)
         keep = (S .> 0.05maximum(S)) .& (τ .> 0.05maximum(τ)) .& (zf .< -3)
-        K∥ = (τx .* Sx .+ τy .* Sy) ./ S .^ 2
-        K⊥ = (Sx .* τy .- Sy .* τx) ./ S .^ 2
-        θ = atand.(K⊥, K∥)
+        K_par = (τx .* Sx .+ τy .* Sy) ./ S .^ 2
+        K_perp = (Sx .* τy .- Sy .* τx) ./ S .^ 2
+        θ = atand.(K_perp, K_par)
         for k in findall(keep)
             ζ = -zf[k] / h
             b = searchsortedlast(bins, ζ)
             1 ≤ b < length(bins) && push!(θ_bins[b], θ[k])
             if 0.3 ≤ ζ ≤ 0.8
-                push!(θ_interior, θ[k]); push!(ratio_interior, K⊥[k] / K∥[k])
-                f != 0 && push!(L_interior, sqrt(abs(K⊥[k]) / abs(f)))
+                push!(θ_interior, θ[k]); push!(ratio_interior, K_perp[k] / K_par[k])
+                f != 0 && push!(L_interior, sqrt(abs(K_perp[k]) / abs(f)))
             elseif 0.8 < ζ ≤ 1.1
                 push!(θ_base, θ[k])
             end
