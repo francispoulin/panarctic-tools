@@ -1,0 +1,82 @@
+From e497bfefa507882f4a070640b3a2e2361444bcb6 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 24 Nov 2026 11:44:29 -0500
+Subject: [PATCH] NEMO TKE: column kernels on immersed grids with an
+ active-cells map
+
+The 3-D model passes the diffusivity kernel the grid's active-cells map (a list of (i, j, k)) instead of
+KernelParameters, so nemo_column_kernel_parameters had no method for it (MethodError, all five NEMO queue jobs failed at
+the first update_state!, 24 Nov 10:33). The column kernels now cover i = 0:Nx+1, j = 0:Ny+1 in that case, the range of
+horizontally_extended_interior_kernel_parameters. The single-column tests (no immersed boundary) never took this path.
+nemo_tke_presets.jl refuses a process that has the older closure loaded.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AbhhvmHjZYCHhFxumZ9A47
+---
+ nemo_tke_presets.jl              |  3 +++
+ nemo_tke_vertical_diffusivity.jl | 21 +++++++++++++++++----
+ 2 files changed, 20 insertions(+), 4 deletions(-)
+
+diff --git a/nemo_tke_presets.jl b/nemo_tke_presets.jl
+index 764d1a2..fe913c2 100644
+--- a/nemo_tke_presets.jl
++++ b/nemo_tke_presets.jl
+@@ -25,6 +25,9 @@ let TKE = Oceananigans.TurbulenceClosures.TKEBasedVerticalDiffusivities
+ end
+ :ℓ₀ᵐⁱⁿ in fieldnames(Oceananigans.TurbulenceClosures.TKEBasedVerticalDiffusivities.NEMOMixingLength) ||
+     error("This Julia process has an older NEMO closure loaded (before patch 087): start a new REPL")
++hasmethod(Oceananigans.TurbulenceClosures.TKEBasedVerticalDiffusivities.nemo_column_kernel_parameters,
++          Tuple{AbstractArray, Any}) ||
++    error("This Julia process has an older NEMO closure loaded (before patch 089, no active-cells map): start a new REPL")
+ 
+ function nemo_tke_preset(name)
+     if name == "reference"
+diff --git a/nemo_tke_vertical_diffusivity.jl b/nemo_tke_vertical_diffusivity.jl
+index 10188b2..b034d46 100644
+--- a/nemo_tke_vertical_diffusivity.jl
++++ b/nemo_tke_vertical_diffusivity.jl
+@@ -25,7 +25,8 @@
+ # turbulent_kinetic_energy_equation = NEMOTKEEquation(), minimum_tke = 1e-6). Vertically implicit time discretization
+ # only; a single closure (not an array of closures).
+ 
+-using Oceananigans.Utils: KernelParameters
++using Oceananigans.Utils: KernelParameters, worksize
++using Oceananigans.Grids: topology, Flat
+ 
+ """
+     NEMOMixingLength{FT}
+@@ -208,8 +209,20 @@ Oceananigans.restore_prognostic_state!(::NEMOTKEClosureFields, ::Nothing) = noth
+ #####
+ 
+ # The column kernels cover the same horizontal range as the diffusivity kernel
+-nemo_column_kernel_parameters(::Symbol) = :xy
+-nemo_column_kernel_parameters(::KernelParameters{S, O}) where {S, O} = KernelParameters(S[1:2], O[1:2])
++nemo_column_kernel_parameters(::Symbol, grid) = :xy
++nemo_column_kernel_parameters(::KernelParameters{S, O}, grid) where {S, O} = KernelParameters(S[1:2], O[1:2])
++
++# On an immersed grid with an active-cells map, the diffusivity kernel gets the map itself (a list of (i, j, k) for
++# the active cells of horizontally_extended_interior_kernel_parameters: interior plus one cell around it). The column
++# kernels then cover that whole horizontal range, i = 0:Nx+1 and j = 0:Ny+1 (1:N in a Flat direction); fully
++# immersed columns are computed too (ℓ = ℓᵐⁱⁿ there) and never read.
++function nemo_column_kernel_parameters(::AbstractArray, grid)
++    Wx, Wy, _ = worksize(grid)
++    Tx, Ty, _ = topology(grid)
++    ii = ifelse(Tx == Flat, 1:Wx, 0:Wx+1)
++    jj = ifelse(Ty == Flat, 1:Wy, 0:Wy+1)
++    return KernelParameters(ii, jj)
++end
+ 
+ function TurbulenceClosures.compute_closure_fields!(closure_fields, closure::NEMOTKEVD, model; parameters = :xyz)
+     arch = model.architecture
+@@ -220,7 +233,7 @@ function TurbulenceClosures.compute_closure_fields!(closure_fields, closure::NEM
+     top_velocity_bcs = (u = velocities.u.boundary_conditions.top,
+                         v = velocities.v.boundary_conditions.top)
+ 
+-    launch!(arch, grid, nemo_column_kernel_parameters(parameters),
++    launch!(arch, grid, nemo_column_kernel_parameters(parameters, grid),
+             compute_nemo_mixing_length!,
+             closure_fields.ℓ, closure_fields.e₀, grid, closure,
+             tracers, buoyancy, top_velocity_bcs, model.clock, fields(model))
+-- 
+2.43.0
+

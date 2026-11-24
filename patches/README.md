@@ -93,6 +93,8 @@ Numbered in the order to apply, across repositories. Each was checked to apply w
 | 086 | Oceananigans | `fjp/nemo-tke` | after 084 | `NEMOMixingLength`: separate surface floor `ℓ₀ᵐⁱⁿ` (surface length max(ℓ₀ᵐⁱⁿ, Cᴿ u★²); default unchanged), so NEMO 3.1-3.2's `ln_mxl0 = false`, `rn_lmin0 = 0.4`, `rn_lmin = 0.1` can be set; test added |
 | 087 | PanArcticShenanigans | `fjp/test-061` (option, on top of 085) | after 085 | `[ocean] nemo_parameters = "reference"` / `"glorys12"` (`nemo_tke_presets.jl`: GLORYS12's NEMO 3.1 TKE defaults, surface TKE 3.75 u★², surface mixing length 0.4 m, background 1e-4 / 1e-5); closure file updated as 086; `config_sep2005_30d_nemo_glorys12_lim2.toml`, `..._nz100.toml`. A REPL that loaded 085's closure must be restarted |
 | 088 | PanArcticShenanigans | `fjp/test-061` (fix, on top of 087) | after 087 | NEMO closure loaded at the top level of `nemo_tke_presets.jl` (Julia world age: loading it inside `nemo_tke_closure()` made CATKE's own κuᶜᶜᶠ run with a `NEMOMixingLength`, "no field Cᶜu"); presets only included for `closure = "NEMO"` |
+| 089 | PanArcticShenanigans | `fjp/test-061` (fix, on top of 088) | after 088 | NEMO closure on an immersed grid with an active-cells map: `compute_closure_fields!` gets the map (list of (i, j, k)), not `KernelParameters`; the column kernels now cover i = 0:Nx+1, j = 0:Ny+1 (MethodError `nemo_column_kernel_parameters(::SubArray…)` in all five queue jobs, 24 Nov). `nemo_tke_presets.jl` refuses a process with the older closure loaded |
+| 090 | Oceananigans | `fjp/nemo-tke` | after 086 | Same fix as 089 in the library file (kept identical to the vendored one); test: immersed grid with and without the map gives the same ℓ, κ |
 
 ## Applying 001–006
 
