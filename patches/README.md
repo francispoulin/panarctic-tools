@@ -95,6 +95,7 @@ Numbered in the order to apply, across repositories. Each was checked to apply w
 | 088 | PanArcticShenanigans | `fjp/test-061` (fix, on top of 087) | after 087 | NEMO closure loaded at the top level of `nemo_tke_presets.jl` (Julia world age: loading it inside `nemo_tke_closure()` made CATKE's own κuᶜᶜᶠ run with a `NEMOMixingLength`, "no field Cᶜu"); presets only included for `closure = "NEMO"` |
 | 089 | PanArcticShenanigans | `fjp/test-061` (fix, on top of 088) | after 088 | NEMO closure on an immersed grid with an active-cells map: `compute_closure_fields!` gets the map (list of (i, j, k)), not `KernelParameters`; the column kernels now cover i = 0:Nx+1, j = 0:Ny+1 (MethodError `nemo_column_kernel_parameters(::SubArray…)` in all five queue jobs, 24 Nov). `nemo_tke_presets.jl` refuses a process with the older closure loaded |
 | 090 | Oceananigans | `fjp/nemo-tke` | after 086 | Same fix as 089 in the library file (kept identical to the vendored one); test: immersed grid with and without the map gives the same ℓ, κ |
+| 091 | PanArcticShenanigans | `fjp/test-061` (configs, on top of 089) | after 089 | `config_sep2005_4mo_nemo_glorys12_nz100.toml` and its CATKE twin `config_sep2005_4mo_catke_nz100.toml`: Sep–Dec 2005 on 100 levels, checkpoints every 10 days, `[queue] long`, scorecard at the end |
 
 ## Applying 001–006
 
