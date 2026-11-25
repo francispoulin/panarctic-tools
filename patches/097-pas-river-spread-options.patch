@@ -1,0 +1,71 @@
+From e26323a8ccb83b5e98886642ad819309cd58fd22 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 25 Nov 2026 10:25:27 -0500
+Subject: [PATCH 1/2] [land] river_spread_degrees and river_spread_max_cells:
+ how far each river mouth's water is spread
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+NumericalEarth's routing spreads each JRA55 mouth's discharge over every wet cell within 1.2° (about 130 km) of the
+cell it lands on. The four-month runs are too salty in strips along the river-fed coasts with fresher water just
+offshore, which a narrower footprint would test. Defaults are NumericalEarth's (1.2°, no cap), so existing configs run
+as before; panarctic.jl logs "Rivers: JRA55, each mouth spread over …". analysis/rivers.jl uses the run's settings.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AbhhvmHjZYCHhFxumZ9A47
+---
+ analysis/rivers.jl | 9 +++++++--
+ panarctic.jl       | 9 ++++++++-
+ 2 files changed, 15 insertions(+), 3 deletions(-)
+
+diff --git a/analysis/rivers.jl b/analysis/rivers.jl
+index 88613c1..c53a283 100644
+--- a/analysis/rivers.jl
++++ b/analysis/rivers.jl
+@@ -117,7 +117,10 @@ region_of_cell = [something(findfirst(r -> r[2](cell_λ[i, j], cell_φ[i, j], de
+ ##### JRA55's fresh water and the model's routing (as panarctic.jl)
+ #####
+ 
+-land = JRA55PrescribedLand(grid; jra55..., dir_kw...)
++land_settings = get(config, "land", Dict{String, Any}())
++river_spread_kw = (; spread_radius = Float64(get(land_settings, "river_spread_degrees", 1.2)),
++                     maximum_spread_cells = let cells = get(land_settings, "river_spread_max_cells", 0); cells > 0 ? cells : nothing end)
++land = JRA55PrescribedLand(grid; jra55..., dir_kw..., river_spread_kw...)   # as panarctic.jl, with the run's [land] settings
+ components = (:rivers, :icebergs)
+ source_grid = on_architecture(CPU(), land.freshwater_flux.rivers.grid)
+ source_area(i, j) = Azᶜᶜᶜ(i, j, 1, source_grid)
+@@ -199,7 +202,9 @@ io = IOBuffer()
+ println(io, "# River and iceberg fresh water: $experiment\n")
+ println(io, "JRA55 discharge (daily means, $(Date(start_date)) to $(Date(end_date))) against what the model's routing delivers ",
+             "to its ocean (JRA55PrescribedLand, as in panarctic.jl). m³/s; 1 mSv = 1000 m³/s. Routing: nearest wet cell ",
+-            "within ~3°, then spread equally over every wet cell within 1.2° (~130 km).\n")
++            "within ~3°, then spread over every wet cell within $(river_spread_kw.spread_radius)° " *
++            (isnothing(river_spread_kw.maximum_spread_cells) ? "" : "(nearest $(river_spread_kw.maximum_spread_cells) cells) ") *
++            "of that cell; since NumericalEarth v0.9.4 each cell's share is weighted by its depth (capped at 50 m).\n")
+ 
+ println(io, "## 1. By river (mouth location): JRA55 at the mouths / delivered to the model ocean\n")
+ println(io, "| River | " * join(month_labels, " | ") * " |")
+diff --git a/panarctic.jl b/panarctic.jl
+index 452f36b..9c2d136 100644
+--- a/panarctic.jl
++++ b/panarctic.jl
+@@ -263,7 +263,14 @@ radiation_kw = albedo == "constant" ? (;) :
+                                                                  sea_ice.model.ice_thermodynamics.top_surface_temperature), 1.0))
+ albedo == "constant" || @info "Sea-ice albedo: CCSM3 (SeaIceAlbedo)"
+ radiation     = JRA55PrescribedRadiation(arch; jra55..., dir_kw..., radiation_kw...)
+-land          = JRA55PrescribedLand(child.grid; jra55..., dir_kw...)
++# [land] river_spread_degrees (default 1.2, NumericalEarth's): each river mouth's discharge is spread over every wet cell
++# within this radius of the cell it lands on; river_spread_max_cells (default 0 = no cap) keeps only the nearest that many.
++land_settings = get(config, "land", Dict{String, Any}())
++river_spread_kw = (; spread_radius = Float64(get(land_settings, "river_spread_degrees", 1.2)),
++                     maximum_spread_cells = let cells = get(land_settings, "river_spread_max_cells", 0); cells > 0 ? cells : nothing end)
++@info "Rivers: JRA55, each mouth spread over $(river_spread_kw.spread_radius)° " *
++      (isnothing(river_spread_kw.maximum_spread_cells) ? "(all wet cells)" : "(nearest $(river_spread_kw.maximum_spread_cells) cells)")
++land          = JRA55PrescribedLand(child.grid; jra55..., dir_kw..., river_spread_kw...)
+ 
+ interface_kw = ice_ocean_friction_velocity == "drag" ? (; sea_ice_ocean_heat_flux = drag_based_heat_flux(sea_ice, child)) : (;)
+ coupled_model = EarthSystemModel(; ocean, sea_ice, land, atmosphere, radiation, interface_kw...)
+-- 
+2.43.0
+

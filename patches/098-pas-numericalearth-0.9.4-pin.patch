@@ -1,0 +1,263 @@
+From 7d41c6a47ccc025ef31b5a723c3b55b54b229fc5 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 25 Nov 2026 10:25:27 -0500
+Subject: [PATCH 2/2] NumericalEarth fjp/net-inflow-0.9.4 (fjp/net-inflow
+ merged with v0.9.4), and two configs to check the merge alone
+
+The [sources] pin and the Manifest entry move to fjp/net-inflow-0.9.4 (tree 3ce8f0b; same dependencies and
+extensions as before, so Pkg.instantiate only fetches the new NumericalEarth). v0.9.4 brings GEUS solid ice discharge
+and GloFAS river mouths (for the later switch to ERA5), and changes two things even with JRA55: the shortwave absorbed
+in the top cell enters as a surface flux (#605), and river water is shared by depth over its footprint (#917).
+config_smoke_test_ne094.toml (100 km, 4 days) first, then config_sep2005_4mo_nemo_glorys12_nz100_ne094.toml, the twin
+of the four-month NEMO run of 24 Nov.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AbhhvmHjZYCHhFxumZ9A47
+---
+ Manifest.toml                                 |  6 +-
+ Project.toml                                  |  5 +-
+ ...sep2005_4mo_nemo_glorys12_nz100_ne094.toml | 98 +++++++++++++++++++
+ config_smoke_test_ne094.toml                  | 90 +++++++++++++++++
+ 4 files changed, 194 insertions(+), 5 deletions(-)
+ create mode 100644 config_sep2005_4mo_nemo_glorys12_nz100_ne094.toml
+ create mode 100644 config_smoke_test_ne094.toml
+
+diff --git a/Manifest.toml b/Manifest.toml
+index 922572e..7153cae 100644
+--- a/Manifest.toml
++++ b/Manifest.toml
+@@ -1836,11 +1836,11 @@ version = "1.3.0"
+ 
+ [[deps.NumericalEarth]]
+ deps = ["Accessors", "Adapt", "CFTime", "ClimaSeaIce", "CodecZlib", "CubedSphere", "DataDeps", "Dates", "Distances", "DocStringExtensions", "Downloads", "GPUArraysCore", "Glob", "ImageMorphology", "JLD2", "KernelAbstractions", "LibCURL", "MeshArrays", "NCDatasets", "NetworkOptions", "Oceananigans", "OffsetArrays", "PrecompileTools", "Printf", "Scratch", "SeawaterPolynomials", "StaticArrays", "Statistics", "Tar", "Thermodynamics", "ZipFile"]
+-git-tree-sha1 = "1b44457f999c33791fb818415de2003840959715"
+-repo-rev = "fjp/net-inflow"
++git-tree-sha1 = "3ce8f0b55a7949dbdc0d4f37ed919663ec956900"
++repo-rev = "fjp/net-inflow-0.9.4"
+ repo-url = "https://github.com/NumericalEarth/NumericalEarth.jl"
+ uuid = "904d977b-046a-4731-8b86-9235c0d1ef02"
+-version = "0.9.2"
++version = "0.9.4"
+ 
+     [deps.NumericalEarth.extensions]
+     NumericalEarthArchGDALExt = ["ArchGDAL", "GDAL"]
+diff --git a/Project.toml b/Project.toml
+index 6817ffc..7e31f09 100644
+--- a/Project.toml
++++ b/Project.toml
+@@ -11,9 +11,10 @@ Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+ TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
+ 
+ [sources]
+-# NumericalEarth.jl#938 (net_inflow) on top of #676 (nested_ocean_model), and Oceananigans.jl#6524 (NetInflow),
++# NumericalEarth.jl#938 (net_inflow) on top of #676 (nested_ocean_model), merged with NumericalEarth v0.9.4 (GEUS solid ice
++# discharge, GloFAS river mouths) on branch fjp/net-inflow-0.9.4; and Oceananigans.jl#6524 (NetInflow),
+ # until they are merged and released.
+-NumericalEarth = {rev = "fjp/net-inflow", url = "https://github.com/NumericalEarth/NumericalEarth.jl"}
++NumericalEarth = {rev = "fjp/net-inflow-0.9.4", url = "https://github.com/NumericalEarth/NumericalEarth.jl"}
+ Oceananigans = {rev = "fjp/net-inflow-target", url = "https://github.com/CliMA/Oceananigans.jl"}
+ 
+ [compat]
+diff --git a/config_sep2005_4mo_nemo_glorys12_nz100_ne094.toml b/config_sep2005_4mo_nemo_glorys12_nz100_ne094.toml
+new file mode 100644
+index 0000000..86e81ac
+--- /dev/null
++++ b/config_sep2005_4mo_nemo_glorys12_nz100_ne094.toml
+@@ -0,0 +1,98 @@
++# Four months, Sep–Dec 2005, of config_sep2005_4mo_nemo_glorys12_nz100.toml (NEMO's TKE with GLORYS12's settings, 100
++# levels, JRA55) with NumericalEarth fjp/net-inflow merged with v0.9.4 (patches 096, 097): what the merge alone changes
++# before the switch to ERA5 + GloFAS + GEUS. Expected differences: the shortwave absorbed in the top cell enters as a
++# surface flux (NumericalEarth #605), and each river's water is shared by depth (capped at 50 m) over its 1.2° footprint
++# (#917), i.e. further offshore. Same [land] spread as before. Checkpoints every 10 days; [queue] long.
++
++architecture = "GPU"   # "GPU" or "CPU"
++experiment   = "sep2005_4mo_nemo_glorys12_nz100_ne094"  # name of the run: output and figures go to output_dir/<experiment> and figure_dir/<experiment>
++
++[grid]
++spacing_km = 15     # largest horizontal grid spacing [km] (at the pole; ~15% finer near the Atlantic edge)
++Nz         = 100    # vertical levels
++depth      = 5000   # maximum depth (m)
++bathymetry       = "GEBCO2026"   # "GEBCO2026" (15″, with IBCAO), "ETOPO" (ETOPO 2022, 60″) or "GLORYS" (GLORYS's own sea floor)
++bottom           = "partial"     # "partial": bottom cells cut at the sea floor; "full": whole cells
++partial_cell_fix = true          # with partial cells: flux-form momentum advection at bottom-cell thickness jumps
++                                 # (Oceananigans.jl#6533), which removes the bottom jets of issue #6532
++
++[time]
++start_date = 2005-09-01   # initial condition (GLORYS); the run starts at 00:00 on this date
++end_date   = 2006-01-01   # the run ends at 00:00 on this date; for short tests a date and time, e.g. 1993-01-01T03:00
++dt_minutes = 10           # time step
++
++[atmosphere]
++jra55 = "multi_year"   # "multi_year": JRA55 for the run's own dates; "repeat_year": the 1990–91 repeat year
++pressure = false           # true: JRA55's sea-level pressure acts on the ocean (nested_pressure_fix.jl). Off for now: with it,
++                           # Fram Strait drifts far from GLORYS (1–5 Jan 1993, 15 km: day 4 −12.4 Sv, GLORYS −2.1, −5.6
++                           # without pressure; the same at 100 km), which looks like an error in the pressure path, not
++                           # physics. Main has had no pressure on the ocean since #43.
++inverse_barometer = false  # with pressure = true: GLORYS's η carries no response to the pressure (issue #37), so add the
++                           # inverse-barometer sea level −(pᵃ − ⟨pᵃ⟩)/(ρ₀g) to GLORYS's η at the open sides (Flather) and
++                           # to the initial free surface; its domain mean is removed, so the volume is unchanged.
++                           # Keep false with pressure = false: then neither the model nor GLORYS feels the pressure
++
++[output]
++average_hours   = 24      # time-averaged output (3D ocean, free surface, sea ice), written to output_dir
++checkpoint_days = 10      # how often the full model state is saved for restarts
++restart         = false   # true: continue from the latest checkpoint in output_dir
++monitor_hours   = 1       # monitor.csv: transports through the open sides, mean η against GLORYS's, volume budget,
++                          # fastest point (plotting/volume_budget.jl, plotting/max_speed.jl); 0 = off
++mixing_depth    = 60      # daily CATKE κᶜ and e over the top this many metres in arctic_mixing.jld2; 0 = off
++post_run_analysis = true  # at the end: clear the model from memory, then the scorecard (scorecard.md)
++
++[transports]
++# Volume, heat, salt and freshwater transports through the sections below and the open boundaries (see transports.jl).
++online                = true   # true: computed every time step and averaged over average_hours, written to arctic_transports.jld2
++reference_temperature = 0      # heat transport relative to this temperature (°C)
++reference_salinity    = 34.8   # freshwater transport relative to this salinity (g/kg)
++
++# Each section is a great-circle path through (longitude, latitude) waypoints. Positive transport flows to the right,
++# walking from the first waypoint to the last; these are ordered so that positive is into the Arctic. Both ends should
++# be on land, so the section spans the whole strait on any grid. Check with plotting/transport_sections.jl.
++[transports.sections]
++# Fram Strait follows the mooring array at 78°50′N; intermediate waypoints keep the great circles on that latitude.
++fram_strait         = { lon = [15.0, 10.0, 5.0, 0.0, -5.0, -10.0, -15.0, -20.0],
++                        lat = [78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333] }
++# Barents Sea Opening follows the mooring line from Norway (Fugløya) via Bjørnøya to Sørkapp, Svalbard.
++barents_sea_opening = { lon = [20.0, 19.0, 16.5],  lat = [70.0, 74.45, 77.0] }
++bering_strait       = { lon = [-166.0, -171.0], lat = [66.0, 66.0] }
++davis_strait        = { lon = [-53.0, -63.0],   lat = [67.0, 66.5] }
++
++[paths]
++data_dir   = ""   # where downloads are stored; "" = each dataset's default cache
++output_dir = "output"    # model output: time averages (.jld2), checkpoints and the config; one folder per experiment
++figure_dir = "figures"   # figures and movies from the plotting/ scripts; one folder per experiment
++
++[boundaries]
++velocity_inflow_days = 0.0417   # oblique radiation on u, v: nudging timescale toward GLORYS on inflow (0.0417 days = 1 hour).
++                                # With 1 day, a partial bottom cell on the Atlantic open face drifted to −0.9 m/s
++                                # (GLORYS −0.26); 1 hour removes it and moves the section transports by < 0.1 Sv
++tracer_inflow_km     = 20  # T, S reservoir inflow relaxation length, both open sides
++relaxation_hours     = 6   # T, S and baroclinic u, v relax toward GLORYS in a ~2/3° band along the open sides
++                           # over this timescale; 0 = off (nested_ocean_model's default is 6)
++
++# Volume control (volume_control.jl): the net inflow through the two open sides together is pinned at every barotropic
++# substep, as NEMO and ROMS do; Flather splits it between the sides. Without it the domain's volume drifts from GLORYS's.
++follow_glorys_volume      = true   # true: the net inflow follows GLORYS's domain-mean η, with the surface freshwater handed back
++volume_relaxation_days    = 1      # with follow_glorys_volume: time over which the remaining drift from GLORYS's mean η is removed
++follow_glorys_tendency    = false  # with follow_glorys_volume: true also follows GLORYS's rate of change exactly
++# net_inflow_Sv           = 0.0    # with follow_glorys_volume = false: a constant net inflow instead (Sv, positive into the domain);
++                                   # with neither, Flather alone (no volume control)
++net_inflow_depth_exponent = 0.5    # the pin's correction to each boundary column ∝ Hᵖ: 0 uniform per length, 1 uniform velocity
++                                   # (NEMO, ROMS), 0.5 a uniform shift of GLORYS's η in Flather
++
++[ocean]
++closure = "NEMO"   # NEMO's TKE scheme (patch 085): "CATKE" (default), "NEMO", "RiBased", "TKEDissipation" or "none"
++nemo_parameters = "glorys12"          # "reference" (NEMO 3.6-4.x namelist) or "glorys12" (NEMO 3.1 code defaults; patch 087)
++# nemo_surface_tke = 3.75             # surface TKE = this × u★² (NEMO's rn_ebb; default: the preset's)
++# nemo_convective_diffusivity = 100   # m²/s where N² < 0 (NEMO's rn_evd; 0 = off)
++
++[sea_ice]
++ice_salinity               = 6        # g/kg (default 4)
++ice_ocean_drag_coefficient = 5e-3     # (default 5.5e-3)
++ice_compressive_strength   = 20000    # P*, N/m² (default 27 500)
++albedo                     = "ccsm3"  # "constant" (0.7, default) or "ccsm3" (state-dependent, SeaIceAlbedo)
++
++[queue]
++long = true   # four months: at most 2 long jobs per server (tools/runner.jl)
+diff --git a/config_smoke_test_ne094.toml b/config_smoke_test_ne094.toml
+new file mode 100644
+index 0000000..387a538
+--- /dev/null
++++ b/config_smoke_test_ne094.toml
+@@ -0,0 +1,90 @@
++# Smoke test of patch 097: NumericalEarth fjp/net-inflow merged with v0.9.4 (patch 096), with NEMO's TKE scheme
++# (GLORYS12 settings) as in the four-month runs. 100 km, 1–5 September 2005. It checks that the merged NumericalEarth
++# builds, compiles and runs with sea ice before the four-month run; the numbers are not the test. Look for the lines
++#   Rivers: JRA55, each mouth spread over 1.2° (all wet cells)
++#   Vertical mixing: NEMO (…)
++
++architecture = "GPU"   # "GPU" or "CPU"
++experiment   = "smoke_test_ne094"  # name of the run: output and figures go to output_dir/<experiment> and figure_dir/<experiment>
++
++[grid]
++spacing_km = 100    # largest horizontal grid spacing [km] (at the pole; ~15% finer near the Atlantic edge)
++Nz         = 20     # vertical levels
++depth      = 5000   # maximum depth (m)
++bathymetry       = "GEBCO2026"   # "GEBCO2026" (15″, with IBCAO), "ETOPO" (ETOPO 2022, 60″) or "GLORYS" (GLORYS's own sea floor)
++bottom           = "partial"     # "partial": bottom cells cut at the sea floor; "full": whole cells
++partial_cell_fix = true          # with partial cells: flux-form momentum advection at bottom-cell thickness jumps
++                                 # (Oceananigans.jl#6533), which removes the bottom jets of issue #6532
++
++[time]
++start_date = 2005-09-01   # initial condition (GLORYS); the run starts at 00:00 on this date
++end_date   = 2005-09-05   # the run ends at 00:00 on this date; for short tests a date and time, e.g. 1993-01-01T03:00
++dt_minutes = 10           # time step
++
++[atmosphere]
++jra55 = "multi_year"   # "multi_year": JRA55 for the run's own dates; "repeat_year": the 1990–91 repeat year
++pressure = false           # true: JRA55's sea-level pressure acts on the ocean (nested_pressure_fix.jl). Off for now: with it,
++                           # Fram Strait drifts far from GLORYS (1–5 Jan 1993, 15 km: day 4 −12.4 Sv, GLORYS −2.1, −5.6
++                           # without pressure; the same at 100 km), which looks like an error in the pressure path, not
++                           # physics. Main has had no pressure on the ocean since #43.
++inverse_barometer = false  # with pressure = true: GLORYS's η carries no response to the pressure (issue #37), so add the
++                           # inverse-barometer sea level −(pᵃ − ⟨pᵃ⟩)/(ρ₀g) to GLORYS's η at the open sides (Flather) and
++                           # to the initial free surface; its domain mean is removed, so the volume is unchanged.
++                           # Keep false with pressure = false: then neither the model nor GLORYS feels the pressure
++
++[output]
++average_hours   = 24      # time-averaged output (3D ocean, free surface, sea ice), written to output_dir
++checkpoint_days = 30      # how often the full model state is saved for restarts
++restart         = false   # true: continue from the latest checkpoint in output_dir
++monitor_hours   = 1       # monitor.csv: transports through the open sides, mean η against GLORYS's, volume budget,
++                          # fastest point (plotting/volume_budget.jl, plotting/max_speed.jl); 0 = off
++
++[transports]
++# Volume, heat, salt and freshwater transports through the sections below and the open boundaries (see transports.jl).
++online                = true   # true: computed every time step and averaged over average_hours, written to arctic_transports.jld2
++reference_temperature = 0      # heat transport relative to this temperature (°C)
++reference_salinity    = 34.8   # freshwater transport relative to this salinity (g/kg)
++
++# Each section is a great-circle path through (longitude, latitude) waypoints. Positive transport flows to the right,
++# walking from the first waypoint to the last; these are ordered so that positive is into the Arctic. Both ends should
++# be on land, so the section spans the whole strait on any grid. Check with plotting/transport_sections.jl.
++[transports.sections]
++# Fram Strait follows the mooring array at 78°50′N; intermediate waypoints keep the great circles on that latitude.
++fram_strait         = { lon = [15.0, 10.0, 5.0, 0.0, -5.0, -10.0, -15.0, -20.0],
++                        lat = [78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333] }
++# Barents Sea Opening follows the mooring line from Norway (Fugløya) via Bjørnøya to Sørkapp, Svalbard.
++barents_sea_opening = { lon = [20.0, 19.0, 16.5],  lat = [70.0, 74.45, 77.0] }
++bering_strait       = { lon = [-166.0, -171.0], lat = [66.0, 66.0] }
++davis_strait        = { lon = [-53.0, -63.0],   lat = [67.0, 66.5] }
++
++[paths]
++data_dir   = ""   # where downloads are stored; "" = each dataset's default cache
++output_dir = "output"    # model output: time averages (.jld2), checkpoints and the config; one folder per experiment
++figure_dir = "figures"   # figures and movies from the plotting/ scripts; one folder per experiment
++
++[boundaries]
++velocity_inflow_days = 0.0417   # oblique radiation on u, v: nudging timescale toward GLORYS on inflow (0.0417 days = 1 hour).
++                                # With 1 day, a partial bottom cell on the Atlantic open face drifted to −0.9 m/s
++                                # (GLORYS −0.26); 1 hour removes it and moves the section transports by < 0.1 Sv
++tracer_inflow_km     = 20  # T, S reservoir inflow relaxation length, both open sides
++relaxation_hours     = 6   # T, S and baroclinic u, v relax toward GLORYS in a ~2/3° band along the open sides
++                           # over this timescale; 0 = off (nested_ocean_model's default is 6)
++
++# Volume control (volume_control.jl): the net inflow through the two open sides together is pinned at every barotropic
++# substep, as NEMO and ROMS do; Flather splits it between the sides. Without it the domain's volume drifts from GLORYS's.
++follow_glorys_volume      = true   # true: the net inflow follows GLORYS's domain-mean η, with the surface freshwater handed back
++volume_relaxation_days    = 1      # with follow_glorys_volume: time over which the remaining drift from GLORYS's mean η is removed
++follow_glorys_tendency    = false  # with follow_glorys_volume: true also follows GLORYS's rate of change exactly
++# net_inflow_Sv           = 0.0    # with follow_glorys_volume = false: a constant net inflow instead (Sv, positive into the domain);
++                                   # with neither, Flather alone (no volume control)
++net_inflow_depth_exponent = 0.5    # the pin's correction to each boundary column ∝ Hᵖ: 0 uniform per length, 1 uniform velocity
++                                   # (NEMO, ROMS), 0.5 a uniform shift of GLORYS's η in Flather
++
++[ocean]
++closure = "NEMO"   # NEMO's TKE scheme (patch 085): "CATKE" (default), "NEMO", "RiBased", "TKEDissipation" or "none"
++nemo_parameters = "glorys12"   # GLORYS12's NEMO 3.1 settings, as in the four-month runs
++# nemo_surface_tke = 67.83            # surface TKE = this × u★² (NEMO's rn_ebb)
++# nemo_convective_diffusivity = 100   # m²/s where N² < 0 (NEMO's rn_evd; 0 = off)
++
++[sea_ice]
++ice_ocean_friction_velocity = "drag"   # u★ of the ice–ocean heat exchange: "constant" (0.002 m/s) or "drag" (√Cᴰ |uⁱ − uᵒ|, ≥ 0.002 m/s)
+-- 
+2.43.0
+
