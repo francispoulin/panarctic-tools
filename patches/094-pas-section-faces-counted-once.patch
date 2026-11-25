@@ -1,0 +1,150 @@
+From e085cf45c6e0d2348abbad8a80a1f9d2491ed583 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 25 Nov 2026 09:56:27 -0500
+Subject: [PATCH] Sections: count each face once where two segments meet (Fram
+ Strait counted two faces twice)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+section_faces adds the faces of each segment of a section; where two segments meet their wedges can overlap by a cell
+and the same face was counted by both (sign ±2). On the 15 km grid, Fram Strait's section did this at the 10°E
+waypoint, in the West Spitsbergen Current (u(279, 215), v(278, 215)): over Sep-Dec 2005 Fram's southward transport came
+out -0.26 Sv instead of -2.14 Sv on the box's boundary (GLORYS about -2.2), and the four gateways implied +2.1 m of sea
+level inside them while it rose 1 cm (arctic_volume.jl, patches 092-093). The signs are now clamped to -1, 0, +1, with
+a log line when a section had such faces. Davis, the BSO and Bering were not affected.
+
+tsubouchi_comparison.jl takes `offline`: it then reads arctic_transports_offline.jld2 (analysis/transports.jl) and
+writes tsubouchi_comparison_offline.md / .png, to recompute the gateway tables of runs made before this fix.
+arctic_volume.jl draws the dashed line last, so it shows where it overlaps.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AbhhvmHjZYCHhFxumZ9A47
+---
+ analysis/arctic_volume.jl        |  2 +-
+ analysis/tsubouchi_comparison.jl | 44 ++++++++++++++++++++++++--------
+ transports.jl                    | 10 +++++++-
+ 3 files changed, 44 insertions(+), 12 deletions(-)
+
+diff --git a/analysis/arctic_volume.jl b/analysis/arctic_volume.jl
+index 0dfa85f..c6d421d 100644
+--- a/analysis/arctic_volume.jl
++++ b/analysis/arctic_volume.jl
+@@ -377,8 +377,8 @@ function write_offline(on_section, on_boundary)
+                   xlabel = "days since $(start_date)")
+         hlines!(ax, 0; color = :black, linewidth = 0.5)
+         lines!(ax, Q_t, Q[name]; color = :black, label = "online")
+-        lines!(ax, η_t, on_section[name]; color = :red, linestyle = :dash, label = "offline, section faces")
+         lines!(ax, η_t, on_boundary[name]; color = :blue, label = "offline, box boundary")
++        lines!(ax, η_t, on_section[name]; color = :red, linestyle = :dash, label = "offline, section faces")   # last: on top
+         p == 1 && axislegend(ax; position = :lt, framevisible = false)
+     end
+     file = joinpath(figure_dir, "arctic_volume_gateways.png")
+diff --git a/analysis/tsubouchi_comparison.jl b/analysis/tsubouchi_comparison.jl
+index 2b60def..0520e5e 100644
+--- a/analysis/tsubouchi_comparison.jl
++++ b/analysis/tsubouchi_comparison.jl
+@@ -2,7 +2,12 @@
+ # Tsubouchi et al. (2018, JPO 48, 2029-2055), the Sep 2005 - Aug 2006 mooring-based inverse estimate.
+ #
+ #   julia +1.13 --project=. analysis/glorys_transports.jl [config.toml]      (once, for the GLORYS reference)
+-#   julia +1.13 --project=. analysis/tsubouchi_comparison.jl [config.toml]
++#   julia +1.13 --project=. analysis/tsubouchi_comparison.jl [config.toml] [offline]
++#
++# With `offline`, the model's transports come from arctic_transports_offline.jld2 (analysis/transports.jl, from the
++# daily averages: no sub-daily covariance of velocity and T, S) and the table and figure are written as
++# tsubouchi_comparison_offline.md / .png. For runs whose online transports predate patch 094 (Fram counted two faces
++# twice): run analysis/transports.jl, then this with `offline`.
+ #
+ # Reads the model's online transports (arctic_transports.jld2) and, if present, GLORYS's (glorys_transports.jld2) from
+ # `output_dir`. Writes two tables, printed and saved as tsubouchi_comparison.md in `output_dir` (markdown, ready to
+@@ -75,15 +80,34 @@ blocks = [(label = block_labels[b], a = block_first[b], b = block_first[b] + blo
+ # The model's averages, at the middle of their windows, in days since the start (the first output, the initial state,
+ # is left out); and the reference values and ρ cₚ the transports were computed with
+ window = config["output"]["average_hours"] / 24
+-(model_t, model), reference = jldopen(transport_output_file) do f
+-    iterations = sort(filter(!=("serialized"), keys(f["timeseries/t"])), by = s -> parse(Int, s))[2:end]
+-    t = [f["timeseries/t/$i"] for i in iterations] ./ 86400 .- window / 2
+-    values = Dict(key => [only(f["timeseries/$key/$i"]) for i in iterations] for key in keys(f["timeseries"]) if key != "t")
+-    reference = (T₀ = f["metadata/reference_temperature"], S₀ = f["metadata/reference_salinity"],
+-                 ρcₚ = f["metadata/reference_density"] * f["metadata/heat_capacity"])
+-    return (t, values), reference
++use_offline = length(ARGS) ≥ 2 && ARGS[2] == "offline"
++suffix = use_offline ? "_offline" : ""
++
++function read_online(file)
++    jldopen(file) do f
++        iterations = sort(filter(!=("serialized"), keys(f["timeseries/t"])), by = s -> parse(Int, s))[2:end]
++        t = [f["timeseries/t/$i"] for i in iterations] ./ 86400 .- window / 2
++        values = Dict(key => [only(f["timeseries/$key/$i"]) for i in iterations] for key in keys(f["timeseries"]) if key != "t")
++        reference = (T₀ = f["metadata/reference_temperature"], S₀ = f["metadata/reference_salinity"],
++                     ρcₚ = f["metadata/reference_density"] * f["metadata/heat_capacity"])
++        return (t, values), reference
++    end
++end
++
++# analysis/transports.jl: "times" (first = the initial state) and "transports/<name>", same metadata
++function read_offline(file)
++    jldopen(file) do f
++        n = length(f["times"])
++        t = f["times"][2:n] ./ 86400 .- window / 2
++        values = Dict(key => f["transports/$key"][2:n] for key in keys(f["transports"]))
++        reference = (T₀ = f["metadata/reference_temperature"], S₀ = f["metadata/reference_salinity"],
++                     ρcₚ = f["metadata/reference_density"] * f["metadata/heat_capacity"])
++        return (t, values), reference
++    end
+ end
+ 
++(model_t, model), reference = use_offline ? read_offline(offline_transport_output_file) : read_online(transport_output_file)
++
+ # GLORYS's daily means at noon of their day. glorys_transports.jl uses the config's reference values and the same ρ cₚ.
+ glorys_file = joinpath(output_dir, "glorys_transports.jld2")
+ if isfile(glorys_file)
+@@ -191,7 +215,7 @@ end
+ 
+ text = String(take!(io))
+ print(text)
+-table_file = joinpath(output_dir, "tsubouchi_comparison.md")
++table_file = joinpath(output_dir, "tsubouchi_comparison$(suffix).md")
+ write(table_file, text)
+ @info "Wrote $table_file"
+ 
+@@ -222,6 +246,6 @@ end
+ Label(fig[0, :], "$experiment: transports into the Arctic against Tsubouchi et al. (2018); " *
+                  "heat and freshwater relative to their monthly boundary-mean θ and S"; fontsize = 16)
+ 
+-file = joinpath(figure_dir, "tsubouchi_comparison.png")
++file = joinpath(figure_dir, "tsubouchi_comparison$(suffix).png")
+ save(file, fig)
+ @info "Wrote $file"
+diff --git a/transports.jl b/transports.jl
+index e581ddf..e2d5b5d 100644
+--- a/transports.jl
++++ b/transports.jl
+@@ -57,6 +57,11 @@ For each segment, the cells to the right of its great circle and between its two
+ marked cell and one to the left of the great circle are the faces the segment crosses, with sign +1 where the positive
+ velocity points into the marked cell. Cells on the edge of the domain are never marked, so the domain edges are not
+ section faces.
++
++Where two segments meet, their wedges can overlap by a cell, and both segments then count the same face (sign ±2).
++Each face is counted once: the signs are clamped to -1, 0, +1. (Until 25 Nov 2026 they were not: two faces of Fram
++Strait's section, at the 10°E waypoint in the West Spitsbergen Current, were counted twice on the 15 km grid, and
++Fram's southward transport came out 1.9 Sv too weak on average over Sep-Dec 2005: patches 092-094.)
+ """
+ function section_faces(grid, lons, lats)
+     grid = on_architecture(CPU(), grid)
+@@ -91,7 +96,10 @@ function section_faces(grid, lons, lats)
+         end
+     end
+ 
+-    return sᵘ, sᵛ
++    doubled = count(s -> abs(s) > 1, sᵘ) + count(s -> abs(s) > 1, sᵛ)
++    doubled > 0 && @info "Section through ($(first(lons))°E, $(first(lats))°N) … ($(last(lons))°E, $(last(lats))°N): " *
++                         "$doubled faces crossed by two segments where they meet, counted once"
++    return sign.(sᵘ), sign.(sᵛ)
+ end
+ 
+ # A face is open if it is not on or below the bathymetry. Only the immersed boundary counts, so the faces on the open
+-- 
+2.43.0
+
