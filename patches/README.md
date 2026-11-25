@@ -97,6 +97,7 @@ Numbered in the order to apply, across repositories. Each was checked to apply w
 | 090 | Oceananigans | `fjp/nemo-tke` | after 086 | Same fix as 089 in the library file (kept identical to the vendored one); test: immersed grid with and without the map gives the same ℓ, κ |
 | 091 | PanArcticShenanigans | `fjp/test-061` (configs, on top of 089) | after 089 | `config_sep2005_4mo_nemo_glorys12_nz100.toml` and its CATKE twin `config_sep2005_4mo_catke_nz100.toml`: Sep–Dec 2005 on 100 levels, checkpoints every 10 days, `[queue] long`, scorecard at the end |
 | 092 | PanArcticShenanigans | `fjp/test-061` (analysis, on top of 091) | after 091 | `analysis/arctic_volume.jl`: sea level inside Davis/Fram/BSO/Bering against their integrated net inflow (closure check of the box; table by month, figure); the scorecard also runs `plotting/volume_budget.jl` and adds both volume budgets |
+| 093 | PanArcticShenanigans | `fjp/test-061` (analysis, on top of 092) | after 092 | `arctic_volume.jl`: each section's faces against the box's boundary (wrong sign, counted twice, open water on both sides); with `offline`, each gateway recomputed from the daily u, v on its section and on the box boundary, against the online transport |
 
 ## Applying 001–006
 

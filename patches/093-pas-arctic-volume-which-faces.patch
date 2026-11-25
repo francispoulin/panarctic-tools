@@ -1,0 +1,222 @@
+From 107264c1b7fc6faaa163c5be5f537280583d7ada Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 25 Nov 2026 09:44:57 -0500
+Subject: [PATCH] arctic_volume.jl: which faces, and each gateway recomputed
+ offline on its section and on the box's boundary
+
+The four-month NEMO run's gateways imply +214 cm of sea level inside them over the run, while the box inside them rose
+1 cm (25 Nov): the section transports do not close. Two checks to find which gateway and why:
+- always (cheap): each section's surface faces against the box's own boundary: faces counted with the wrong sign,
+  twice (where two segments meet), or with open water on both sides (inside or outside the box);
+- with a second argument `offline`: each gateway from the daily-averaged u, v, once on its section's faces and once
+  on the box's boundary faces of that gateway (the flux that changes the box's volume), against the online transport;
+  table appended to arctic_volume.md, figure arctic_volume_gateways.png.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AbhhvmHjZYCHhFxumZ9A47
+---
+ analysis/arctic_volume.jl | 170 +++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 169 insertions(+), 1 deletion(-)
+
+diff --git a/analysis/arctic_volume.jl b/analysis/arctic_volume.jl
+index 6058980..0dfa85f 100644
+--- a/analysis/arctic_volume.jl
++++ b/analysis/arctic_volume.jl
+@@ -1,7 +1,7 @@
+ # Volume budget of the Arctic inside the four gateways (Davis Strait, Fram Strait, the Barents Sea Opening, Bering
+ # Strait): does the model's sea level inside them change as much as the net inflow through them says it should?
+ #
+-#   julia +1.13 --project=. analysis/arctic_volume.jl [config.toml]
++#   julia +1.13 --project=. analysis/arctic_volume.jl [config.toml] [offline]
+ #
+ # Why (25 Nov 2026): in the four-month runs the four gateways summed to a net inflow into the Arctic growing from
+ # +0.7 Sv (September) to +4.4 Sv (December), mostly Fram Strait turning northward, while GLORYS and Tsubouchi et al.
+@@ -17,6 +17,15 @@
+ #    Their difference is what entered or left across the surface (sea-ice growth and melt, rivers, precipitation; of
+ #    order 10 cm over a freeze-up) plus any error of the transports.
+ #
++# 3. Which faces (always, cheap): each section's faces against the box's own boundary. A section face that is not on
++#    the boundary (open water inside the box, or outside it, on both sides), a boundary face counted with the wrong
++#    sign, or a face counted twice (|sign| = 2, where two segments of a section meet) adds flux that does not change
++#    the box's volume.
++# 4. With the argument `offline` (25 Nov: the four-month NEMO run's gateways imply +214 cm over the run while the box
++#    rose 1 cm): each gateway's transport recomputed from the daily-averaged u and v, once on the section's faces and
++#    once on the box's boundary faces of that gateway (the flux that really changes the box's volume), against the
++#    online transport. Reads u, v (3-D) once per day: minutes for a four-month 15 km run.
++#
+ # Reads arctic_ocean.jld2 (η) and arctic_transports.jld2 from `output_dir`. Writes arctic_volume.md (calendar months,
+ # ready to paste) to `output_dir`, and arctic_volume.png (the box and the sections; the box-mean sea level against the
+ # integrated inflow; the net inflow and its parts) to `figure_dir`. CPU only, one η at a time.
+@@ -27,6 +36,8 @@ include("../transports.jl")
+ using Oceananigans.Grids: inactive_node
+ using Oceananigans.Operators: Azᶜᶜᶜ
+ using Oceananigans.OutputReaders: OnDisk
++using Oceananigans.Models.HydrostaticFreeSurfaceModels: update_zstar_scaling!
++using Oceananigans.Operators: Axᶠᶜᶜ, Ayᶜᶠᶜ
+ using CairoMakie, Dates, JLD2
+ 
+ start_date = Date(config["time"]["start_date"])
+@@ -223,3 +234,160 @@ axislegend(ax₂; position = :lt, framevisible = false, nbanks = 5)
+ colsize!(fig.layout, 1, Relative(0.35))
+ save(figure_file, fig)
+ @info "Wrote $figure_file"
++
++#####
++##### 3. The sections' faces against the box's boundary
++#####
++
++# The box's boundary faces, with the sign that points into the box: +1 where positive u (v) flows into the box
++inward_u = zeros(Int, Nx + 1, Ny)
++inward_v = zeros(Int, Nx, Ny + 1)
++for j in 1:Ny, i in 2:Nx
++    wet[i-1, j] && wet[i, j] && (inward_u[i, j] = inside[i, j] - inside[i-1, j])
++end
++for j in 2:Ny, i in 1:Nx
++    wet[i, j-1] && wet[i, j] && (inward_v[i, j] = inside[i, j] - inside[i, j-1])
++end
++
++open_at_surface_u(i, j) = 2 ≤ i ≤ Nx && wet[i-1, j] && wet[i, j]
++open_at_surface_v(i, j) = 2 ≤ j ≤ Ny && wet[i, j-1] && wet[i, j]
++
++face_rows = []
++for name in gateway_names
++    sᵘ, sᵛ = all_sections[name]
++    counts = Dict("on the boundary, right sign" => 0, "on the boundary, wrong sign" => 0, "counted twice" => 0,
++                  "open water on both sides, inside the box" => 0, "open water on both sides, outside the box" => 0)
++    odd = String[]
++    for (s, inward, open_at, ℓ) in ((sᵘ, inward_u, open_at_surface_u, "u"), (sᵛ, inward_v, open_at_surface_v, "v"))
++        for I in findall(!=(0), s)
++            i, j = Tuple(I)
++            open_at(i, j) || continue
++            abs(s[i, j]) > 1 && (counts["counted twice"] += 1; push!(odd, "$ℓ($i,$j) ×$(s[i, j])"))
++            if inward[i, j] != 0
++                sign(s[i, j]) == inward[i, j] ? (counts["on the boundary, right sign"] += 1) :
++                                                (counts["on the boundary, wrong sign"] += 1; push!(odd, "$ℓ($i,$j) wrong sign"))
++            else
++                a, b = ℓ == "u" ? ((i - 1, j), (i, j)) : ((i, j - 1), (i, j))
++                key = inside[a...] ? "open water on both sides, inside the box" : "open water on both sides, outside the box"
++                counts[key] += 1
++                push!(odd, "$ℓ($i,$j) " * (inside[a...] ? "inside" : "outside"))
++            end
++        end
++    end
++    # Boundary faces of this gateway the section misses (should be none: the flood stops only at section faces)
++    push!(face_rows, (name, counts, odd))
++end
++
++io = IOBuffer()
++println(io, "\n## The sections' faces against the box's boundary (surface level)\n")
++println(io, "| Gateway | On the boundary, right sign | Wrong sign | Counted twice | Open water both sides, inside | Open water both sides, outside |")
++println(io, "|---|---|---|---|---|---|")
++for (name, counts, odd) in face_rows
++    println(io, "| $(gateway_label[name]) | $(counts["on the boundary, right sign"]) | $(counts["on the boundary, wrong sign"]) | ",
++                "$(counts["counted twice"]) | $(counts["open water on both sides, inside the box"]) | ",
++                "$(counts["open water on both sides, outside the box"]) |")
++end
++for (name, counts, odd) in face_rows
++    isempty(odd) || println(io, "\n$(gateway_label[name]): ", join(first(odd, 40), ", "), length(odd) > 40 ? ", …" : "")
++end
++faces_text = String(take!(io))
++open(f -> write(f, faces_text), table_file, "a")
++print(faces_text)
++
++#####
++##### 4. Offline: each gateway on its section's faces and on the box's boundary, from the daily u, v
++#####
++
++# Everything is defined at the top level and only called inside `if`: Julia 1.13 does not see methods or imports made
++# inside the same top-level block that calls them (world age)
++run_offline = length(ARGS) ≥ 2 && ARGS[2] == "offline"
++zgrid = ηt.grid   # the grid the z⋆ scaling is updated on, as in analysis/transports.jl
++
++# Faces of each gateway: its section's (with the section's signs) and the box boundary's among them (inward signs)
++section_list  = Dict(name => vcat([(:u, Tuple(I)..., all_sections[name][1][I]) for I in findall(!=(0), all_sections[name][1])],
++                                  [(:v, Tuple(I)..., all_sections[name][2][I]) for I in findall(!=(0), all_sections[name][2])])
++                     for name in gateway_names)
++boundary_list = Dict(name => [(ℓ, i, j, ℓ == :u ? inward_u[i, j] : inward_v[i, j]) for (ℓ, i, j, _) in section_list[name]
++                              if (ℓ == :u ? inward_u[i, j] : inward_v[i, j]) != 0]
++                     for name in gateway_names)
++# Boundary faces of the box that belong to no section (should be none: the flood stops only at section faces)
++stray = vcat([Tuple(I) for I in findall(!=(0), inward_u) if !blocked_u[I]],
++             [Tuple(I) for I in findall(!=(0), inward_v) if !blocked_v[I]])
++isempty(stray) || @warn "$(length(stray)) boundary faces of the box are on no section" stray
++
++function face_transport(faces, u, v)
++    total = 0.0
++    for (ℓ, i, j, s) in faces, k in 1:Nz
++        if ℓ == :u
++            open_face(i, j, k, zgrid, fcc...) && (total += s * u[i, j, k] * Axᶠᶜᶜ(i, j, k, zgrid))
++        else
++            open_face(i, j, k, zgrid, cfc...) && (total += s * v[i, j, k] * Ayᶜᶠᶜ(i, j, k, zgrid))
++        end
++    end
++    return total * 1e-6   # Sv
++end
++
++mean_of_run(x) = sum(x) / length(x)
++
++function offline_transports()
++    ut = FieldTimeSeries(ocean_output_file, "u"; backend = OnDisk())
++    vt = FieldTimeSeries(ocean_output_file, "v"; backend = OnDisk())
++    on_section  = Dict(name => zeros(length(η_t)) for name in gateway_names)
++    on_boundary = Dict(name => zeros(length(η_t)) for name in gateway_names)
++    for n in eachindex(η_t)
++        update_zstar_scaling!(zgrid, ηt[n + 1])
++        u, v = ut[n + 1], vt[n + 1]
++        for name in gateway_names
++            on_section[name][n]  = face_transport(section_list[name], u, v)
++            on_boundary[name][n] = face_transport(boundary_list[name], u, v)
++        end
++        n % 10 == 0 && @info @sprintf("offline transports: %d / %d", n, length(η_t))
++    end
++    return on_section, on_boundary
++end
++
++function write_offline(on_section, on_boundary)
++    boundary_net = sum(on_boundary[name] for name in gateway_names)
++    boundary_integrated = zeros(length(η_t))
++    for n in 2:length(η_t)
++        boundary_integrated[n] = boundary_integrated[n-1] +
++                                 (boundary_net[n] + boundary_net[n-1]) / 2 * 1e6 * (η_t[n] - η_t[n-1]) * 86400 / box_area * 100
++    end
++    online_on_η = Dict(name => linear_on(Q_t, Q[name], η_t) for name in gateway_names)
++
++    io = IOBuffer()
++    println(io, "\n## Offline: each gateway from the daily u, v, on its section's faces and on the box's boundary (whole run)\n")
++    println(io, "| Gateway | Online (Sv) | Offline, section faces (Sv) | Offline, box boundary (Sv) |")
++    println(io, "|---|---|---|---|")
++    for name in gateway_names
++        println(io, @sprintf("| %s | %+.2f | %+.2f | %+.2f |", gateway_label[name], mean_of_run(online_on_η[name]),
++                             mean_of_run(on_section[name]), mean_of_run(on_boundary[name])))
++    end
++    println(io, @sprintf("| Net | %+.2f | %+.2f | %+.2f |", mean_of_run(net_on_η),
++                         mean_of_run(sum(on_section[name] for name in gateway_names)), mean_of_run(boundary_net)))
++    println(io, @sprintf("\nBox sea level change over the run: from η %+.1f cm; from the box-boundary transports %+.1f cm; from the online transports %+.1f cm.",
++                         change[end], boundary_integrated[end], integrated[end]))
++    offline_text = String(take!(io))
++    open(f -> write(f, offline_text), table_file, "a")
++    print(offline_text)
++
++    fig = Figure(size = (1100, 700))
++    for (p, name) in enumerate(gateway_names)
++        ax = Axis(fig[(p - 1) ÷ 2 + 1, (p - 1) % 2 + 1]; title = gateway_label[name], ylabel = "into the Arctic (Sv)",
++                  xlabel = "days since $(start_date)")
++        hlines!(ax, 0; color = :black, linewidth = 0.5)
++        lines!(ax, Q_t, Q[name]; color = :black, label = "online")
++        lines!(ax, η_t, on_section[name]; color = :red, linestyle = :dash, label = "offline, section faces")
++        lines!(ax, η_t, on_boundary[name]; color = :blue, label = "offline, box boundary")
++        p == 1 && axislegend(ax; position = :lt, framevisible = false)
++    end
++    file = joinpath(figure_dir, "arctic_volume_gateways.png")
++    save(file, fig)
++    @info "Wrote $file"
++    return nothing
++end
++
++if run_offline
++    offline_section, offline_boundary = offline_transports()
++    write_offline(offline_section, offline_boundary)
++end
+-- 
+2.43.0
+
