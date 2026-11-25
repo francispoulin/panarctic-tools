@@ -103,6 +103,7 @@ Numbered in the order to apply, across repositories. Each was checked to apply w
 | 096 | NumericalEarth | new branch `fjp/net-inflow-0.9.4` | `fjp/net-inflow` (e22c1bf) + tag v0.9.4 | **git bundle**, not a patch: the merge of v0.9.4 into `fjp/net-inflow` (commit f2e7db8, tree 3ce8f0b); 9 small conflicts resolved (docstrings, import lists, compat, `heat_capacity`). `git fetch ../panarctic-tools/patches/096-ne-merge-v0.9.4.bundle fjp/net-inflow-0.9.4:fjp/net-inflow-0.9.4` |
 | 097 | PanArcticShenanigans | `fjp/test-061` (on top of 095) | after 095 | `[land] river_spread_degrees` (default 1.2) and `river_spread_max_cells` (default 0 = no cap) for JRA55's river routing; `analysis/rivers.jl` uses them |
 | 098 | PanArcticShenanigans | new worktree `panarctic-098` (`fjp/test-098`, from `fjp/test-061` + 097) | after 097 | NumericalEarth pin → `fjp/net-inflow-0.9.4` (Project.toml + Manifest, same deps); `config_smoke_test_ne094.toml`, `config_sep2005_4mo_nemo_glorys12_nz100_ne094.toml` |
+| 099 | PanArcticShenanigans | `fjp/test-061` (configs, on top of 097) | after 097 | `config_sep2005_4mo_nemo_glorys12_nz100_spread05.toml`, `…_spread03.toml`: four-month NEMO runs with river water spread over 0.5° and 0.3° instead of 1.2° |
 
 ## Applying 001–006
 
