@@ -99,6 +99,7 @@ Numbered in the order to apply, across repositories. Each was checked to apply w
 | 092 | PanArcticShenanigans | `fjp/test-061` (analysis, on top of 091) | after 091 | `analysis/arctic_volume.jl`: sea level inside Davis/Fram/BSO/Bering against their integrated net inflow (closure check of the box; table by month, figure); the scorecard also runs `plotting/volume_budget.jl` and adds both volume budgets |
 | 093 | PanArcticShenanigans | `fjp/test-061` (analysis, on top of 092) | after 092 | `arctic_volume.jl`: each section's faces against the box's boundary (wrong sign, counted twice, open water on both sides); with `offline`, each gateway recomputed from the daily u, v on its section and on the box boundary, against the online transport |
 | 094 | PanArcticShenanigans | `fjp/test-061` (fix, on top of 093) | after 093 | `section_faces`: each face counted once where two segments meet (Fram counted two West Spitsbergen Current faces twice: Fram −0.26 instead of −2.14 Sv, Sep–Dec 2005); `tsubouchi_comparison.jl … offline` for older runs; dashed line drawn last in `arctic_volume_gateways.png` |
+| 095 | PanArcticShenanigans | `fjp/test-061` (analysis, on top of 094) | after 094 | `analysis/rivers.jl`: JRA55 river and iceberg water at the mouths vs delivered (by river, model region, month), and where it lands (distance from the mouth and the coast; NumericalEarth spreads each mouth over 1.2°) |
 
 ## Applying 001–006
 

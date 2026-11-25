@@ -1,0 +1,290 @@
+From e3ac6669ea0e8b0f623c47087cfb8db1f448a8cb Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 25 Nov 2026 10:14:40 -0500
+Subject: [PATCH] analysis/rivers.jl: JRA55 river and iceberg water delivered
+ to the model ocean, by river, region and month, and where it lands
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The four-month runs are too salty in strips along the river-fed coasts with fresher water just offshore, and the BSO
+inflow is too salty. The 16 Nov check (nested/rivers_and_straits.jl) found every JRA55 river near the domain
+delivered; this redoes it for the current set-up (the run's own grid, the same JRA55PrescribedLand call as
+panarctic.jl, CPU), over the whole run by month, and adds where the water lands: NumericalEarth's routing spreads each
+mouth's discharge equally over every wet cell within 1.2° (about 130 km) of its landing cell. rivers.md (by river,
+by model region, and each river's distance from its mouth and from the coast, and the part within 30 km of the coast)
+and rivers.png (delivered fresh water; distance from the coast).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AbhhvmHjZYCHhFxumZ9A47
+---
+ analysis/rivers.jl | 257 +++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 257 insertions(+)
+ create mode 100644 analysis/rivers.jl
+
+diff --git a/analysis/rivers.jl b/analysis/rivers.jl
+new file mode 100644
+index 0000000..88613c1
+--- /dev/null
++++ b/analysis/rivers.jl
+@@ -0,0 +1,257 @@
++# River and iceberg fresh water: how much JRA55 discharge reaches the model ocean, in which region and month, and how far
++# from the coast the model's routing puts it.
++#
++#   julia +1.13 --project=. analysis/rivers.jl [config.toml]
++#
++# Why (25 Nov 2026): in the four-month runs the surface is too salty in strips along the river-fed coasts (Siberia,
++# Alaska, the Archipelago, east Greenland, Norway) with fresher patches just offshore, and the Barents Sea Opening
++# carries too much freshwater out (its inflow too salty). On 16 Nov (`nested/rivers_and_straits.jl`, fjp/nested, first
++# days of a run) every JRA55 river near the domain was delivered; this checks the current set-up over the whole run,
++# by month, and adds where the water lands. NumericalEarth's `build_flux_routing` (src/Lands/river_routing.jl) puts each
++# mouth on the nearest wet cell within `maximum_search_radius` cells (5, about 3° here: the formula assumes a global
++# grid) and spreads its discharge equally over every wet cell within `spread_radius` (1.2°, about 130 km) of that cell:
++# a river's water is spread over a disk ~260 km across, not along the coast. GLORYS (NEMO) puts runoff in the cells next
++# to the mouth with extra mixing there.
++#
++# Uses the run's own grid (from arctic_ocean.jld2) and the same JRA55PrescribedLand call as panarctic.jl, on the CPU.
++# Writes rivers.md to `output_dir` and rivers.png to `figure_dir`:
++#   1. by river (mouth location): JRA55 discharge per month and the part the routing delivers to the model ocean;
++#   2. by model region (where the water lands, the regions of salinity_drift.jl), per month, rivers and icebergs;
++#   3. by river: where its water lands: the discharge-weighted distance from the mouth and from the coast, how many
++#      cells share it, and the part landing within 30 km of the coast;
++#   4. a map of the delivered fresh water (mean over the run) and the coast distance.
++
++include("../config.jl")
++
++using NumericalEarth, Oceananigans
++using Oceananigans.Architectures: on_architecture
++using Oceananigans.Grids: inactive_node, λnode, φnode
++using Oceananigans.Operators: Azᶜᶜᶜ, Δzᶜᶜᶜ
++using Oceananigans.OutputReaders: OnDisk
++using CairoMakie, Dates, Printf
++
++include("../jra55_read_fix.jl")
++
++start_date = DateTime(config["time"]["start_date"])
++end_date   = DateTime(config["time"]["end_date"])
++config["atmosphere"]["jra55"] == "multi_year" ||
++    @warn "This run uses JRA55's repeat year: the discharge below is the run's forcing, not 2005's"
++jra55 = config["atmosphere"]["jra55"] == "multi_year" ?
++        (; dataset = MultiYearJRA55(), start_date, end_date = end_date + Day(1)) : (; dataset = RepeatYearJRA55())
++
++#####
++##### The run's grid
++#####
++
++grid = on_architecture(CPU(), FieldTimeSeries(ocean_output_file, "T"; backend = OnDisk()).grid)
++Nx, Ny, Nz = size(grid)
++C = Center()
++cell_λ = [mod(λnode(i, j, Nz, grid, C, C, C) + 180, 360) - 180 for i in 1:Nx, j in 1:Ny]
++cell_φ = [φnode(i, j, Nz, grid, C, C, C) for i in 1:Nx, j in 1:Ny]
++wet    = [!inactive_node(i, j, Nz, grid, C, C, C) for i in 1:Nx, j in 1:Ny]
++area   = [Azᶜᶜᶜ(i, j, Nz, grid) for i in 1:Nx, j in 1:Ny]
++depth  = [sum(Δzᶜᶜᶜ(i, j, k, grid) for k in 1:Nz if !inactive_node(i, j, k, grid, C, C, C); init = 0.0) for i in 1:Nx, j in 1:Ny]
++
++# Great-circle distance (km)
++function km_between(λ₁, φ₁, λ₂, φ₂)
++    a = sind((φ₂ - φ₁) / 2)^2 + cosd(φ₁) * cosd(φ₂) * sind((λ₂ - λ₁) / 2)^2
++    return 2 * 6371 * asin(min(1, sqrt(a)))
++end
++
++# Distance from each wet cell to the nearest land cell (km), stepping cell to cell from the coast (multi-source
++# breadth-first; each step adds the cell's width √A). Land cells 0. Open-boundary rows count as coast too far away
++# to matter.
++coast_km = fill(Inf, Nx, Ny)
++frontier = Tuple{Int, Int}[]
++for j in 1:Ny, i in 1:Nx
++    wet[i, j] && continue
++    coast_km[i, j] = 0.0
++    push!(frontier, (i, j))
++end
++while !isempty(frontier)
++    next = Tuple{Int, Int}[]
++    for (i, j) in frontier, (a, b) in ((i + 1, j), (i - 1, j), (i, j + 1), (i, j - 1))
++        (1 ≤ a ≤ Nx && 1 ≤ b ≤ Ny && wet[a, b]) || continue
++        d = coast_km[i, j] + sqrt(area[a, b]) / 1000
++        if d < coast_km[a, b]
++            coast_km[a, b] = d
++            push!(next, (a, b))
++        end
++    end
++    global frontier = next
++end
++
++#####
++##### Regions
++#####
++
++# Rivers, by where JRA55 puts their mouths (longitude −180 to 180)
++river_groups = [("Ob and Yenisei (Kara Sea)",         (λ, φ) -> 55 ≤ λ ≤ 100 && 64 ≤ φ ≤ 78),
++                ("Lena (Laptev Sea)",                 (λ, φ) -> 100 < λ ≤ 145 && 68 ≤ φ ≤ 78),
++                ("Kolyma, Indigirka (E Siberian Sea)", (λ, φ) -> 145 < λ ≤ 180 && 64 ≤ φ ≤ 75),
++                ("Pechora, N Dvina (Barents, White)", (λ, φ) -> 30 ≤ λ < 55 && 62 ≤ φ ≤ 72),
++                ("Mackenzie and Beaufort coast",      (λ, φ) -> -160 ≤ λ ≤ -120 && 66 ≤ φ ≤ 74),
++                ("Yukon and Bering Sea",              (λ, φ) -> (λ ≤ -155 || λ ≥ 170) && 55 ≤ φ < 66),
++                ("Canadian Archipelago",              (λ, φ) -> -125 ≤ λ ≤ -75 && 68 ≤ φ ≤ 84),
++                ("Greenland (and east Ellesmere)",    (λ, φ) -> -74 ≤ λ ≤ -10 && 59.5 ≤ φ ≤ 84 && !(λ ≤ -60 && φ ≤ 74)),
++                ("Hudson Bay, Baffin Island, Labrador", (λ, φ) -> -95 ≤ λ ≤ -55 && 50 ≤ φ ≤ 74),   # after Greenland: first match counts
++                ("Norwegian coast",                   (λ, φ) -> 4 ≤ λ ≤ 31 && 59.5 < φ ≤ 72 && !(13.5 ≤ λ && φ ≤ 66)),
++                ("Baltic",                            (λ, φ) -> 13.5 ≤ λ ≤ 31 && 53 ≤ φ ≤ 66),
++                ("North Sea, Danish straits",         (λ, φ) -> -4 ≤ λ < 13.5 && 50 ≤ φ ≤ 59.5)]
++group_of(λ, φ) = something(findfirst(g -> g[2](mod(λ + 180, 360) - 180, φ), river_groups), length(river_groups) + 1)
++group_names = [first.(river_groups); "elsewhere"]
++
++# Model regions, where the water lands: those of analysis/salinity_drift.jl, first match
++model_regions = [("Beaufort Gyre",    (λ, φ, H) -> 70.5 ≤ φ ≤ 80.5 && -170 ≤ λ ≤ -130 && H > 300),
++                 ("Central Arctic",   (λ, φ, H) -> φ > 82),
++                 ("Siberian shelves", (λ, φ, H) -> 66 ≤ φ ≤ 82 && (λ ≥ 60 || λ ≤ -170) && H < 200),
++                 ("Barents Sea",      (λ, φ, H) -> 68 ≤ φ ≤ 80 && 15 ≤ λ < 60),
++                 ("Nordic Seas",      (λ, φ, H) -> 62 ≤ φ ≤ 79 && -20 ≤ λ < 15),
++                 ("Archipelago",      (λ, φ, H) -> 68 ≤ φ ≤ 82 && -125 ≤ λ ≤ -80),
++                 ("Baffin Bay",       (λ, φ, H) -> 67 ≤ φ ≤ 78 && -80 < λ ≤ -55)]
++region_names = [first.(model_regions); "elsewhere"]
++region_of_cell = [something(findfirst(r -> r[2](cell_λ[i, j], cell_φ[i, j], depth[i, j]), model_regions), length(model_regions) + 1)
++                  for i in 1:Nx, j in 1:Ny]
++
++#####
++##### JRA55's fresh water and the model's routing (as panarctic.jl)
++#####
++
++land = JRA55PrescribedLand(grid; jra55..., dir_kw...)
++components = (:rivers, :icebergs)
++source_grid = on_architecture(CPU(), land.freshwater_flux.rivers.grid)
++source_area(i, j) = Azᶜᶜᶜ(i, j, 1, source_grid)
++source_λφ(i, j) = (mod(λnode(i, j, 1, source_grid, C, C, C) + 180, 360) - 180, φnode(i, j, 1, source_grid, C, C, C))
++
++# Each routing as a list of contributions (mouth i, j, target i, j, share of the mouth's discharge)
++function contributions(routing)
++    target_i, target_j, offsets = Array(routing.target_i), Array(routing.target_j), Array(routing.offsets)
++    outlet_i, outlet_j, weight  = Array(routing.contribution_outlet_i), Array(routing.contribution_outlet_j),
++                                  Array(routing.contribution_weight)
++    list = Tuple{Int, Int, Int, Int, Float64}[]
++    for c in eachindex(target_i), m in offsets[c]:offsets[c+1]-1
++        # weight = (source area / number of targets) / target area: the share of the mouth's discharge is
++        # weight × target area / source area
++        share = weight[m] * area[target_i[c], target_j[c]] / source_area(outlet_i[m], outlet_j[m])
++        push!(list, (outlet_i[m], outlet_j[m], target_i[c], target_j[c], share))
++    end
++    return list
++end
++routed = Dict(name => contributions(land.river_routing[name]) for name in components)
++routed_mouths = Dict(name => Set((oi, oj) for (oi, oj, _, _, _) in routed[name]) for name in components)
++
++# Daily records within the run (JRA55's daily means, stamped at noon)
++series = land.freshwater_flux.rivers
++record_dates = [start_date + Millisecond(round(Int, 1000 * t)) for t in series.times]
++records = findall(d -> start_date ≤ d < end_date, record_dates)
++months  = unique(Dates.firstdayofmonth.(record_dates[records]))
++month_index(d) = findfirst(==(Dates.firstdayofmonth(d)), months)
++month_days = zeros(length(months))
++
++ngroups, nregions = length(group_names), length(region_names)
++at_mouths   = Dict(name => zeros(ngroups, length(months)) for name in components)   # m³/s summed over days
++delivered_g = Dict(name => zeros(ngroups, length(months)) for name in components)   # by mouth group
++delivered_r = Dict(name => zeros(nregions, length(months)) for name in components)  # by landing region
++landed      = zeros(Nx, Ny)                                                          # m³/s summed over days, both
++# For the footprint table, discharge-weighted sums by group (rivers only)
++footprint = Dict(:volume => zeros(ngroups), :mouth_km => zeros(ngroups), :coast_km => zeros(ngroups),
++                 :near_coast => zeros(ngroups))
++footprint_cells = [Set{Tuple{Int, Int}}() for _ in 1:ngroups]
++
++for n in records
++    m = month_index(record_dates[n])
++    month_days[m] += 1
++    for name in components
++        flux = Array(interior(land.freshwater_flux[name][n]))[:, :, 1]   # kg m⁻² s⁻¹ on JRA55's grid
++        for I in findall(x -> isfinite(x) && x > 0, flux)
++            λ, φ = source_λφ(I[1], I[2])
++            at_mouths[name][group_of(λ, φ), m] += flux[I] * source_area(I[1], I[2]) / 1000
++        end
++        for (oi, oj, ti, tj, share) in routed[name]
++            Q = flux[oi, oj]
++            (isfinite(Q) && Q > 0) || continue
++            q = share * Q * source_area(oi, oj) / 1000   # m³/s into cell (ti, tj)
++            λ, φ = source_λφ(oi, oj)
++            g = group_of(λ, φ)
++            delivered_g[name][g, m] += q
++            delivered_r[name][region_of_cell[ti, tj], m] += q
++            landed[ti, tj] += q
++            if name == :rivers
++                footprint[:volume][g]     += q
++                footprint[:mouth_km][g]   += q * km_between(λ, φ, cell_λ[ti, tj], cell_φ[ti, tj])
++                footprint[:coast_km][g]   += q * coast_km[ti, tj]
++                footprint[:near_coast][g] += q * (coast_km[ti, tj] ≤ 30)
++                push!(footprint_cells[g], (ti, tj))
++            end
++        end
++    end
++    n % 10 == 0 && @info "record $(Date(record_dates[n]))"
++end
++
++#####
++##### Tables
++#####
++
++monthly(x) = x ./ reshape(month_days, 1, :)   # mean m³/s per month
++month_labels = Dates.format.(months, "u yyyy")
++
++io = IOBuffer()
++println(io, "# River and iceberg fresh water: $experiment\n")
++println(io, "JRA55 discharge (daily means, $(Date(start_date)) to $(Date(end_date))) against what the model's routing delivers ",
++            "to its ocean (JRA55PrescribedLand, as in panarctic.jl). m³/s; 1 mSv = 1000 m³/s. Routing: nearest wet cell ",
++            "within ~3°, then spread equally over every wet cell within 1.2° (~130 km).\n")
++
++println(io, "## 1. By river (mouth location): JRA55 at the mouths / delivered to the model ocean\n")
++println(io, "| River | " * join(month_labels, " | ") * " |")
++println(io, "|---|" * repeat("---|", length(months)))
++for g in 1:ngroups
++    cells = [@sprintf("%.0f / %.0f", monthly(at_mouths[:rivers])[g, m], monthly(delivered_g[:rivers])[g, m]) for m in eachindex(months)]
++    println(io, "| $(group_names[g]) | " * join(cells, " | ") * " |")
++end
++println(io, "\nIcebergs (solid discharge), at the source / delivered: " *
++            join([@sprintf("%s %.0f / %.0f", month_labels[m], sum(monthly(at_mouths[:icebergs])[:, m]),
++                           sum(monthly(delivered_g[:icebergs])[:, m])) for m in eachindex(months)], "; ") *
++            ". \"elsewhere\" at the mouths is the rest of the world; only mouths within reach of the domain are delivered.\n")
++
++println(io, "## 2. By model region (where the water lands), rivers + icebergs\n")
++println(io, "| Region | " * join(month_labels, " | ") * " |")
++println(io, "|---|" * repeat("---|", length(months)))
++for r in 1:nregions
++    cells = [@sprintf("%.0f", monthly(delivered_r[:rivers])[r, m] + monthly(delivered_r[:icebergs])[r, m]) for m in eachindex(months)]
++    println(io, "| $(region_names[r]) | " * join(cells, " | ") * " |")
++end
++
++println(io, "\n## 3. By river: where its water lands (whole run, discharge-weighted)\n")
++println(io, "| River | Mean delivered (m³/s) | Cells sharing it | Distance from the mouth (km) | Distance from the coast (km) | Within 30 km of the coast |")
++println(io, "|---|---|---|---|---|---|")
++total_days = sum(month_days)
++for g in 1:ngroups-1
++    V = footprint[:volume][g]
++    V > 0 || continue
++    println(io, @sprintf("| %s | %.0f | %d | %.0f | %.0f | %.0f %% |", group_names[g], V / total_days, length(footprint_cells[g]),
++                         footprint[:mouth_km][g] / V, footprint[:coast_km][g] / V, 100 * footprint[:near_coast][g] / V))
++end
++table_text = String(take!(io))
++table_file = joinpath(output_dir, "rivers.md")
++write(table_file, table_text)
++print(table_text)
++@info "Wrote $table_file"
++
++#####
++##### Map
++#####
++
++landed_m_per_year = ifelse.(wet, landed ./ total_days ./ area .* (365.25 * 86400), NaN)   # m/yr of fresh water
++fig = Figure(size = (1300, 620))
++ax₁ = Axis(fig[1, 1]; title = "$experiment: river + iceberg water delivered (mean over the run, m/yr)", aspect = DataAspect(),
++           xlabel = "i", ylabel = "j")
++hm = heatmap!(ax₁, 1:Nx, 1:Ny, ifelse.(landed_m_per_year .> 0, log10.(landed_m_per_year), NaN);
++              colormap = :viridis, colorrange = (-2, 1), nan_color = :lightgray)
++Colorbar(fig[1, 2], hm; label = "log₁₀ m/yr")
++ax₂ = Axis(fig[1, 3]; title = "distance from the coast (km)", aspect = DataAspect(), xlabel = "i")
++hm₂ = heatmap!(ax₂, 1:Nx, 1:Ny, ifelse.(wet, coast_km, NaN); colormap = :Blues, colorrange = (0, 300), nan_color = :lightgray)
++contour!(ax₂, 1:Nx, 1:Ny, ifelse.(landed_m_per_year .> 0, 1.0, 0.0); levels = [0.5], color = :red, linewidth = 1)
++Colorbar(fig[1, 4], hm₂; label = "km (red: cells receiving river water)")
++figure_file = joinpath(figure_dir, "rivers.png")
++save(figure_file, fig)
++@info "Wrote $figure_file"
+-- 
+2.43.0
+
