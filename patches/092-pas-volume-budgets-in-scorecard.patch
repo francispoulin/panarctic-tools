@@ -1,0 +1,353 @@
+From 507f18e03d2b406ac87a73240948fe7aa769e6d3 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 25 Nov 2026 08:34:31 -0500
+Subject: [PATCH] Volume budgets in the scorecard: the domain (monitor.csv) and
+ the Arctic inside the four gateways
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+analysis/arctic_volume.jl: the box of wet surface cells reachable from the pole without crossing the Davis, Fram, BSO
+or Bering sections (stops and draws the path if the sections do not close the Arctic), its mean sea level from the
+daily η against the integrated net inflow through the four sections, by calendar month (arctic_volume.md,
+arctic_volume.png). For the four-month runs of 24 Nov, whose gateways summed to +0.7 to +4.4 Sv into the Arctic.
+
+The scorecard now also runs plotting/volume_budget.jl and arctic_volume.jl and adds both budgets: the domain-mean η
+against GLORYS's, through the sides and the surface, the largest residual (should be 0), and the Arctic table.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AbhhvmHjZYCHhFxumZ9A47
+---
+ analysis/arctic_volume.jl       | 225 ++++++++++++++++++++++++++++++++
+ analysis/scorecard_functions.jl |  56 +++++++-
+ 2 files changed, 280 insertions(+), 1 deletion(-)
+ create mode 100644 analysis/arctic_volume.jl
+
+diff --git a/analysis/arctic_volume.jl b/analysis/arctic_volume.jl
+new file mode 100644
+index 0000000..6058980
+--- /dev/null
++++ b/analysis/arctic_volume.jl
+@@ -0,0 +1,225 @@
++# Volume budget of the Arctic inside the four gateways (Davis Strait, Fram Strait, the Barents Sea Opening, Bering
++# Strait): does the model's sea level inside them change as much as the net inflow through them says it should?
++#
++#   julia +1.13 --project=. analysis/arctic_volume.jl [config.toml]
++#
++# Why (25 Nov 2026): in the four-month runs the four gateways summed to a net inflow into the Arctic growing from
++# +0.7 Sv (September) to +4.4 Sv (December), mostly Fram Strait turning northward, while GLORYS and Tsubouchi et al.
++# stay near zero. The domain's own volume budget (plotting/volume_budget.jl) closes, so either water piles up inside
++# the gateways (the Arctic's mean sea level rises, at the expense of the rest of the domain), or the section transports
++# are wrong.
++#
++# 1. The box: the wet surface cells reachable from the cell nearest the North Pole without crossing a face of one of
++#    the four sections. If the flood reaches an open boundary (j = 1 or j = Ny), the sections do not close the Arctic
++#    (a strait they miss, or a section end in the ocean): the script reports the path it found and stops.
++# 2. The box's volume from the daily-averaged η (Σ η A over the box) against the time integral of the net inflow
++#    through the four sections (online transports, arctic_transports.jld2), both as a box-mean sea level (cm).
++#    Their difference is what entered or left across the surface (sea-ice growth and melt, rivers, precipitation; of
++#    order 10 cm over a freeze-up) plus any error of the transports.
++#
++# Reads arctic_ocean.jld2 (η) and arctic_transports.jld2 from `output_dir`. Writes arctic_volume.md (calendar months,
++# ready to paste) to `output_dir`, and arctic_volume.png (the box and the sections; the box-mean sea level against the
++# integrated inflow; the net inflow and its parts) to `figure_dir`. CPU only, one η at a time.
++
++include("../config.jl")
++include("../transports.jl")
++
++using Oceananigans.Grids: inactive_node
++using Oceananigans.Operators: Azᶜᶜᶜ
++using Oceananigans.OutputReaders: OnDisk
++using CairoMakie, Dates, JLD2
++
++start_date = Date(config["time"]["start_date"])
++
++gateway_names = ["davis_strait", "fram_strait", "barents_sea_opening", "bering_strait"]
++gateway_label = Dict("davis_strait" => "Davis", "fram_strait" => "Fram", "barents_sea_opening" => "BSO",
++                     "bering_strait" => "Bering")
++
++#####
++##### The box inside the gateways
++#####
++
++ηt   = FieldTimeSeries(ocean_output_file, "η"; backend = OnDisk())
++grid = on_architecture(CPU(), ηt.grid)
++Nx, Ny, Nz = size(grid)
++ccc = (Center(), Center(), Center())
++
++all_sections = Dict(name => (sᵘ, sᵛ) for (name, sᵘ, sᵛ) in gateway_sections(grid, config))
++missing_sections = setdiff(gateway_names, keys(all_sections))
++isempty(missing_sections) || error("Sections $(join(missing_sections, ", ")) are not in [transports.sections]")
++
++# A face is closed to the flood if any of the four sections crosses it
++blocked_u = falses(Nx + 1, Ny)
++blocked_v = falses(Nx, Ny + 1)
++for name in gateway_names
++    sᵘ, sᵛ = all_sections[name]
++    blocked_u .|= sᵘ .!= 0
++    blocked_v .|= sᵛ .!= 0
++end
++
++wet = [!inactive_node(i, j, Nz, grid, ccc...) for i in 1:Nx, j in 1:Ny]
++λ   = [λnode(i, j, Nz, grid, ccc...) for i in 1:Nx, j in 1:Ny]
++φ   = [φnode(i, j, Nz, grid, ccc...) for i in 1:Nx, j in 1:Ny]
++A   = [Azᶜᶜᶜ(i, j, Nz, grid) for i in 1:Nx, j in 1:Ny]
++
++seed = Tuple(argmax(ifelse.(wet, φ, -Inf)))
++inside = falses(Nx, Ny)
++came_from = Dict{NTuple{2, Int}, NTuple{2, Int}}()   # not `parent` (a Base function)
++queue  = [seed]
++inside[seed...] = true
++leak = nothing
++while !isempty(queue)
++    i, j = popfirst!(queue)
++    if j == 1 || j == Ny
++        global leak = (i, j)
++        break
++    end
++    # The four neighbours, and the face between: (neighbour, face blocked?)
++    for (n, closed) in (((i - 1, j), i > 1  ? blocked_u[i, j]     : true),
++                        ((i + 1, j), i < Nx ? blocked_u[i + 1, j] : true),
++                        ((i, j - 1), j > 1  ? blocked_v[i, j]     : true),
++                        ((i, j + 1), j < Ny ? blocked_v[i, j + 1] : true))
++        closed && continue
++        wet[n...] && !inside[n...] || continue
++        inside[n...] = true
++        came_from[n] = (i, j)
++        push!(queue, n)
++    end
++end
++
++function draw_box(file; path = NTuple{2, Int}[])
++    fig = Figure(size = (700, 650))
++    ax  = Axis(fig[1, 1]; xlabel = "i", ylabel = "j", aspect = DataAspect(),
++               title = "$experiment: the box inside the four gateways (dark), sections (red)")
++    shade = ifelse.(wet, ifelse.(inside, 1.0, 0.4), NaN)
++    heatmap!(ax, 1:Nx, 1:Ny, shade; colormap = :Blues, colorrange = (0, 1.2), nan_color = :lightgray)
++    for name in gateway_names
++        sᵘ, sᵛ = all_sections[name]
++        faces = [(I[1] - 0.5, Float64(I[2])) for I in findall(!=(0), sᵘ)]
++        append!(faces, [(Float64(I[1]), I[2] - 0.5) for I in findall(!=(0), sᵛ)])
++        scatter!(ax, first.(faces), last.(faces); color = :red, markersize = 3)
++        isempty(faces) || text!(ax, faces[1]...; text = gateway_label[name], color = :red, fontsize = 12)
++    end
++    isempty(path) || lines!(ax, first.(path), last.(path); color = :orange, linewidth = 2, label = "path to the open boundary")
++    save(file, fig)
++    @info "Wrote $file"
++end
++
++figure_file = joinpath(figure_dir, "arctic_volume.png")
++table_file  = joinpath(output_dir, "arctic_volume.md")
++
++if leak !== nothing
++    path = [leak]
++    while haskey(came_from, path[end])
++        push!(path, came_from[path[end]])
++    end
++    reverse!(path)
++    samples = path[unique(round.(Int, range(1, length(path), length = min(length(path), 15))))]
++    where_ = join([@sprintf("(%d, %d) %.1f°E %.1f°N", i, j, λ[i, j], φ[i, j]) for (i, j) in samples], "; ")
++    draw_box(figure_file; path = [(Float64(i), Float64(j)) for (i, j) in path])
++    write(table_file, "# Arctic volume budget: $experiment\n\nThe four sections do not close the Arctic: from the cell " *
++                      "nearest the pole a path of wet cells reaches the open boundary at cell $(leak) without crossing " *
++                      "a section. Path (cells along it, pole to boundary): $where_.\n")
++    error("The four sections do not close the Arctic: a wet path from the pole reaches the open boundary at $leak. " *
++          "See $figure_file for the path; points along it: $where_")
++end
++
++box_area = sum(A[inside])
++@info @sprintf("Box inside the gateways: %d surface cells, %.3g km² (seed (%d, %d) at %.1f°N)",
++               count(inside), box_area / 1e6, seed..., φ[seed...])
++draw_box(figure_file)
++
++#####
++##### Box-mean sea level and the net inflow
++#####
++
++# η averages, at the middle of their windows in days since the start (the first output is the initial state)
++window = config["output"]["average_hours"] / 24
++η_t = ηt.times[2:end] ./ 86400 .- window / 2
++η_box = zeros(length(η_t))   # box-mean η, cm
++for n in eachindex(η_t)
++    η = Array(interior(ηt[n + 1], :, :, 1))
++    η_box[n] = 100 * sum(η[inside] .* A[inside]) / box_area
++end
++
++# Online transports, same averaging windows (positive into the Arctic, Sv)
++Q_t, Q = jldopen(transport_output_file) do f
++    iterations = sort(filter(!=("serialized"), keys(f["timeseries/t"])), by = s -> parse(Int, s))[2:end]
++    t = [f["timeseries/t/$i"] for i in iterations] ./ 86400 .- window / 2
++    t, Dict(name => [only(f["timeseries/$(name)_volume/$i"]) for i in iterations] for name in gateway_names)
++end
++net = sum(Q[name] for name in gateway_names)
++
++# Net inflow integrated from the first η average onward, as a box-mean sea level (cm): trapezoids between the
++# transport averages, interpolated linearly onto the η times
++linear_on(t, y, t′) = [t′ᵢ ≤ t[1] ? y[1] : t′ᵢ ≥ t[end] ? y[end] :
++                         (k = searchsortedlast(t, t′ᵢ); y[k] + (y[k+1] - y[k]) * (t′ᵢ - t[k]) / (t[k+1] - t[k])) for t′ᵢ in t′]
++net_on_η = linear_on(Q_t, net, η_t)
++integrated = zeros(length(η_t))
++for n in 2:length(η_t)
++    integrated[n] = integrated[n-1] + (net_on_η[n] + net_on_η[n-1]) / 2 * 1e6 * (η_t[n] - η_t[n-1]) * 86400 / box_area * 100
++end
++change = η_box .- η_box[1]
++
++#####
++##### Calendar months
++#####
++
++io = IOBuffer()
++println(io, "# Arctic volume budget: $experiment\n")
++println(io, @sprintf("Box inside Davis, Fram, the BSO and Bering: %d surface cells, %.2f × 10⁶ km². ", count(inside), box_area / 1e12),
++            "Sea level = box-mean η (daily averages); inflow = the four online section transports, positive into the Arctic. ",
++            "The difference is what crossed the surface (ice growth and melt, rivers, precipitation) plus any transport error. ",
++            "1 Sv for 30 days raises the box by $(@sprintf("%.1f", 1e6 * 30 * 86400 / box_area * 100)) cm.\n")
++println(io, "| Month | Days | Net inflow (Sv) | Davis | Fram | BSO | Bering | Box sea level change (cm) | Implied by the inflow (cm) | Difference (cm) |")
++println(io, "|---|---|---|---|---|---|---|---|---|---|")
++dates = start_date .+ Day.(floor.(Int, η_t))
++for month in unique(Dates.firstdayofmonth.(dates))
++    ks = findall(d -> Dates.firstdayofmonth(d) == month, dates)
++    a, b = first(ks), last(ks)
++    span = (k₁ = max(a - 1, 1), k₂ = b)   # from the last average of the previous month
++    in_month = findall(t -> η_t[span.k₁] ≤ t ≤ η_t[span.k₂], Q_t)
++    mean_of(x) = isempty(in_month) ? NaN : sum(x[in_month]) / length(in_month)
++    Δη = change[span.k₂] - change[span.k₁]
++    Δi = integrated[span.k₂] - integrated[span.k₁]
++    println(io, @sprintf("| %s | %d | %+.2f | %+.2f | %+.2f | %+.2f | %+.2f | %+.1f | %+.1f | %+.1f |",
++                         Dates.format(month, "u yyyy"), length(ks), mean_of(net),
++                         (mean_of(Q[name]) for name in gateway_names)..., Δη, Δi, Δη - Δi))
++end
++println(io, @sprintf("| Whole run | %d | %+.2f | %+.2f | %+.2f | %+.2f | %+.2f | %+.1f | %+.1f | %+.1f |",
++                     length(η_t), sum(net) / length(net), (sum(Q[name]) / length(net) for name in gateway_names)...,
++                     change[end], integrated[end], change[end] - integrated[end]))
++table_text = String(take!(io))
++write(table_file, table_text)
++print(table_text)
++@info "Wrote $table_file"
++
++#####
++##### Figure: the box, the sea level against the inflow, the inflow
++#####
++
++fig = Figure(size = (1300, 600))
++ax₀ = Axis(fig[1:2, 1]; xlabel = "i", ylabel = "j", aspect = DataAspect(), title = "box inside the gateways (dark)")
++heatmap!(ax₀, 1:Nx, 1:Ny, ifelse.(wet, ifelse.(inside, 1.0, 0.4), NaN); colormap = :Blues, colorrange = (0, 1.2),
++         nan_color = :lightgray)
++for name in gateway_names
++    sᵘ, sᵛ = all_sections[name]
++    faces = vcat([(I[1] - 0.5, Float64(I[2])) for I in findall(!=(0), sᵘ)], [(Float64(I[1]), I[2] - 0.5) for I in findall(!=(0), sᵛ)])
++    scatter!(ax₀, first.(faces), last.(faces); color = :red, markersize = 3)
++end
++ax₁ = Axis(fig[1, 2]; ylabel = "box-mean sea level change (cm)", title = experiment)
++hlines!(ax₁, 0; color = :black, linewidth = 0.5)
++lines!(ax₁, η_t, change; color = :black, linewidth = 2, label = "from η inside the box")
++lines!(ax₁, η_t, integrated; color = :red, label = "net inflow through the four gateways, integrated")
++lines!(ax₁, η_t, change .- integrated; color = :gray, linestyle = :dash, label = "difference (surface + transport error)")
++axislegend(ax₁; position = :lt, framevisible = false)
++ax₂ = Axis(fig[2, 2]; xlabel = "days since $(start_date)", ylabel = "into the Arctic (Sv)")
++hlines!(ax₂, 0; color = :black, linewidth = 0.5)
++for name in gateway_names
++    lines!(ax₂, Q_t, Q[name]; label = gateway_label[name])
++end
++lines!(ax₂, Q_t, net; color = :black, linewidth = 2, label = "net")
++axislegend(ax₂; position = :lt, framevisible = false, nbanks = 5)
++colsize!(fig.layout, 1, Relative(0.35))
++save(figure_file, fig)
++@info "Wrote $figure_file"
+diff --git a/analysis/scorecard_functions.jl b/analysis/scorecard_functions.jl
+index 0313fdb..a7a0877 100644
+--- a/analysis/scorecard_functions.jl
++++ b/analysis/scorecard_functions.jl
+@@ -18,13 +18,17 @@
+ #   mixed layer      analysis/mixed_layer_depth.jl     arctic_ocean.jld2 present            (GLORYS daily T, S every 5 days)
+ #   mixing           analysis/mixing_timeseries.jl     arctic_mixing.jld2 present ([output] mixing_depth)
+ #   fastest point    plotting/max_speed.jl             monitor.csv present ([output] monitor_hours)
++#   volume budget    plotting/volume_budget.jl         monitor.csv present: the domain's volume against GLORYS's, through
++#                                                      the open sides and the surface, and the residual (should be 0)
++#   Arctic volume    analysis/arctic_volume.jl         arctic_ocean.jld2 and arctic_transports.jld2 present: the sea level
++#                                                      inside the four gateways against their integrated net inflow
+ #   GLORYS transports analysis/glorys_transports.jl    for the Tsubouchi comparison, if glorys_transports.jld2 is missing
+ #   Tsubouchi        analysis/tsubouchi_comparison.jl  arctic_transports.jld2 present and the run overlaps Tsubouchi
+ #                                                      et al.'s year (5 Sep 2005 - 4 Sep 2006)
+ # Their own tables (*.md) and figures are written as when they are run by hand. scorecard.md has: the run's settings,
+ # a headline table by region at the end of the run (surface and top-200 m ΔS, ΔT, ΔFWC against GLORYS; ice area,
+ # volume, 95th-percentile speed against GLORYS; κᶜ near 10 and 20 m), the end-of-run rows of each table, the fastest
+-# point, the Tsubouchi blocks, and what ran, how long it took, and what failed.
++# point, the volume budgets (domain and Arctic), the Tsubouchi blocks, and what ran, how long it took, and what failed.
+ 
+ using CUDA, Dates, Printf, TOML
+ 
+@@ -133,6 +137,34 @@ function fastest_point_summary(output_dir)
+     return location * "; " * spread
+ end
+ 
++#####
++##### The domain's volume budget, from monitor.csv
++#####
++
++function volume_budget_summary(output_dir)
++    lines  = readlines(joinpath(output_dir, "monitor.csv"))
++    header = split(lines[1], ',')
++    rows   = filter(r -> all(!isnothing, r) && length(r) == length(header),
++                    [tryparse.(Float64, split(line, ',')) for line in lines[2:end] if !isempty(strip(line))])
++    length(rows) < 2 && return "fewer than two rows in monitor.csv"
++    column(name) = [row[findfirst(==(name), header)] for row in rows]
++    η, ηᴳ = column("eta_mean_cm"), column("parent_eta_mean_cm")
++    drift = (η .- η[1]) .- (ηᴳ .- ηᴳ[1])
++    residual = column("budget_residual_cm")
++    # The first row holds the interpolated initial velocities (as in plotting/volume_budget.jl)
++    mismatch = abs.(column("net_in_Sv")[2:end] .- column("edge_inflow_from_volume_Sv")[2:end])
++    io = IOBuffer()
++    println(io, "| Quantity | Value |")
++    println(io, "|---|---|")
++    println(io, @sprintf("| Domain-mean η change, model / GLORYS, end of run (cm) | %+.1f / %+.1f |", η[end] - η[1], ηᴳ[end] - ηᴳ[1]))
++    println(io, @sprintf("| Largest \\|model − GLORYS\\| in the change of domain-mean η (cm) | %.1f |", maximum(abs, drift)))
++    println(io, @sprintf("| Through the open sides / across the surface, end of run (cm) | %+.1f / %+.1f |",
++                         column("edge_volume_cm")[end], column("surface_volume_cm")[end]))
++    println(io, @sprintf("| Largest \\|budget residual\\| (cm; should be 0) | %.2f |", maximum(abs, residual)))
++    println(io, @sprintf("| Largest \\|net inflow, velocities − from the volume\\| (Sv; should be 0) | %.2f |", maximum(abs, mismatch)))
++    return String(take!(io))
++end
++
+ #####
+ ##### The scorecard
+ #####
+@@ -172,6 +204,11 @@ function scorecard(config_file::AbstractString; on_step = step -> nothing)
+               has("arctic_mixing.jld2") ? nothing : "no arctic_mixing.jld2 ([output] mixing_depth = 0)", "mixing_timeseries.md"),
+              ("fastest point", "plotting/max_speed.jl",
+               has("monitor.csv") ? nothing : "no monitor.csv ([output] monitor_hours = 0)", nothing),
++             ("volume budget", "plotting/volume_budget.jl",
++              has("monitor.csv") ? nothing : "no monitor.csv ([output] monitor_hours = 0)", nothing),
++             ("Arctic volume", "analysis/arctic_volume.jl",
++              has("arctic_ocean.jld2") && has("arctic_transports.jld2") ? nothing :
++              "no arctic_ocean.jld2 or arctic_transports.jld2 ([transports] online = false)", "arctic_volume.md"),
+              ("GLORYS transports", "analysis/glorys_transports.jl",
+               tsubouchi_reason !== nothing ? tsubouchi_reason : has("glorys_transports.jld2") ? "glorys_transports.jld2 already there" : nothing,
+               nothing),
+@@ -288,6 +325,23 @@ function scorecard(config_file::AbstractString; on_step = step -> nothing)
+         println(io, "## Fastest point (monitor.csv)\n\n$summary.\n")
+     end
+ 
++    if has("monitor.csv")
++        summary = try
++            volume_budget_summary(output_dir)
++        catch err
++            "could not read monitor.csv: " * first(split(sprint(showerror, err), '\n')) * "\n"
++        end
++        println(io, "## Volume budget of the domain (monitor.csv; figure volume_budget.png)\n")
++        println(io, summary)
++    end
++
++    if has("arctic_volume.md")   # the box inside the four gateways, as written by arctic_volume.jl
++        text = read(joinpath(output_dir, "arctic_volume.md"), String)
++        body = text[something(findfirst('\n', text), lastindex(text)):end]   # without its heading
++        println(io, "## Volume budget of the Arctic inside the four gateways (arctic_volume.md; figure arctic_volume.png)")
++        println(io, rstrip(body), "\n")
++    end
++
+     if has("tsubouchi_comparison.md")   # their blocks, as written by tsubouchi_comparison.jl
+         text = read(joinpath(output_dir, "tsubouchi_comparison.md"), String)
+         start = findfirst("## Against Tsubouchi", text)
+-- 
+2.43.0
+
