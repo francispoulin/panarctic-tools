@@ -1,0 +1,48 @@
+From 612ddd1fac2978f57388b00f2efd6bbd201ad6f0 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 26 Nov 2026 18:16:18 -0500
+Subject: [PATCH] Restart: update each component's state after the restore, as
+ Oceananigans does only at iteration 0
+
+maybe_prepare_first_time_step! calls update_state! only when the clock's iteration is 0. After
+set!(simulation; checkpoint = :latest) the iteration is not 0, so the first step ran with every streamed dataset's
+window (GLORYS at the open sides, JRA55 atmosphere, rivers) still where it was built (day 0), while the restored clocks
+said day 3: kernels read records outside the loaded windows. 26 Nov, restart test part b: a DomainError in a GPU kernel,
+a segmentation fault on the CPU. Now, after the restore: update_state! of radiation, atmosphere, land, the ocean model
+and the sea-ice model, then of the coupled model (interface fluxes).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AbhhvpxdTuD5JaD3hFhzdz
+---
+ panarctic.jl | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/panarctic.jl b/panarctic.jl
+index d67124b..e68df53 100644
+--- a/panarctic.jl
++++ b/panarctic.jl
+@@ -398,6 +398,21 @@ simulation.output_writers[:checkpointer] = Checkpointer(coupled_model;
+ # GPU arrays (small boundary rows, so this is cheap).
+ restart && CUDA.@allowscalar set!(simulation; checkpoint = :latest)
+ 
++# After the restore, prepare the first step as Oceananigans does only at iteration 0 (maybe_prepare_first_time_step!):
++# each component's update_state! moves its streamed data (GLORYS at the open sides, JRA55, rivers) to the restored
++# clock's time, then the coupled update_state! recomputes the interface fluxes. Without it the first step after a
++# restore read records outside the loaded windows (26 Nov, restart test: a DomainError in a GPU kernel, a segmentation
++# fault on the CPU). The restore sets every component's clock, but not the windows.
++if restart
++    for component in (coupled_model.radiation, coupled_model.atmosphere, coupled_model.land)
++        isnothing(component) || Oceananigans.TimeSteppers.update_state!(component)
++    end
++    Oceananigans.TimeSteppers.update_state!(ocean.model)
++    Oceananigans.TimeSteppers.update_state!(sea_ice.model)
++    Oceananigans.TimeSteppers.update_state!(coupled_model)
++    @info "Restart: data windows and coupled fluxes updated to day $(round(time(simulation) / 86400, digits = 2))"
++end
++
+ # status.txt every model hour: model day and date, iteration, wall minutes per model day, expected end
+ add_callback!(simulation, sim -> write_run_status(run_status, "running"; model_time = time(sim), iteration = iteration(sim)),
+               TimeInterval(Oceananigans.Units.hour); name = :run_status)
+-- 
+2.43.0
+

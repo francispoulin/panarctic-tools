@@ -122,6 +122,7 @@ Numbered in the order to apply, across repositories. Each was checked to apply w
 | 115 | NumericalEarth.jl | `fjp/net-inflow-0.9.4` (#975); also applies on `main` | 117ae7c | `docs/Project.toml`: Terrarium compat `"0.1.10, 0.2"` (missed in #968). The workspace (docs, examples, test) is resolved together, so docs' `"0.1.10"` broke every CI job that instantiates test once Terrarium main became 0.2.0-DEV |
 | 116 | NumericalEarth.jl | `fjp/net-inflow-0.9.4` (#975) | f96285c (after 115) | `docs/Project.toml`: SpeedyWeather compat `"0.23, 0.24, 0.25, 0.26"` as in test/: Terrarium main (0.2.0-DEV) now needs SpeedyWeatherInternals 1.0.1, which SpeedyWeather ≤ 0.24 does not allow; the workspace is resolved as a whole |
 | 117 | PanArcticShenanigans | `fjp/test-098` | after 114 | `config_smoke_restart_b_cpu.toml`: restart test part b on the CPU, for a stack trace of the DomainError after the restore (`-g2` fails: ptxas rejects non-ASCII names) |
+| 118 | PanArcticShenanigans | `fjp/test-098` | after 117 | **Restart fix**: after `set!(simulation; checkpoint = :latest)`, call `update_state!` on radiation, atmosphere, land, the ocean and sea-ice models, then the coupled model. Oceananigans prepares the first step only at iteration 0, so after a restore the streamed data windows stayed at day 0 (DomainError on GPU, segfault on CPU) |
 
 ## Applying 001–006
 
