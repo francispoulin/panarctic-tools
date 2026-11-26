@@ -1,0 +1,59 @@
+From 083dd24a9c5b494f7d79bd43a0a688e1ab6d3f52 Mon Sep 17 00:00:00 2001
+From: Brian Groenke <bgroe8@gmail.com>
+Date: Wed, 25 Nov 2026 10:17:36 +0100
+Subject: [PATCH] Bump Terrarium compat to include unreleased v0.2 (#968)
+
+(cherry picked from commit 35ff7bfaa7dcd9a84c5865f927e8f5e27516a06e)
+---
+ Project.toml          | 2 +-
+ examples/Project.toml | 3 ++-
+ test/Project.toml     | 2 +-
+ 3 files changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/Project.toml b/Project.toml
+index 12839b00..b7673880 100644
+--- a/Project.toml
++++ b/Project.toml
+@@ -122,7 +122,7 @@ SpeedyWeather = "0.22, 0.23, 0.24"
+ StaticArrays = "1"
+ Statistics = "<0.0.1, 1"
+ Tar = "<0.0.1, 1"
+-Terrarium = "0.1.8"
++Terrarium = "0.1.10, 0.2"
+ Thermodynamics = "0.15.3, 1"
+ WorldOceanAtlasTools = "0.6"
+ Zarr = "0.10, 0.11"
+diff --git a/examples/Project.toml b/examples/Project.toml
+index 74cb093f..c3f947a3 100644
+--- a/examples/Project.toml
++++ b/examples/Project.toml
+@@ -16,7 +16,7 @@ Terrarium = "80418d68-07fa-499d-ae2b-c12e531f5cd8"
+ 
+ [sources]
+ NumericalEarth = {path = ".."}
+-Terrarium = {url = "https://github.com/NumericalEarth/Terrarium.jl", rev = "main"} # TODO: remove once Terrarium 0.1.11 is released with Oceananigans 0.117 compat
++Terrarium = {url = "https://github.com/NumericalEarth/Terrarium.jl", rev = "main"} # TODO: remove once Terrarium 0.2 is released
+ 
+ [compat]
+ Breeze = "0.15"
+@@ -25,3 +25,4 @@ CopernicusMarine = "0.2"
+ CUDA = "6"
+ CairoMakie = "0.15"
+ Oceananigans = "0.117.2, 0.118"
++Terrarium = "0.1.10, 0.2"
+diff --git a/test/Project.toml b/test/Project.toml
+index a4a41028..c03acc22 100644
+--- a/test/Project.toml
++++ b/test/Project.toml
+@@ -80,7 +80,7 @@ Scratch = "1"
+ SeawaterPolynomials = "0.3.11"
+ SpeedyWeather = "0.23, 0.24"
+ Statistics = "<0.0.1, 1"
+-Terrarium = "0.1.10"
++Terrarium = "0.1.10, 0.2"
+ Test = "<0.0.1, 1"
+ Thermodynamics = "0.15.3, 1"
+ WorldOceanAtlasTools = "0.6"
+-- 
+2.43.0
+

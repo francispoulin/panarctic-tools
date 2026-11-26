@@ -109,6 +109,7 @@ Numbered in the order to apply, across repositories. Each was checked to apply w
 | 102 | PanArcticShenanigans | `fjp/test-061` | after 101 | `analysis/initial_stability.jl`: unstable faces (N² < −1e-6) in the initial state by region and depth, the 15 worst, maps |
 | 103 | PanArcticShenanigans | `fjp/test-061` | after 102 | `melt_lens.jl`: κᶜ over the top 10 m, and κᶜ and e profiles (top 60 m) on days 1–30 |
 | 104 | PanArcticShenanigans | `fjp/test-061` | after 103 | `[output] surface_fluxes` (daily T, S surface fluxes); `melt_lens.jl` reads them; `config_smoke_test_fluxes.toml`, `config_sep2005_30d_nemo_glorys12_nz100_fluxes.toml` |
+| 105 | NumericalEarth | `fjp/net-inflow-0.9.4` (PR #975) | after 096 | cherry-pick of main's #968 (Terrarium compat "0.1.10, 0.2"): CI's test environment pulls Terrarium from its `main`, now 0.2.0-DEV |
 
 ## Applying 001–006
 
