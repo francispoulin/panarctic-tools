@@ -1,0 +1,410 @@
+From 06c1aaa3a3213e9fd75eac448ea93ad887d72e55 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 25 Nov 2026 20:18:52 -0500
+Subject: [PATCH] Freshwater budget by region; [sea_ice]
+ ice_consolidation_thickness and a four-month test at 0.5 m
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+analysis/freshwater_budget.jl: for the regions of salinity_drift.jl and rivers.md, the daily
+freshwater content (relative to 34.8, full depth), the fresh water exchanged between regions
+across their faces, the surface input as the residual, and the sea-ice volume change; monthly
+table, whole-run exchange table, cumulative figure. Why: narrowing the river footprint
+(patch 099) left the basins salty and the shelves fresh: is the shelf-to-basin export too weak?
+
+panarctic.jl: [sea_ice] ice_consolidation_thickness (ClimaSeaIce's hᶜ, default 0.05 m, the
+earlier behaviour). hᶜ is both Hibler's lead-closing thickness and the consolidation threshold.
+config_sep2005_4mo_nemo_glorys12_nz100_hc05.toml: four months with hᶜ = 0.5 m.
+
+analysis/rivers.jl: the routing line says equal shares or depth-weighted shares according to the
+NumericalEarth version in use (the 061 worktree is on 0.9.2: equal shares).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AbhhvmHjZYCHhFxumZ9A47
+---
+ analysis/freshwater_budget.jl                 | 222 ++++++++++++++++++
+ analysis/rivers.jl                            |   4 +-
+ ..._sep2005_4mo_nemo_glorys12_nz100_hc05.toml | 102 ++++++++
+ panarctic.jl                                  |   7 +-
+ 4 files changed, 332 insertions(+), 3 deletions(-)
+ create mode 100644 analysis/freshwater_budget.jl
+ create mode 100644 config_sep2005_4mo_nemo_glorys12_nz100_hc05.toml
+
+diff --git a/analysis/freshwater_budget.jl b/analysis/freshwater_budget.jl
+new file mode 100644
+index 0000000..933aeab
+--- /dev/null
++++ b/analysis/freshwater_budget.jl
+@@ -0,0 +1,222 @@
++# Freshwater budget by region: does the river water leave the shelves, and where does it go?
++#
++#   julia +1.13 --project=. analysis/freshwater_budget.jl [config.toml]
++#
++# Why (25 Nov 2026): in the four-month NEMO runs every basin region is too salty at the surface (Beaufort Gyre +0.18,
++# Central Arctic +0.19) while the Siberian shelves are slightly fresh (−0.04), and narrowing the river footprint from
++# 1.2° to 0.3° made the shelves fresher and the Beaufort saltier without changing much else. The Beaufort Gyre receives
++# no river water directly (rivers.md, table 2): its fresh water comes from the shelves and Bering Strait. This measures
++# that supply.
++#
++# For each region (those of salinity_drift.jl and rivers.md, first match, and the rest of the domain split at 66°N):
++#
++#   FW      = Σ (34.8 − S) / 34.8 × cell volume, full depth, every cell (saltier ones counting negative), with the
++#             cells' z⋆ volumes: minus the salt content, in fresh water units;
++#   lateral = Σ over the faces between this region and its neighbours of u × face area × (34.8 − S_face) / 34.8, inward,
++#             with S_face the mean of the two cells (as transports.jl);
++#   surface = dFW/dt − lateral: what entered across the surface (rivers, icebergs, precipitation − evaporation, ice melt
++#             minus ice growth), plus the sub-daily covariance of u and S that daily averages miss;
++#   ice     = d/dt of the region's sea-ice volume Σ h ℵ A, as liquid fresh water (× ρᵢ/ρ₀ × (1 − Sᵢ/34.8)): ice grown
++#             in the region or carried in.
++#
++# Rates are monthly means in mSv (1 mSv = 1000 m³/s), from the change between the last daily averages of consecutive
++# months (the first month from the first daily average). Compare "surface" with rivers.md (table 2, same regions):
++# surface ≈ rivers + icebergs + P − E − (ice grown locally). "rest, south of 66°N" touches the open boundaries, which
++# are not region faces here: its "surface" also holds what enters through them.
++#
++# Reads arctic_ocean.jld2 (daily S, u, v, η) and arctic_sea_ice.jld2 (h, ℵ) from `output_dir`. Writes
++# freshwater_budget.md to `output_dir` and freshwater_budget.png (cumulative budget per region) to `figure_dir`. CPU,
++# one day at a time: minutes for a four-month run.
++
++include("../config.jl")
++include("../transports.jl")
++
++using Oceananigans.Operators: Azᶜᶜᶜ, Vᶜᶜᶜ, Δzᶜᶜᶜ
++using Oceananigans.OutputReaders: OnDisk
++using Oceananigans.Models.HydrostaticFreeSurfaceModels: update_zstar_scaling!
++using CairoMakie, Dates
++
++start_date = DateTime(config["time"]["start_date"])
++window     = config["output"]["average_hours"] / 24     # days
++S_ref      = 34.8
++ice_salinity = get(get(config, "sea_ice", Dict{String, Any}()), "ice_salinity", 4)
++ice_to_liquid = 900 / 1020 * (1 - ice_salinity / S_ref)   # ClimaSeaIce's ice density, NumericalEarth's reference density
++
++#####
++##### Grid and regions
++#####
++
++St = FieldTimeSeries(ocean_output_file, "S"; backend = OnDisk())
++ut = FieldTimeSeries(ocean_output_file, "u"; backend = OnDisk())
++vt = FieldTimeSeries(ocean_output_file, "v"; backend = OnDisk())
++ηt = FieldTimeSeries(ocean_output_file, "η"; backend = OnDisk())
++ht = FieldTimeSeries(sea_ice_output_file, "h"; backend = OnDisk())
++ℵt = FieldTimeSeries(sea_ice_output_file, "ℵ"; backend = OnDisk())
++
++zgrid = ηt.grid   # the z⋆ scaling is updated on this grid each day, as in analysis/arctic_volume.jl
++Nx, Ny, Nz = size(zgrid)
++C = Center()
++ccc = (C, C, C)
++cell_λ = [mod(λnode(i, j, Nz, zgrid, ccc...) + 180, 360) - 180 for i in 1:Nx, j in 1:Ny]
++cell_φ = [φnode(i, j, Nz, zgrid, ccc...) for i in 1:Nx, j in 1:Ny]
++wet    = [!inactive_node(i, j, Nz, zgrid, ccc...) for i in 1:Nx, j in 1:Ny]
++area   = [Azᶜᶜᶜ(i, j, Nz, zgrid) for i in 1:Nx, j in 1:Ny]
++depth  = [sum(Δzᶜᶜᶜ(i, j, k, zgrid) for k in 1:Nz if !inactive_node(i, j, k, zgrid, ccc...); init = 0.0) for i in 1:Nx, j in 1:Ny]
++
++regions = [("Beaufort Gyre",    (λ, φ, H) -> 70.5 ≤ φ ≤ 80.5 && -170 ≤ λ ≤ -130 && H > 300),
++           ("Central Arctic",   (λ, φ, H) -> φ > 82),
++           ("Siberian shelves", (λ, φ, H) -> 66 ≤ φ ≤ 82 && (λ ≥ 60 || λ ≤ -170) && H < 200),
++           ("Barents Sea",      (λ, φ, H) -> 68 ≤ φ ≤ 80 && 15 ≤ λ < 60),
++           ("Nordic Seas",      (λ, φ, H) -> 62 ≤ φ ≤ 79 && -20 ≤ λ < 15),
++           ("Archipelago",      (λ, φ, H) -> 68 ≤ φ ≤ 82 && -125 ≤ λ ≤ -80),
++           ("Baffin Bay",       (λ, φ, H) -> 67 ≤ φ ≤ 78 && -80 < λ ≤ -55),
++           ("rest, north of 66°N", (λ, φ, H) -> φ ≥ 66),
++           ("rest, south of 66°N", (λ, φ, H) -> true)]
++region_names = first.(regions)
++Nr = length(regions)
++region_of = [wet[i, j] ? findfirst(r -> r[2](cell_λ[i, j], cell_φ[i, j], depth[i, j]), regions) : 0 for i in 1:Nx, j in 1:Ny]
++
++# Faces between two regions: (location, i, j, region on the low-index side, region on the high-index side)
++interfaces = Tuple{Symbol, Int, Int, Int, Int}[]
++for j in 1:Ny, i in 2:Nx
++    a, b = region_of[i-1, j], region_of[i, j]
++    a > 0 && b > 0 && a != b && push!(interfaces, (:u, i, j, a, b))
++end
++for j in 2:Ny, i in 1:Nx
++    a, b = region_of[i, j-1], region_of[i, j]
++    a > 0 && b > 0 && a != b && push!(interfaces, (:v, i, j, a, b))
++end
++@info "$(length(interfaces)) faces between regions"
++
++#####
++##### Daily freshwater content, lateral exchange and ice volume
++#####
++
++saved = findall(>(0), ηt.times)
++time_days  = ηt.times[saved] ./ 86400 .- window / 2
++Nt    = length(saved)
++
++function region_freshwater(S)
++    total = zeros(Nr)
++    for k in 1:Nz, j in 1:Ny, i in 1:Nx
++        r = region_of[i, j]
++        r > 0 && !inactive_node(i, j, k, zgrid, ccc...) && (total[r] += (S_ref - S[i, j, k]) / S_ref * Vᶜᶜᶜ(i, j, k, zgrid))
++    end
++    return total
++end
++
++# exchange[a, b]: fresh water flowing from region a into region b (m³/s), net
++function freshwater_exchange(u, v, S)
++    exchange = zeros(Nr, Nr)
++    for (ℓ, i, j, a, b) in interfaces, k in 1:Nz
++        if ℓ == :u
++            open_face(i, j, k, zgrid, fcc...) || continue
++            flux = u[i, j, k] * Axᶠᶜᶜ(i, j, k, zgrid) * (S_ref - (S[i-1, j, k] + S[i, j, k]) / 2) / S_ref
++        else
++            open_face(i, j, k, zgrid, cfc...) || continue
++            flux = v[i, j, k] * Ayᶜᶠᶜ(i, j, k, zgrid) * (S_ref - (S[i, j-1, k] + S[i, j, k]) / 2) / S_ref
++        end
++        exchange[a, b] += flux
++        exchange[b, a] -= flux
++    end
++    return exchange
++end
++
++function region_ice(h, ℵ)
++    total = zeros(Nr)
++    for j in 1:Ny, i in 1:Nx
++        r = region_of[i, j]
++        r > 0 && (total[r] += h[i, j, 1] * ℵ[i, j, 1] * area[i, j])
++    end
++    return total * ice_to_liquid
++end
++
++freshwater = zeros(Nt, Nr)       # m³
++exchange   = zeros(Nt, Nr, Nr)   # m³/s
++ice        = zeros(Nt, Nr)       # m³ of liquid fresh water
++for (n, m) in enumerate(saved)
++    update_zstar_scaling!(zgrid, ηt[m])
++    S = Array(interior(St[m]))
++    freshwater[n, :]  = region_freshwater(S)
++    exchange[n, :, :] = freshwater_exchange(ut[m], vt[m], S)
++    ice_index = findfirst(t -> abs(t - ηt.times[m]) < 60, ht.times)
++    ice[n, :]         = region_ice(ht[ice_index], ℵt[ice_index])
++    n % 10 == 0 && @info @sprintf("freshwater budget: day %d / %d", n, Nt)
++end
++
++lateral = [-sum(exchange[n, r, :]) for n in 1:Nt, r in 1:Nr]   # into each region, m³/s
++lateral_integrated = zeros(Nt, Nr)
++for n in 2:Nt
++    lateral_integrated[n, :] = lateral_integrated[n-1, :] .+ (lateral[n, :] .+ lateral[n-1, :]) ./ 2 .* (time_days[n] - time_days[n-1]) * 86400
++end
++
++#####
++##### Monthly means
++#####
++
++dates = start_date .+ Millisecond.(round.(Int, time_days .* 86400e3))
++month_ends = Int[]
++for n in 1:Nt
++    (n == Nt || month(dates[n + 1]) != month(dates[n])) && push!(month_ends, n)
++end
++month_starts = [1; month_ends[1:end-1]]
++mSv(Δ, a, b) = Δ / ((time_days[b] - time_days[a]) * 86400) / 1000
++
++io = IOBuffer()
++println(io, "# Freshwater budget by region: $experiment\n")
++println(io, "Relative to $S_ref, full depth, from the daily averages. mSv (1 mSv = 1000 m³/s), monthly means. dFW/dt: change ",
++            "of the region's fresh water (minus its salt content); lateral: fresh water carried in across the region's sides; ",
++            "surface = dFW/dt − lateral (rivers, icebergs, P − E, ice melt − growth, and sub-daily u S covariance); ice: change ",
++            "of the region's sea-ice volume as liquid fresh water (positive: ice gained, grown or carried in). ",
++            "Compare surface with rivers.md, table 2.\n")
++println(io, "## 1. By region and month\n")
++println(io, "| Region | Month | dFW/dt | lateral | surface | ice | largest exchanges (into the region) |")
++println(io, "|---|---|---|---|---|---|---|")
++for r in 1:Nr, (a, b) in zip(month_starts, month_ends)
++    dFW  = mSv(freshwater[b, r] - freshwater[a, r], a, b)
++    lat  = mSv(lateral_integrated[b, r] - lateral_integrated[a, r], a, b)
++    dice = mSv(ice[b, r] - ice[a, r], a, b)
++    into = [sum(-exchange[a:b, r, s]) / (b - a + 1) / 1000 for s in 1:Nr]   # mSv from region s into r
++    partners = sort(filter(s -> s != r, 1:Nr), by = s -> -abs(into[s]))[1:2]
++    println(io, @sprintf("| %s | %s | %+.0f | %+.0f | %+.0f | %+.0f | %s |", region_names[r], Dates.format(dates[b], "u yyyy"),
++                         dFW, lat, dFW - lat, dice, join([@sprintf("%s %+.0f", region_names[s], into[s]) for s in partners], ", ")))
++end
++
++println(io, "\n## 2. Exchanges between regions, whole run (mSv, net, largest first)\n")
++println(io, "| From | To | mSv |")
++println(io, "|---|---|---|")
++run_mean = dropdims(sum(exchange, dims = 1), dims = 1) ./ Nt ./ 1000
++region_pairs = [(a, b) for a in 1:Nr, b in 1:Nr if a < b && run_mean[a, b] != 0]
++sort!(region_pairs, by = p -> -abs(run_mean[p...]))
++for (a, b) in region_pairs
++    from, to = run_mean[a, b] > 0 ? (a, b) : (b, a)
++    println(io, @sprintf("| %s | %s | %.1f |", region_names[from], region_names[to], abs(run_mean[a, b])))
++end
++
++table_text = String(take!(io))
++print(table_text)
++table_file = joinpath(output_dir, "freshwater_budget.md")
++write(table_file, table_text)
++@info "Wrote $table_file"
++
++#####
++##### Cumulative budget per region (km³)
++#####
++
++fig = Figure(size = (1500, 800))
++for r in 1:Nr
++    ax = Axis(fig[fldmod1(r, 5)...]; title = region_names[r], xlabel = "days since $(Date(start_date))",
++              ylabel = mod1(r, 5) == 1 ? "since the first day (km³)" : "")
++    hlines!(ax, 0; color = :black, linewidth = 0.5)
++    ΔFW = (freshwater[:, r] .- freshwater[1, r]) ./ 1e9
++    ∫lateral = lateral_integrated[:, r] ./ 1e9
++    lines!(ax, time_days, ΔFW; color = :black, label = "ΔFW")
++    lines!(ax, time_days, ∫lateral; color = :blue, label = "lateral")
++    lines!(ax, time_days, ΔFW .- ∫lateral; color = :red, label = "surface")
++    lines!(ax, time_days, (ice[:, r] .- ice[1, r]) ./ 1e9; color = :gray, linestyle = :dash, label = "ice")
++    r == 1 && axislegend(ax; position = :lt, framevisible = false, labelsize = 10)
++end
++Label(fig[0, :], "$experiment: freshwater budget relative to $S_ref"; fontsize = 18)
++file = joinpath(figure_dir, "freshwater_budget.png")
++save(file, fig)
++@info "Wrote $file"
+diff --git a/analysis/rivers.jl b/analysis/rivers.jl
+index c53a283..1787169 100644
+--- a/analysis/rivers.jl
++++ b/analysis/rivers.jl
+@@ -204,7 +204,9 @@ println(io, "JRA55 discharge (daily means, $(Date(start_date)) to $(Date(end_dat
+             "to its ocean (JRA55PrescribedLand, as in panarctic.jl). m³/s; 1 mSv = 1000 m³/s. Routing: nearest wet cell ",
+             "within ~3°, then spread over every wet cell within $(river_spread_kw.spread_radius)° " *
+             (isnothing(river_spread_kw.maximum_spread_cells) ? "" : "(nearest $(river_spread_kw.maximum_spread_cells) cells) ") *
+-            "of that cell; since NumericalEarth v0.9.4 each cell's share is weighted by its depth (capped at 50 m).\n")
++            "of that cell; " * (pkgversion(NumericalEarth) ≥ v"0.9.4" ?
++                                "each cell's share weighted by its depth, capped at 50 m" : "equal shares") *
++            " (NumericalEarth $(pkgversion(NumericalEarth))).\n")
+ 
+ println(io, "## 1. By river (mouth location): JRA55 at the mouths / delivered to the model ocean\n")
+ println(io, "| River | " * join(month_labels, " | ") * " |")
+diff --git a/config_sep2005_4mo_nemo_glorys12_nz100_hc05.toml b/config_sep2005_4mo_nemo_glorys12_nz100_hc05.toml
+new file mode 100644
+index 0000000..629a612
+--- /dev/null
++++ b/config_sep2005_4mo_nemo_glorys12_nz100_hc05.toml
+@@ -0,0 +1,102 @@
++# Four months, Sep–Dec 2005, of config_sep2005_4mo_nemo_glorys12_nz100.toml (NEMO's TKE, GLORYS12 settings, 100 levels,
++# JRA55) with ClimaSeaIce's ice_consolidation_thickness hᶜ = 0.5 m instead of 0.05 m: patch 100.
++# Why: hᶜ is Hibler's (1979) lead-closing thickness h₀ (freezing open water closes leads at a rate (1 − ℵ)/h₀ × the
++# growth rate; Hibler used 0.5 m). With 0.05 m new ice covers a lead after 5 cm of
++# growth, so open-water ice production stops early in the freeze-up. But hᶜ is also the consolidation threshold: ice
++# thinner than hᶜ gets no conductive flux (no surface temperature solve in ClimaSeaIce, κ = 0 in the three-equation
++# ice-ocean flux), so this run changes all three at once. Compare its scorecard (ice concentration and thickness,
++# surface salinity, freshwater_budget.md) with sep2005_4mo_nemo_glorys12_nz100. Checkpoints every 10 days; [queue] long.
++
++architecture = "GPU"   # "GPU" or "CPU"
++experiment   = "sep2005_4mo_nemo_glorys12_nz100_hc05"  # name of the run: output and figures go to output_dir/<experiment> and figure_dir/<experiment>
++
++[grid]
++spacing_km = 15     # largest horizontal grid spacing [km] (at the pole; ~15% finer near the Atlantic edge)
++Nz         = 100    # vertical levels
++depth      = 5000   # maximum depth (m)
++bathymetry       = "GEBCO2026"   # "GEBCO2026" (15″, with IBCAO), "ETOPO" (ETOPO 2022, 60″) or "GLORYS" (GLORYS's own sea floor)
++bottom           = "partial"     # "partial": bottom cells cut at the sea floor; "full": whole cells
++partial_cell_fix = true          # with partial cells: flux-form momentum advection at bottom-cell thickness jumps
++                                 # (Oceananigans.jl#6533), which removes the bottom jets of issue #6532
++
++[time]
++start_date = 2005-09-01   # initial condition (GLORYS); the run starts at 00:00 on this date
++end_date   = 2006-01-01   # the run ends at 00:00 on this date; for short tests a date and time, e.g. 1993-01-01T03:00
++dt_minutes = 10           # time step
++
++[atmosphere]
++jra55 = "multi_year"   # "multi_year": JRA55 for the run's own dates; "repeat_year": the 1990–91 repeat year
++pressure = false           # true: JRA55's sea-level pressure acts on the ocean (nested_pressure_fix.jl). Off for now: with it,
++                           # Fram Strait drifts far from GLORYS (1–5 Jan 1993, 15 km: day 4 −12.4 Sv, GLORYS −2.1, −5.6
++                           # without pressure; the same at 100 km), which looks like an error in the pressure path, not
++                           # physics. Main has had no pressure on the ocean since #43.
++inverse_barometer = false  # with pressure = true: GLORYS's η carries no response to the pressure (issue #37), so add the
++                           # inverse-barometer sea level −(pᵃ − ⟨pᵃ⟩)/(ρ₀g) to GLORYS's η at the open sides (Flather) and
++                           # to the initial free surface; its domain mean is removed, so the volume is unchanged.
++                           # Keep false with pressure = false: then neither the model nor GLORYS feels the pressure
++
++[output]
++average_hours   = 24      # time-averaged output (3D ocean, free surface, sea ice), written to output_dir
++checkpoint_days = 10      # how often the full model state is saved for restarts
++restart         = false   # true: continue from the latest checkpoint in output_dir
++monitor_hours   = 1       # monitor.csv: transports through the open sides, mean η against GLORYS's, volume budget,
++                          # fastest point (plotting/volume_budget.jl, plotting/max_speed.jl); 0 = off
++mixing_depth    = 60      # daily CATKE κᶜ and e over the top this many metres in arctic_mixing.jld2; 0 = off
++post_run_analysis = true  # at the end: clear the model from memory, then the scorecard (scorecard.md)
++
++[transports]
++# Volume, heat, salt and freshwater transports through the sections below and the open boundaries (see transports.jl).
++online                = true   # true: computed every time step and averaged over average_hours, written to arctic_transports.jld2
++reference_temperature = 0      # heat transport relative to this temperature (°C)
++reference_salinity    = 34.8   # freshwater transport relative to this salinity (g/kg)
++
++# Each section is a great-circle path through (longitude, latitude) waypoints. Positive transport flows to the right,
++# walking from the first waypoint to the last; these are ordered so that positive is into the Arctic. Both ends should
++# be on land, so the section spans the whole strait on any grid. Check with plotting/transport_sections.jl.
++[transports.sections]
++# Fram Strait follows the mooring array at 78°50′N; intermediate waypoints keep the great circles on that latitude.
++fram_strait         = { lon = [15.0, 10.0, 5.0, 0.0, -5.0, -10.0, -15.0, -20.0],
++                        lat = [78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333] }
++# Barents Sea Opening follows the mooring line from Norway (Fugløya) via Bjørnøya to Sørkapp, Svalbard.
++barents_sea_opening = { lon = [20.0, 19.0, 16.5],  lat = [70.0, 74.45, 77.0] }
++bering_strait       = { lon = [-166.0, -171.0], lat = [66.0, 66.0] }
++davis_strait        = { lon = [-53.0, -63.0],   lat = [67.0, 66.5] }
++
++[paths]
++data_dir   = ""   # where downloads are stored; "" = each dataset's default cache
++output_dir = "output"    # model output: time averages (.jld2), checkpoints and the config; one folder per experiment
++figure_dir = "figures"   # figures and movies from the plotting/ scripts; one folder per experiment
++
++[boundaries]
++velocity_inflow_days = 0.0417   # oblique radiation on u, v: nudging timescale toward GLORYS on inflow (0.0417 days = 1 hour).
++                                # With 1 day, a partial bottom cell on the Atlantic open face drifted to −0.9 m/s
++                                # (GLORYS −0.26); 1 hour removes it and moves the section transports by < 0.1 Sv
++tracer_inflow_km     = 20  # T, S reservoir inflow relaxation length, both open sides
++relaxation_hours     = 6   # T, S and baroclinic u, v relax toward GLORYS in a ~2/3° band along the open sides
++                           # over this timescale; 0 = off (nested_ocean_model's default is 6)
++
++# Volume control (volume_control.jl): the net inflow through the two open sides together is pinned at every barotropic
++# substep, as NEMO and ROMS do; Flather splits it between the sides. Without it the domain's volume drifts from GLORYS's.
++follow_glorys_volume      = true   # true: the net inflow follows GLORYS's domain-mean η, with the surface freshwater handed back
++volume_relaxation_days    = 1      # with follow_glorys_volume: time over which the remaining drift from GLORYS's mean η is removed
++follow_glorys_tendency    = false  # with follow_glorys_volume: true also follows GLORYS's rate of change exactly
++# net_inflow_Sv           = 0.0    # with follow_glorys_volume = false: a constant net inflow instead (Sv, positive into the domain);
++                                   # with neither, Flather alone (no volume control)
++net_inflow_depth_exponent = 0.5    # the pin's correction to each boundary column ∝ Hᵖ: 0 uniform per length, 1 uniform velocity
++                                   # (NEMO, ROMS), 0.5 a uniform shift of GLORYS's η in Flather
++
++[ocean]
++closure = "NEMO"   # NEMO's TKE scheme (patch 085): "CATKE" (default), "NEMO", "RiBased", "TKEDissipation" or "none"
++nemo_parameters = "glorys12"          # "reference" (NEMO 3.6-4.x namelist) or "glorys12" (NEMO 3.1 code defaults; patch 087)
++# nemo_surface_tke = 3.75             # surface TKE = this × u★² (NEMO's rn_ebb; default: the preset's)
++# nemo_convective_diffusivity = 100   # m²/s where N² < 0 (NEMO's rn_evd; 0 = off)
++
++[sea_ice]
++ice_salinity               = 6        # g/kg (default 4)
++ice_ocean_drag_coefficient = 5e-3     # (default 5.5e-3)
++ice_compressive_strength   = 20000    # P*, N/m² (default 27 500)
++albedo                     = "ccsm3"  # "constant" (0.7, default) or "ccsm3" (state-dependent, SeaIceAlbedo)
++ice_consolidation_thickness = 0.5     # m (default 0.05): ClimaSeaIce's hᶜ, see the header
++
++[queue]
++long = true   # four months: at most 2 long jobs per server (tools/runner.jl)
+diff --git a/panarctic.jl b/panarctic.jl
+index 9c2d136..7ce2302 100644
+--- a/panarctic.jl
++++ b/panarctic.jl
+@@ -192,13 +192,16 @@ sea_ice_settings = get(config, "sea_ice", Dict{String, Any}())
+ ice_salinity               = get(sea_ice_settings, "ice_salinity", 4)
+ ice_ocean_drag_coefficient = get(sea_ice_settings, "ice_ocean_drag_coefficient", 5.5e-3)
+ ice_compressive_strength   = get(sea_ice_settings, "ice_compressive_strength", 27500)
++# ice_consolidation_thickness (m, ClimaSeaIce's hᶜ, default 0.05): both the lead-closing thickness h₀ of the concentration
++# update and the thickness below which ice gets no conductive flux
++ice_consolidation_thickness = get(sea_ice_settings, "ice_consolidation_thickness", 0.05)
+ dynamics = sea_ice_dynamics(child.grid, ocean; sea_ice_ocean_drag_coefficient = ice_ocean_drag_coefficient,
+                             rheology = ElastoViscoPlasticRheology(; ice_compressive_strength))
+-@info "Sea ice: salinity $ice_salinity, ice–ocean drag $ice_ocean_drag_coefficient, P* $ice_compressive_strength N/m²"
++@info "Sea ice: salinity $ice_salinity, ice–ocean drag $ice_ocean_drag_coefficient, P* $ice_compressive_strength N/m², consolidation thickness $ice_consolidation_thickness m"
+ 
+ sea_ice = nested_sea_ice_simulation(ocean, dataset; dates = (start_date, end_date), dir_kw...,
+                                     advection = IncrementalRemapping(), timestepper = :ForwardEuler,
+-                                    ice_salinity, dynamics)
++                                    ice_salinity, ice_consolidation_thickness, dynamics)
+ 
+ # nested_sea_ice_simulation sets the GLORYS NaN (land, open water) to zero. Also make the concentration lie in
+ # [0, 1], and thickness and concentration either both zero or both positive.
+-- 
+2.43.0
+

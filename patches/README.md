@@ -104,6 +104,7 @@ Numbered in the order to apply, across repositories. Each was checked to apply w
 | 097 | PanArcticShenanigans | `fjp/test-061` (on top of 095) | after 095 | `[land] river_spread_degrees` (default 1.2) and `river_spread_max_cells` (default 0 = no cap) for JRA55's river routing; `analysis/rivers.jl` uses them |
 | 098 | PanArcticShenanigans | new worktree `panarctic-098` (`fjp/test-098`, from `fjp/test-061` + 097) | after 097 | NumericalEarth pin → `fjp/net-inflow-0.9.4` (Project.toml + Manifest, same deps); `config_smoke_test_ne094.toml`, `config_sep2005_4mo_nemo_glorys12_nz100_ne094.toml` |
 | 099 | PanArcticShenanigans | `fjp/test-061` (configs, on top of 097) | after 097 | `config_sep2005_4mo_nemo_glorys12_nz100_spread05.toml`, `…_spread03.toml`: four-month NEMO runs with river water spread over 0.5° and 0.3° instead of 1.2° |
+| 100 | PanArcticShenanigans | `fjp/test-061` and `fjp/test-098` | after 099 (061), after 098 (098) | `analysis/freshwater_budget.jl` (freshwater content, exchange between regions, surface residual, ice); `[sea_ice] ice_consolidation_thickness` (default 0.05, unchanged); `config_sep2005_4mo_nemo_glorys12_nz100_hc05.toml` (hᶜ = 0.5 m); `rivers.jl` routing line by NumericalEarth version |
 
 ## Applying 001–006
 
