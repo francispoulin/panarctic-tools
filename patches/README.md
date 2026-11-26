@@ -107,6 +107,7 @@ Numbered in the order to apply, across repositories. Each was checked to apply w
 | 100 | PanArcticShenanigans | `fjp/test-061` and `fjp/test-098` | after 099 (061), after 098 (098) | `analysis/freshwater_budget.jl` (freshwater content, exchange between regions, surface residual, ice); `[sea_ice] ice_consolidation_thickness` (default 0.05, unchanged); `config_sep2005_4mo_nemo_glorys12_nz100_hc05.toml` (hᶜ = 0.5 m); `rivers.jl` routing line by NumericalEarth version |
 | 101 | PanArcticShenanigans | `fjp/test-061` (and later `fjp/test-098`) | after 100 | `analysis/melt_lens.jl`: daily, first 30 days, ice-covered regions: model − GLORYS salinity at the surface and 15–40 m, ice speed and under-ice u★ (model and GLORYS), κᶜ, top-60 m profiles |
 | 102 | PanArcticShenanigans | `fjp/test-061` | after 101 | `analysis/initial_stability.jl`: unstable faces (N² < −1e-6) in the initial state by region and depth, the 15 worst, maps |
+| 103 | PanArcticShenanigans | `fjp/test-061` | after 102 | `melt_lens.jl`: κᶜ over the top 10 m, and κᶜ and e profiles (top 60 m) on days 1–30 |
 
 ## Applying 001–006
 
