@@ -1,0 +1,445 @@
+From df1dffd54da6097e2377d914b796f7f99b74de09 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 26 Nov 2026 10:56:57 -0500
+Subject: [PATCH] evd_colocation.jl: where the enhanced diffusion fires under
+ ice, against the net surface flux; melt_lens: net freshening
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+analysis/evd_colocation.jl (new; CPU, run's own output, no GLORYS): per under-ice column and day, the fraction of the
+day the faces at the bottom of the top two cells are unstable (daily-mean κᶜ / κᵉᵛᵈ: κᶜ is exactly κᵉᵛᵈ = 100 m²/s
+there), classed by the column's net surface freshening that day (brine / neutral / melt) and by the daily-mean N² of
+the top pair (near-neutral or stratified); the corrected surface fluxes by region (net, ice part, rest; heat); the top
+cell's T − Tₘ; and the initial state against the sea ice's liquidus (supercooled cells, ice made by the first frazil
+step). evd_colocation.md, evd_colocation.png (maps, days 1–10).
+
+Fix in melt_lens.jl: NumericalEarth's net ocean Jˢ holds only the ice's own salt, Jˢ = Eᵢ Sᵢ / ρ₀ (Eᵢ > 0 when the
+ice grows); the dilution S Jʷ is applied in the salinity boundary condition. The table showed Jˢ / S as "freshening":
+the opposite sign to the ice's net effect and ~4 times too small. Now Jʷ + Jˢ / S (η from the flux file; the ice's
+part Jˢ (1/S − 1/Sᵢ) if η is missing). Also κᶜ and e (on faces) are placed at face depths, not cell centres.
+
+Why (26 Nov 2026): the 30-day flux run's melt_lens.md read as brine under ice in early September; corrected, those
+columns are melting (2–8 mm/day of fresh water) and the Central Arctic is freezing from day 1.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AbhhvpxdTuD5JaD3hFhzdz
+---
+ analysis/evd_colocation.jl | 337 +++++++++++++++++++++++++++++++++++++
+ analysis/melt_lens.jl      |  26 ++-
+ 2 files changed, 355 insertions(+), 8 deletions(-)
+ create mode 100644 analysis/evd_colocation.jl
+
+diff --git a/analysis/evd_colocation.jl b/analysis/evd_colocation.jl
+new file mode 100644
+index 0000000..594ec3b
+--- /dev/null
++++ b/analysis/evd_colocation.jl
+@@ -0,0 +1,337 @@
++# Where does the enhanced vertical diffusion fire in the top cells under ice, and what is the surface flux there? And is
++# the initial state below the sea ice's freezing point (frazil on the first step)? Daily, from the run's own output;
++# CPU, no GLORYS, a few minutes.
++#
++#   julia --project=. analysis/evd_colocation.jl [config.toml] [number of days, default 30]
++#
++# Why (26 Nov 2026): under ice the daily-mean κᶜ over 0–10 m is 1–40 m²/s from day 1 (melt_lens.md), and only NEMO's
++# enhanced vertical diffusion (κᶜ = κᵉᵛᵈ = 100 m²/s at faces with N² < −1e-12) gives that. Region means of the surface
++# fluxes cannot say whether it fires where salt goes in (ice growth, brine) or where the top pair is already mixed.
++#
++# 1. The surface fluxes, corrected. NumericalEarth's net ocean flux Jˢ (arctic_surface_fluxes.jld2, "S") holds only the
++#    salt the ice takes or returns, Jˢ = Eᵢ Sᵢ / ρ₀ with Eᵢ = ρᵢ ∂(hℵ)/∂t (ClimaSeaIce; Eᵢ > 0 when the ice grows); the
++#    dilution by the fresh water, S Jʷ with Jʷ ("η", positive when the ocean gains volume), is applied live in the
++#    salinity boundary condition (assemble_net_ocean_fluxes.jl, ocean_simulation.jl). The net upward salt flux is
++#    Jˢ + S Jʷ, so the net freshening is Jʷ + Jˢ / S (m/s of fresh water), of which the ice's part is Jˢ (1/S − 1/Sᵢ)
++#    (< 0 when the ice grows: brine) and the rest (atmosphere, rivers) Jʷ + Jˢ / Sᵢ. melt_lens.md before patch 111
++#    printed Jˢ / S alone as "freshening": the ice's salt only, of the opposite sign to the ice's net effect and
++#    S / Sᵢ − 1 ≈ 4 times smaller (Sᵢ = [sea_ice] ice_salinity).
++# 2. Firing of the enhanced diffusion: κᶜ is exactly κᵉᵛᵈ at an unstable face and ~1e-3 m²/s otherwise in the top cells,
++#    so the daily mean κᶜ / κᵉᵛᵈ is the fraction of the day the face was unstable. Faces at the bottom of the top cell
++#    (−3.9 m on the nz100 grid) and of the second (−7.8 m). Per under-ice column (ℵ > 0.15) and day, against the net
++#    freshening of that column and day (brine < −0.5 mm/day, neutral, melt > 0.5 mm/day), and against the daily-mean
++#    stratification of the top pair (N² from daily-mean T, S, TEOS-10 as the model: near-neutral below 1e-5 s⁻²; a
++#    0.3 g/kg step over 3.9 m is ~6e-4).
++# 3. Initial supercooling: T₀ − Tₘ(S₀, z) in every wet cell of the initial state (t = 0 in arctic_ocean.jld2), with the
++#    sea ice's liquidus (ClimaSeaIce LinearLiquidus: Tₘ = −0.0542 S + 7.89e-4 z). NumericalEarth's frazil step sets every
++#    supercooled cell to Tₘ and gives the heat to the ice, which then grows (brine into the top cell). Reports the ice
++#    that makes, ρ₀ cₚ Σ (Tₘ − T)⁺ Δz / (ρᵢ L), with ρᵢ = 900, L = 334 kJ/kg (ClimaSeaIce's defaults); and the top cell's
++#    T − Tₘ under ice on the first days.
++#
++# Reads arctic_ocean.jld2 (T, S), arctic_sea_ice.jld2 (ℵ), arctic_mixing.jld2 (κc) and arctic_surface_fluxes.jld2
++# (S, T, and η if present) from `output_dir`. Writes evd_colocation.md to `output_dir` and evd_colocation.png to
++# `figure_dir`.
++
++include("../config.jl")
++
++using Oceananigans
++using Oceananigans.Operators: Azᶜᶜᶜ
++using Oceananigans.OutputReaders: OnDisk
++using CairoMakie, Dates, JLD2, Printf, Statistics
++
++const SeawaterPolynomials = Oceananigans.BuoyancyFormulations.SeawaterPolynomials
++equation_of_state = SeawaterPolynomials.TEOS10.TEOS10EquationOfState(reference_density = 1020.0)
++gravitational_acceleration = 9.80665
++
++start_date     = DateTime(config["time"]["start_date"])
++number_of_days = length(ARGS) ≥ 2 ? parse(Int, ARGS[2]) : 30
++ice_salinity   = Float64(get(get(config, "sea_ice", Dict{String, Any}()), "ice_salinity", 4))
++evd_diffusivity = 100.0                    # κᵉᵛᵈ (nemo_tke_vertical_diffusivity.jl, rn_evd)
++ρ₀, cₚ = 1020.0, 3991.87                   # as melt_lens.jl
++ρᵢ, latent_heat = 900.0, 334e3             # ClimaSeaIce defaults
++salinity_slope, depth_slope = 0.0542, 7.89e-4
++melting_temperature(S, z) = -salinity_slope * S + depth_slope * z
++class_threshold   = 0.5                    # mm/day: brine below −0.5, melt above +0.5
++neutral_threshold = 1e-5                   # s⁻²: top pair near-neutral below this daily-mean N²
++periods = [("days 1–10", 1:min(10, number_of_days)), ("days 11–$number_of_days", 11:number_of_days)]
++periods = filter(p -> !isempty(last(p)), periods)
++table_days = filter(≤(number_of_days), [1, 2, 3, 5, 7, 10, 15, 20, 25, 30])
++
++#####
++##### Grid and regions (as melt_lens.jl)
++#####
++
++St = FieldTimeSeries(ocean_output_file, "S"; backend = OnDisk())
++Tt = FieldTimeSeries(ocean_output_file, "T"; backend = OnDisk())
++grid = St.grid
++Nx, Ny, Nz = size(grid)
++ug = grid.underlying_grid
++zf = Float64.(collect(ug.z.cᵃᵃᶠ[1:Nz+1]))
++zc = (zf[1:end-1] .+ zf[2:end]) ./ 2
++Δz = diff(zf)
++bottom_height = grid.immersed_boundary.bottom_height
++hb = [Float64(bottom_height[i, j, 1]) for i in 1:Nx, j in 1:Ny]
++H  = max.(-hb, 0)
++ocean = H .> 0
++λ  = mod.(Array(λnodes(ug, Center(), Center(), Center())) .+ 180, 360) .- 180
++φ  = Array(φnodes(ug, Center(), Center(), Center()))
++A  = [Azᶜᶜᶜ(i, j, 1, ug) for i in 1:Nx, j in 1:Ny]
++wet = [zf[k+1] > hb[i, j] for i in 1:Nx, j in 1:Ny, k in 1:Nz]
++overlap(a, b, c, d) = max(0.0, min(b, d) - max(a, c))
++wet_thickness = [overlap(zf[k], zf[k+1], hb[i, j], 0.0) for i in 1:Nx, j in 1:Ny, k in 1:Nz]
++
++regions = [("Beaufort Gyre",    (λ, φ, H) -> 70.5 ≤ φ ≤ 80.5 && -170 ≤ λ ≤ -130 && H > 300),
++           ("Central Arctic",   (λ, φ, H) -> φ > 82),
++           ("Siberian shelves", (λ, φ, H) -> 66 ≤ φ ≤ 82 && (λ ≥ 60 || λ ≤ -170) && H < 200),
++           ("Archipelago",      (λ, φ, H) -> 68 ≤ φ ≤ 82 && -125 ≤ λ ≤ -80),
++           ("Baffin Bay",       (λ, φ, H) -> 67 ≤ φ ≤ 78 && -80 < λ ≤ -55),
++           ("all, north of 66°N", (λ, φ, H) -> φ ≥ 66)]
++region_names = first.(regions)
++Nr = length(regions)
++masks = [[ocean[i, j] && test(λ[i, j], φ[i, j], H[i, j]) for i in 1:Nx, j in 1:Ny] for (_, test) in regions]
++
++# Faces at the bottom of the top cell and of the second; a face counts where the cell below it is wet
++top_faces = (Nz, Nz - 1)
++face_wet  = [[hb[i, j] < zf[k] for i in 1:Nx, j in 1:Ny] for k in top_faces]
++
++buoyancy(Θ, Sᴬ, z) = -gravitational_acceleration * SeawaterPolynomials.ρ′(Θ, Sᴬ, z, equation_of_state) / ρ₀
++
++#####
++##### Files
++#####
++
++record_of(times, d) = findfirst(t -> abs(t - d * 86400) < 600, times)
++
++function interior_part(a)
++    a = ndims(a) == 3 ? a[:, :, 1] : a
++    hx, hy = (size(a, 1) - Nx) ÷ 2, (size(a, 2) - Ny) ÷ 2
++    return Float64.(a[hx+1:hx+Nx, hy+1:hy+Ny])
++end
++
++sea_ice_file = joinpath(output_dir, "arctic_sea_ice.jld2")
++ice_concentration = jldopen(sea_ice_file) do f
++    iterations = sort(filter(!=("serialized"), keys(f["timeseries/t"])), by = s -> parse(Int, s))
++    t = [f["timeseries/t/$i"] for i in iterations]
++    first_record = something(findfirst(==(0), t), record_of(t, 1))   # t = 0 if saved, else the first day
++    Dict(d => interior_part(f["timeseries/ℵ/$(iterations[d == 0 ? first_record : record_of(t, d)])"])
++         for d in 0:number_of_days)
++end
++
++mixing_file = joinpath(output_dir, "arctic_mixing.jld2")
++isfile(mixing_file) || error("$mixing_file is missing: the run needs [output] mixing_depth > 0")
++κt = FieldTimeSeries(mixing_file, "κc"; backend = OnDisk())
++mixing_levels = collect(κt.indices[3])
++face_slots = [findfirst(==(k), mixing_levels) for k in top_faces]
++any(isnothing, face_slots) && error("arctic_mixing.jld2 does not hold faces $top_faces")
++
++flux_file = joinpath(output_dir, "arctic_surface_fluxes.jld2")
++isfile(flux_file) || error("$flux_file is missing: the run needs [output] surface_fluxes = true")
++flux_names = jldopen(f -> collect(keys(f["timeseries"])), flux_file)
++Jˢt = FieldTimeSeries(flux_file, "S"; backend = OnDisk())
++Jᵀt = FieldTimeSeries(flux_file, "T"; backend = OnDisk())
++Jʷt = "η" in flux_names ? FieldTimeSeries(flux_file, "η"; backend = OnDisk()) : nothing
++isnothing(Jʷt) && @warn "No η (freshwater volume flux) in $flux_file: net freshening is the ice's part only"
++
++surface_values(ft, n) = Float64.(Array(interior(ft[n])))[1:Nx, 1:Ny, 1]
++top_two(ft, n) = Float64.(Array(interior(ft[n], :, :, Nz-1:Nz)))   # levels Nz − 1, Nz as 1, 2
++
++#####
++##### Day by day
++#####
++
++mm_per_day = 86400e3
++fluxes = Dict(name => fill(NaN, number_of_days, Nr) for name in (:net, :ice, :other, :heat))
++cell_area  = [zeros(number_of_days, 3) for _ in 1:Nr]          # under-ice area by class (brine, neutral, melt)
++firing     = [[zeros(number_of_days, 3) for _ in 1:Nr] for _ in top_faces]   # Σ A f by class
++face_area  = [[zeros(number_of_days, 3) for _ in 1:Nr] for _ in top_faces]   # Σ A over wet faces by class
++firing_neutral = [zeros(number_of_days) for _ in 1:Nr]          # Σ A f at the top face where the top pair is near-neutral
++area_neutral   = [zeros(number_of_days) for _ in 1:Nr]
++top_supercooling = fill(NaN, number_of_days, Nr)                # mean top-cell T − Tₘ under ice
++map_days = min(10, number_of_days)
++firing_sum, firing_count = zeros(Nx, Ny), zeros(Nx, Ny)       # maps over days 1–map_days, under ice only
++net_sum,    net_count    = zeros(Nx, Ny), zeros(Nx, Ny)
++
++for d in 1:number_of_days
++    n  = record_of(St.times, d)
++    S2 = top_two(St, n)
++    T2 = top_two(Tt, n)
++    Sᴺ = S2[:, :, 2]
++    N² = [(buoyancy(T2[i, j, 2], S2[i, j, 2], zc[Nz]) - buoyancy(T2[i, j, 1], S2[i, j, 1], zc[Nz-1])) / (zc[Nz] - zc[Nz-1])
++          for i in 1:Nx, j in 1:Ny]
++    ℵ  = ice_concentration[d]
++    Jˢ = surface_values(Jˢt, record_of(Jˢt.times, d))
++    Jᵀ = surface_values(Jᵀt, record_of(Jᵀt.times, d))
++    Jʷ = isnothing(Jʷt) ? nothing : surface_values(Jʷt, record_of(Jʷt.times, d))
++    ice_part = Jˢ .* (1 ./ Sᴺ .- 1 / ice_salinity) .* mm_per_day
++    other    = isnothing(Jʷ) ? zeros(Nx, Ny) : (Jʷ .+ Jˢ ./ ice_salinity) .* mm_per_day
++    net      = ice_part .+ other
++    κ = Float64.(Array(interior(κt[record_of(κt.times, d)])))
++    f = [clamp.(κ[:, :, slot] ./ evd_diffusivity, 0, 1) for slot in face_slots]
++    class = [x < -class_threshold ? 1 : x > class_threshold ? 3 : 2 for x in net]
++
++    for (r, mask) in enumerate(masks)
++        under_ice = mask .& (ℵ .> 0.15) .& isfinite.(net) .& isfinite.(Sᴺ)
++        any(under_ice) || continue
++        w = A[under_ice]
++        fluxes[:net][d, r]   = sum(w .* net[under_ice]) / sum(w)
++        fluxes[:ice][d, r]   = sum(w .* ice_part[under_ice]) / sum(w)
++        fluxes[:other][d, r] = sum(w .* other[under_ice]) / sum(w)
++        fluxes[:heat][d, r]  = ρ₀ * cₚ * sum(w .* Jᵀ[under_ice]) / sum(w)
++        Tₘ = melting_temperature.(Sᴺ, zc[Nz])
++        top_supercooling[d, r] = sum(w .* (T2[:, :, 2] .- Tₘ)[under_ice]) / sum(w)
++        for c in 1:3
++            cell_area[r][d, c] = sum(A[under_ice .& (class .== c)])
++            for (m, _) in enumerate(top_faces)
++                cells = under_ice .& (class .== c) .& face_wet[m]
++                firing[m][r][d, c]    = sum(A[cells] .* f[m][cells])
++                face_area[m][r][d, c] = sum(A[cells])
++            end
++        end
++        neutral = under_ice .& face_wet[1] .& (N² .< neutral_threshold)
++        firing_neutral[r][d] = sum(A[neutral] .* f[1][neutral])
++        area_neutral[r][d]   = sum(A[neutral])
++    end
++    if d ≤ map_days
++        under = (ℵ .> 0.15) .& ocean .& isfinite.(net)
++        firing_sum   .+= ifelse.(under .& face_wet[1], f[1], 0.0)
++        firing_count .+= under .& face_wet[1]
++        net_sum      .+= ifelse.(under, net, 0.0)
++        net_count    .+= under
++    end
++    @info "Day $d"
++end
++mean_firing_map = ifelse.(firing_count .> 0, firing_sum ./ max.(firing_count, 1), NaN)
++mean_net_map    = ifelse.(net_count .> 0, net_sum ./ max.(net_count, 1), NaN)
++
++#####
++##### Initial state: supercooling against the sea ice's liquidus
++#####
++
++initial = findfirst(==(0), St.times)
++initial_rows = String[]
++frazil_map = fill(NaN, Nx, Ny)
++if isnothing(initial)
++    @warn "$ocean_output_file has no initial state (t = 0): no supercooling table"
++else
++    S₀ = Float64.(Array(interior(St[initial])))
++    T₀ = Float64.(Array(interior(Tt[initial])))
++    ℵ₀ = ice_concentration[0]
++    supercooling = [wet[i, j, k] ? melting_temperature(S₀[i, j, k], zc[k]) - T₀[i, j, k] : NaN
++                    for i in 1:Nx, j in 1:Ny, k in 1:Nz]                      # > 0: below freezing
++    frazil_ice = [sum(max(supercooling[i, j, k], 0) * wet_thickness[i, j, k] for k in 1:Nz if wet[i, j, k]; init = 0.0)
++                  for i in 1:Nx, j in 1:Ny] .* (ρ₀ * cₚ / (ρᵢ * latent_heat)) .* 1e3   # mm of ice
++    frazil_map .= ifelse.(ocean, frazil_ice, NaN)
++    supercooled_top10    = [any(k -> wet[i, j, k] && zf[k+1] > -10 && supercooling[i, j, k] > 0.001, 1:Nz) for i in 1:Nx, j in 1:Ny]
++    supercooled_anywhere = [any(k -> wet[i, j, k] && supercooling[i, j, k] > 0.001, 1:Nz) for i in 1:Nx, j in 1:Ny]
++    for (r, mask) in enumerate(masks)
++        under_ice = mask .& (ℵ₀ .> 0.15)
++        any(under_ice) || (push!(initial_rows, "| $(region_names[r]) | no ice | | | | |"); continue)
++        w = A[under_ice]
++        top = supercooling[:, :, Nz][under_ice]
++        top10    = supercooled_top10[under_ice]
++        anywhere = supercooled_anywhere[under_ice]
++        push!(initial_rows, @sprintf("| %s | %+.3f | %.0f %% | %.0f %% | %.2f | %.2f |", region_names[r],
++                                     -sum(w .* top) / sum(w), 100sum(w .* top10) / sum(w),
++                                     100sum(w .* anywhere) / sum(w),
++                                     sum(w .* frazil_ice[under_ice]) / sum(w), maximum(frazil_ice[under_ice])))
++    end
++end
++
++#####
++##### Tables
++#####
++
++share(x, total) = total > 0 ? 100x / total : NaN
++
++io = IOBuffer()
++println(io, "# Enhanced vertical diffusion in the top cells under ice: $experiment, first $number_of_days days from $(Date(start_date))\n")
++println(io, "Under-ice columns: ℵ > 0.15. Fractions of the day unstable from the daily mean κᶜ / κᵉᵛᵈ ",
++            "(κᵉᵛᵈ = $(Int(evd_diffusivity)) m²/s) at the faces $(round(zf[Nz], digits = 1)) m and ",
++            "$(round(zf[Nz-1], digits = 1)) m. Ice salinity $(ice_salinity) g/kg.\n")
++
++println(io, "## 1. Surface fluxes under ice, corrected\n")
++println(io, "Net freshening Jʷ + Jˢ / S (mm/day of fresh water; negative = brine) = ice part Jˢ (1/S − 1/Sᵢ) + the rest ",
++            "(atmosphere, rivers: Jʷ + Jˢ / Sᵢ), and heat loss ρ₀ cₚ Jᵀ (W/m²; positive = the ocean loses heat). ",
++            "Region means over under-ice cells. melt_lens.md before patch 111 showed Jˢ / S (the ice's own salt) as freshening.\n")
++println(io, "| Region | " * join(["day $d" for d in table_days], " | ") * " |")
++println(io, "|---|" * repeat("---|", length(table_days)))
++for r in 1:Nr
++    cells = [isfinite(fluxes[:net][d, r]) ?
++             @sprintf("%+.1f (ice %+.1f), %+.0f W", fluxes[:net][d, r], fluxes[:ice][d, r], fluxes[:heat][d, r]) : "–"
++             for d in table_days]
++    println(io, "| $(region_names[r]) | " * join(cells, " | ") * " |")
++end
++isnothing(Jʷt) && println(io, "\n(No η in the flux file: \"the rest\" is missing and net = ice part.)")
++
++println(io, "\nTop cell T − Tₘ(S, z) under ice (°C; the sea ice's liquidus; 0 = at freezing):\n")
++println(io, "| Region | " * join(["day $d" for d in table_days], " | ") * " |")
++println(io, "|---|" * repeat("---|", length(table_days)))
++for r in 1:Nr
++    println(io, "| $(region_names[r]) | " * join([isfinite(top_supercooling[d, r]) ? @sprintf("%+.3f", top_supercooling[d, r]) : "–"
++                                                  for d in table_days], " | ") * " |")
++end
++
++println(io, "\n## 2. Where the enhanced diffusion fires, by the column's net freshening that day\n")
++println(io, "Classes: brine (net < −$class_threshold mm/day), neutral, melt (> +$class_threshold). Area share of the ",
++            "under-ice area; mean fraction of the day unstable at $(round(zf[Nz], digits = 1)) m in each class; share of all ",
++            "the firing at that face that lies in each class (area × time).\n")
++println(io, "| Region | Period | Area: brine / neutral / melt | Unstable at $(round(zf[Nz], digits = 1)) m: brine / neutral / melt | Share of firing: brine / neutral / melt | Unstable at $(round(zf[Nz-1], digits = 1)) m: brine / neutral / melt |")
++println(io, "|---|---|---|---|---|---|")
++for r in 1:Nr, (label, period_days) in periods
++    area = vec(sum(cell_area[r][period_days, :], dims = 1))
++    fire = [vec(sum(firing[m][r][period_days, :], dims = 1)) for m in 1:2]
++    fa   = [vec(sum(face_area[m][r][period_days, :], dims = 1)) for m in 1:2]
++    mean_f = (m, c) -> fa[m][c] > 0 ? 100fire[m][c] / fa[m][c] : NaN
++    println(io, @sprintf("| %s | %s | %.0f / %.0f / %.0f %% | %.1f / %.1f / %.1f %% | %.0f / %.0f / %.0f %% | %.1f / %.1f / %.1f %% |",
++                         region_names[r], label, (share(area[c], sum(area)) for c in 1:3)...,
++                         (mean_f(1, c) for c in 1:3)..., (share(fire[1][c], sum(fire[1])) for c in 1:3)...,
++                         (mean_f(2, c) for c in 1:3)...))
++end
++
++println(io, "\n## 3. Firing against the stratification of the top pair\n")
++println(io, "Near-neutral: daily-mean N² between the top two cells below $neutral_threshold s⁻² (a 0.3 g/kg step over ",
++            "3.9 m is ~6e-4). Firing in an already mixed pair keeps it mixed; firing in a stratified pair destroys a lens.\n")
++println(io, "| Region | Period | Under-ice area with the top pair near-neutral | Share of the firing at $(round(zf[Nz], digits = 1)) m in near-neutral pairs |")
++println(io, "|---|---|---|---|")
++for r in 1:Nr, (label, period_days) in periods
++    total_area = sum(face_area[1][r][period_days, :])
++    total_fire = sum(firing[1][r][period_days, :])
++    println(io, @sprintf("| %s | %s | %.0f %% | %.0f %% |", region_names[r], label,
++                         share(sum(area_neutral[r][period_days]), total_area), share(sum(firing_neutral[r][period_days]), total_fire)))
++end
++
++if !isempty(initial_rows)
++    println(io, "\n## 4. Initial state against the sea ice's liquidus\n")
++    println(io, "Under-ice columns at t = 0. Top-cell T₀ − Tₘ (area mean; negative = supercooled), share of columns with a ",
++                "cell supercooled by more than 0.001 °C in the top 10 m and anywhere, and the ice the first frazil step makes ",
++                "from all supercooled cells (mm; mean and maximum).\n")
++    println(io, "| Region | Top cell T₀ − Tₘ (°C) | Supercooled, top 10 m | Supercooled, anywhere | Frazil ice, mean (mm) | max (mm) |")
++    println(io, "|---|---|---|---|---|---|")
++    foreach(row -> println(io, row), initial_rows)
++end
++
++table_text = String(take!(io))
++print(table_text)
++table_file = joinpath(output_dir, "evd_colocation.md")
++write(table_file, table_text)
++@info "Wrote $table_file"
++
++#####
++##### Figure: maps (grid index space), days 1–10
++#####
++
++fig = Figure(size = (1500, 520))
++ax = Axis(fig[1, 1]; title = "Fraction of the day unstable at $(round(zf[Nz], digits = 1)) m, under ice, days 1–$map_days", aspect = DataAspect())
++hm = heatmap!(ax, mean_firing_map; colormap = :viridis, colorrange = (0, 0.5), nan_color = :lightgray)
++Colorbar(fig[1, 2], hm)
++ax = Axis(fig[1, 3]; title = "Net freshening under ice (mm/day), days 1–$map_days", aspect = DataAspect())
++hm = heatmap!(ax, mean_net_map; colormap = :balance, colorrange = (-5, 5), nan_color = :lightgray)
++Colorbar(fig[1, 4], hm)
++ax = Axis(fig[1, 5]; title = "Frazil ice from the initial state (mm)", aspect = DataAspect())
++frazil_values = filter(isfinite, vec(frazil_map))
++frazil_top = isempty(frazil_values) ? 1.0 : max(1e-3, quantile(frazil_values, 0.999))
++hm = heatmap!(ax, frazil_map; colormap = :thermal, colorrange = (0, frazil_top), nan_color = :lightgray)
++Colorbar(fig[1, 6], hm)
++file = joinpath(figure_dir, "evd_colocation.png")
++save(file, fig)
++@info "Wrote $file"
+diff --git a/analysis/melt_lens.jl b/analysis/melt_lens.jl
+index 4e8fae4..7cdf321 100644
+--- a/analysis/melt_lens.jl
++++ b/analysis/melt_lens.jl
+@@ -2,7 +2,10 @@
+ # run, in the ice-covered regions: the model − GLORYS salinity at the surface and at 15–40 m, the ice speed and the
+ # under-ice friction velocity u★ (model and GLORYS), the model's κᶜ at 0–10 m and 10–40 m, and its κᶜ and TKE e
+ # profiles over the top 60 m on the first days (is the top 10 m mixed through on day 1?), and, for runs with
+-# [output] surface_fluxes, the surface freshening (Jˢ / S, mm/day) and heat loss (W/m²) under ice.
++# [output] surface_fluxes, the net surface freshening (Jʷ + Jˢ / S, mm/day) and heat loss (W/m²) under ice.
++# (Patch 111: before it, the table showed Jˢ / S alone, which is only the salt the ice takes or returns, Jˢ = Eᵢ Sᵢ / ρ₀:
++# its sign is opposite to the ice's net effect and it is ~4 times smaller. The dilution S Jʷ is applied in the salinity
++# boundary condition and is not in Jˢ; see analysis/evd_colocation.jl.)
+ #
+ #   julia +1.13 --project=. analysis/melt_lens.jl [config.toml] [number of days, default 30]
+ #
+@@ -138,11 +141,14 @@ model_e_profiles = [fill(NaN, length(mixing_levels), number_of_days) for _ in 1:
+ flux_file = joinpath(output_dir, "arctic_surface_fluxes.jld2")
+ Jˢt = isfile(flux_file) ? FieldTimeSeries(flux_file, "S"; backend = OnDisk()) : nothing
+ Jᵀt = isfile(flux_file) ? FieldTimeSeries(flux_file, "T"; backend = OnDisk()) : nothing
+-model_freshening = fill(NaN, number_of_days, Nr)   # mm/day of fresh water, Jˢ / S at the surface, over ice
++Jʷt = isfile(flux_file) && "η" in jldopen(f -> collect(keys(f["timeseries"])), flux_file) ?
++      FieldTimeSeries(flux_file, "η"; backend = OnDisk()) : nothing
++ice_salinity = Float64(get(get(config, "sea_ice", Dict{String, Any}()), "ice_salinity", 4))
++model_freshening = fill(NaN, number_of_days, Nr)   # mm/day of fresh water, net Jʷ + Jˢ / S at the surface, over ice
+ model_heat_loss  = fill(NaN, number_of_days, Nr)   # W/m², ρ₀ cₚ Jᵀ, over ice
+ function κ_layer_mean(r, d, layer)
+-    values = [model_κ_profiles[r][m, d] for (m, k) in enumerate(mixing_levels)
+-              if layer[1] ≤ zc[k] ≤ layer[2] && isfinite(model_κ_profiles[r][m, d])]
++    values = [model_κ_profiles[r][m, d] for (m, k) in enumerate(mixing_levels)   # κᶜ and e sit on faces
++              if layer[1] ≤ zf[k] ≤ layer[2] && isfinite(model_κ_profiles[r][m, d])]
+     return isempty(values) ? NaN : mean(values)
+ end
+ 
+@@ -175,7 +181,10 @@ for d in 1:number_of_days
+     if !isnothing(Jˢt)
+         Jˢ = Float64.(Array(interior(Jˢt[record_of(Jˢt.times, d)])))[:, :, 1]
+         Jᵀ = Float64.(Array(interior(Jᵀt[record_of(Jᵀt.times, d)])))[:, :, 1]
+-        freshening = Jˢ ./ S[:, :, Nz] .* 86400e3
++        # Net: the dilution by Jʷ (in the boundary condition) plus the ice's salt Jˢ. Without η in the file, the ice's
++        # part alone, Jˢ (1/S − 1/Sᵢ), using Jʷ_ice = −Jˢ / Sᵢ.
++        Jʷ = isnothing(Jʷt) ? -Jˢ ./ ice_salinity : Float64.(Array(interior(Jʷt[record_of(Jʷt.times, d)])))[1:Nx, 1:Ny, 1]
++        freshening = (Jʷ .+ Jˢ ./ S[:, :, Nz]) .* 86400e3
+         for (r, mask) in enumerate(masks)
+             ice_cells = mask .& (ice["ℵ"] .> 0.15) .& isfinite.(freshening)
+             any(ice_cells) || continue
+@@ -260,8 +269,9 @@ for r in 1:Nr
+ end
+ 
+ if !all(isnan, model_freshening)
+-    println(io, "\nSurface fluxes into the ocean under ice (cells with more than 15 % ice), model: freshening Jˢ / S ",
+-                "(mm/day of fresh water; negative = brine) and heat loss ρ₀ cₚ Jᵀ (W/m²; positive = the ocean loses heat).\n")
++    println(io, "\nSurface fluxes into the ocean under ice (cells with more than 15 % ice), model: net freshening Jʷ + Jˢ / S ",
++                "(mm/day of fresh water; negative = brine)$(isnothing(Jʷt) ? ", the ice's part only (no η in the flux file)" : "") ",
++                "and heat loss ρ₀ cₚ Jᵀ (W/m²; positive = the ocean loses heat).\n")
+     println(io, "| Region | " * join(["day $d" for d in filter(≤(number_of_days), [1, 2, 3, 5, 7, 10, 15, 20, 25, 30])], " | ") * " |")
+     println(io, "|---|" * repeat("---|", length(filter(≤(number_of_days), [1, 2, 3, 5, 7, 10, 15, 20, 25, 30]))))
+     for r in 1:Nr
+@@ -328,7 +338,7 @@ for r in 1:Nr
+     end
+ 
+     isempty(mixing_levels) && continue
+-    zm = zc[mixing_levels]
++    zm = zf[mixing_levels]   # faces
+     for (row, profiles, quantity) in ((6, model_κ_profiles, "κᶜ (m²/s)"), (7, model_e_profiles, "e (m²/s²)"))
+         ax = Axis(fig[row, r]; xlabel = quantity, ylabel = r == 1 ? "z (m)" : "", xscale = log10,
+                   limits = (nothing, (-60, 0)))
+-- 
+2.43.0
+

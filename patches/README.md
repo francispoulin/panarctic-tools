@@ -115,6 +115,7 @@ Numbered in the order to apply, across repositories. Each was checked to apply w
 | 108 | NumericalEarth | `fjp/net-inflow-0.9.4` (PR #975) | after the merge of 106 | rename the ocean bands' `on_domain_boundary` to `domain_wall`: main's (#924) generic fallback overwrote it and broke precompilation |
 | 109 | PanArcticShenanigans | `fjp/test-098` | after 107 | Manifest: NumericalEarth tree 1f4bbfb (108) |
 | 110 | PanArcticShenanigans | `fjp/test-061` and `fjp/test-098` | after 104 (061), after 109 (098) | `tools/start_runners.sh`: fresh runner log per start, previous kept in `~/logs/old/` |
+| 111 | PanArcticShenanigans | `fjp/test-061` (analysis + fix, on top of 110) | after 110 | `analysis/evd_colocation.jl` (CPU, minutes): under ice, fraction of the day the faces at −3.9 / −7.8 m are unstable (κᶜ / κᵉᵛᵈ) by the column's net freshening (brine / neutral / melt) and the top pair's daily N²; corrected surface fluxes; top-cell T − Tₘ; initial supercooling against the sea ice's liquidus. **Fix** in `melt_lens.jl`: freshening is Jʷ + Jˢ / S (Jˢ holds only the ice's salt Eᵢ Sᵢ / ρ₀; before, its sign was opposite to the ice's net effect); κᶜ, e at face depths |
 
 ## Applying 001–006
 
