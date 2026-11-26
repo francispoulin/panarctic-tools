@@ -1,0 +1,307 @@
+From abeb65aac95684ac0044614a4efd3d5c797a5f45 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 25 Nov 2026 21:27:15 -0500
+Subject: [PATCH] analysis/melt_lens.jl: when the surface fresh layer is mixed
+ down, and whether it follows the ice
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Daily over the first days (default 30), in the Beaufort Gyre, Central Arctic, Siberian shelves,
+Archipelago and Baffin Bay: model − GLORYS salinity at the surface and over 15–40 m, ice speed and
+under-ice u★ = √c_d |uᵢ − uₒ| (model and GLORYS, cells with > 15 % ice), the model's κᶜ at 10–40 m,
+and model − GLORYS profiles of the top 60 m on days 1–30. Table melt_lens.md (with the correlation
+of the daily growth of the surface excess with the u★³ excess) and figure melt_lens.png.
+
+Why: the four-month NEMO run is too salty in the top ~10 m and too fresh at 15–40 m under ice from
+September, with the full-depth freshwater content close to GLORYS: fresh water mixed down. The ice
+is ~40 % too fast; this separates the ice's stirring from the ocean's own mixing.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AbhhvmHjZYCHhFxumZ9A47
+---
+ analysis/melt_lens.jl | 272 ++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 272 insertions(+)
+ create mode 100644 analysis/melt_lens.jl
+
+diff --git a/analysis/melt_lens.jl b/analysis/melt_lens.jl
+new file mode 100644
+index 0000000..4450fb9
+--- /dev/null
++++ b/analysis/melt_lens.jl
+@@ -0,0 +1,272 @@
++# When does the surface fresh layer get mixed down, and does it follow the sea ice? Daily, over the first days of a
++# run, in the ice-covered regions: the model − GLORYS salinity at the surface and at 15–40 m, the ice speed and the
++# under-ice friction velocity u★ (model and GLORYS), and the model's κᶜ at 10–40 m.
++#
++#   julia +1.13 --project=. analysis/melt_lens.jl [config.toml] [number of days, default 30]
++#
++# Why (25 Nov 2026): in the four-month NEMO run the Beaufort Gyre, Central Arctic, Archipelago and Baffin Bay are too
++# salty in the top ~10 m (+0.2 to +0.5) and too fresh at 15–40 m (−0.1 to −0.3), already in the September mean, while
++# the full-depth freshwater content is within 30–70 km³ of GLORYS (freshwater_budget.md, salinity_drift.md): fresh water
++# mixed down, not lost. Two candidates: the ocean (3.8 m top cell, NEMO TKE and a thin lens) or the ice, which is ~40 %
++# too fast (sea_ice_comparison.md), so the ice–ocean stress ∝ |uᵢ − uₒ|² and the TKE input ∝ u★³ are too large. If the
++# dipole grows in steps with the ice speed and u★, it is the ice; if steadily, the ocean.
++#
++# u★ = √c_d |uᵢ − uₒ| with c_d = [sea_ice] ice_ocean_drag_coefficient (default 5.5e-3), from daily means of the ice
++# velocity and the top-level ocean velocity, over cells with more than 15 % ice; the same formula for GLORYS (its top
++# level, ~0.5 m, against the model's top cell). Daily means miss the variance within a day, so both u★ are low; the
++# comparison is like for like. Velocities in each dataset's own frame (the model's grid, GLORYS east/north): speeds and
++# u★ are frame-independent. The model's face velocities are taken at the face west and south of each cell.
++#
++# Reads arctic_ocean.jld2 (S, u, v), arctic_sea_ice.jld2 (ℵ, uᵢ, vᵢ) and, if present, arctic_mixing.jld2 (κᶜ) from
++# `output_dir`; GLORYS daily salinity, ocean velocity and sea ice, regridded onto the model grid each day (on the
++# config's architecture: use a GPU; the 3-D regridding of S, u and v is the slow part, ~1–2 h for 30 days). Writes
++# melt_lens.md to `output_dir` and melt_lens.png to `figure_dir`.
++
++include("../config.jl")
++
++using NumericalEarth, Oceananigans
++using Oceananigans.Architectures: on_architecture
++using Oceananigans.Operators: Azᶜᶜᶜ
++using Oceananigans.OutputReaders: OnDisk
++using NumericalEarth.DataWrangling: BoundingBox, Metadatum
++using CopernicusMarine   # enables the GLORYS download extension
++using CairoMakie, CUDA, Dates, JLD2, Printf, Statistics
++
++arch          = config["architecture"] == "GPU" ? GPU() : CPU()
++start_date    = DateTime(config["time"]["start_date"])
++number_of_days = length(ARGS) ≥ 2 ? parse(Int, ARGS[2]) : 30
++drag_coefficient = get(get(config, "sea_ice", Dict{String, Any}()), "ice_ocean_drag_coefficient", 5.5e-3)
++lens_layer    = (-40.0, -15.0)   # m: the layer that turns too fresh
++mixing_layer  = (-40.0, -10.0)   # m: where κᶜ is averaged
++
++#####
++##### Grid and regions
++#####
++
++St = FieldTimeSeries(ocean_output_file, "S"; backend = OnDisk())
++ut = FieldTimeSeries(ocean_output_file, "u"; backend = OnDisk())
++vt = FieldTimeSeries(ocean_output_file, "v"; backend = OnDisk())
++grid = St.grid
++Nx, Ny, Nz = size(grid)
++ug = grid.underlying_grid
++zf = Float64.(collect(ug.z.cᵃᵃᶠ[1:Nz+1]))
++zc = (zf[1:end-1] .+ zf[2:end]) ./ 2
++bottom_height = grid.immersed_boundary.bottom_height
++hb = [Float64(bottom_height[i, j, 1]) for i in 1:Nx, j in 1:Ny]
++H  = max.(-hb, 0)
++ocean = H .> 0
++λ  = mod.(Array(λnodes(ug, Center(), Center(), Center())) .+ 180, 360) .- 180
++φ  = Array(φnodes(ug, Center(), Center(), Center()))
++A  = [Azᶜᶜᶜ(i, j, 1, ug) for i in 1:Nx, j in 1:Ny]
++
++overlap(a, b, c, d) = max(0.0, min(b, d) - max(a, c))
++wet_thickness = [overlap(zf[k], zf[k+1], hb[i, j], 0.0) for i in 1:Nx, j in 1:Ny, k in 1:Nz]
++
++regions = [("Beaufort Gyre",    (λ, φ, H) -> 70.5 ≤ φ ≤ 80.5 && -170 ≤ λ ≤ -130 && H > 300),
++           ("Central Arctic",   (λ, φ, H) -> φ > 82),
++           ("Siberian shelves", (λ, φ, H) -> 66 ≤ φ ≤ 82 && (λ ≥ 60 || λ ≤ -170) && H < 200),
++           ("Archipelago",      (λ, φ, H) -> 68 ≤ φ ≤ 82 && -125 ≤ λ ≤ -80),
++           ("Baffin Bay",       (λ, φ, H) -> 67 ≤ φ ≤ 78 && -80 < λ ≤ -55)]
++region_names = first.(regions)
++Nr = length(regions)
++masks = [[ocean[i, j] && test(λ[i, j], φ[i, j], H[i, j]) for i in 1:Nx, j in 1:Ny] for (_, test) in regions]
++
++# Volume-weighted region mean of a 3-D field at each level, and over a layer (NaN where there is no water)
++function region_profile(c, mask)
++    profile = fill(NaN, Nz)
++    for k in 1:Nz
++        w = A .* wet_thickness[:, :, k] .* mask
++        W = sum(w)
++        W > 0 && (profile[k] = sum(w .* c[:, :, k]) / W)
++    end
++    return profile
++end
++
++function layer_mean(profile, layer)
++    weights = [overlap(zf[k], zf[k+1], layer...) for k in 1:Nz]
++    keep = isfinite.(profile) .& (weights .> 0)
++    return any(keep) ? sum(profile[keep] .* weights[keep]) / sum(weights[keep]) : NaN
++end
++
++# Mean speed and mean u★ over the cells of `mask` with more than 15 % ice
++function ice_statistics(ℵ, uᵢ, vᵢ, uₒ, vₒ, mask)
++    clean(x) = ifelse(isfinite(x), x, 0.0)
++    ice = mask .& (clean.(ℵ) .> 0.15)
++    any(ice) || return (speed = NaN, u★ = NaN)
++    speed = sqrt.(clean.(uᵢ) .^ 2 .+ clean.(vᵢ) .^ 2)
++    u★ = sqrt(drag_coefficient) .* sqrt.((clean.(uᵢ) .- clean.(uₒ)) .^ 2 .+ (clean.(vᵢ) .- clean.(vₒ)) .^ 2)
++    return (speed = sum(A[ice] .* speed[ice]) / sum(A[ice]), u★ = sum(A[ice] .* u★[ice]) / sum(A[ice]))
++end
++
++#####
++##### The model, day by day
++#####
++
++# Record of the daily average ending at the end of day d (times are saved at the end of each window)
++record_of(times, d) = findfirst(t -> abs(t - d * 86400) < 600, times)
++
++# Sea ice, read from the file directly (its grid is not saved with it), interior of each 2-D array
++function interior_part(a)
++    a = ndims(a) == 3 ? a[:, :, 1] : a
++    hx, hy = (size(a, 1) - Nx) ÷ 2, (size(a, 2) - Ny) ÷ 2
++    return Float64.(a[hx+1:hx+Nx, hy+1:hy+Ny])
++end
++sea_ice_file = joinpath(output_dir, "arctic_sea_ice.jld2")
++model_ice = jldopen(sea_ice_file) do f
++    iterations = sort(filter(!=("serialized"), keys(f["timeseries/t"])), by = s -> parse(Int, s))
++    t = [f["timeseries/t/$i"] for i in iterations]
++    Dict(d => Dict(name => interior_part(f["timeseries/$name/$(iterations[record_of(t, d)])"]) for name in ("ℵ", "uᵢ", "vᵢ"))
++         for d in 1:number_of_days)
++end
++
++mixing_file = joinpath(output_dir, "arctic_mixing.jld2")
++κt = isfile(mixing_file) ? FieldTimeSeries(mixing_file, "κc"; backend = OnDisk()) : nothing
++
++model_profiles = [zeros(Nz, number_of_days) for _ in 1:Nr]
++model_speed    = zeros(number_of_days, Nr)
++model_u★       = zeros(number_of_days, Nr)
++model_κ        = fill(NaN, number_of_days, Nr)
++for d in 1:number_of_days
++    n = record_of(St.times, d)
++    S  = Float64.(Array(interior(St[n])))
++    uₒ = Float64.(Array(interior(ut[n], :, :, Nz)))[1:Nx, 1:Ny, 1]
++    vₒ = Float64.(Array(interior(vt[n], :, :, Nz)))[1:Nx, 1:Ny, 1]
++    ice = model_ice[d]
++    for (r, mask) in enumerate(masks)
++        model_profiles[r][:, d] = region_profile(S, mask)
++        statistics = ice_statistics(ice["ℵ"], ice["uᵢ"], ice["vᵢ"], uₒ, vₒ, mask)
++        model_speed[d, r] = statistics.speed
++        model_u★[d, r]    = statistics.u★
++    end
++    if !isnothing(κt)
++        κ = Float64.(Array(interior(κt[record_of(κt.times, d)])))
++        levels = κt.indices[3]
++        for (r, mask) in enumerate(masks)
++            values = [mean(κ[:, :, m][mask]) for (m, k) in enumerate(levels) if mixing_layer[1] ≤ zc[k] ≤ mixing_layer[2]]
++            model_κ[d, r] = isempty(values) ? NaN : mean(values)
++        end
++    end
++    @info "Model, day $d"
++end
++
++#####
++##### GLORYS, day by day, on the model grid
++#####
++
++glorys_region = BoundingBox(longitude = (-180, 180), latitude = (43, 90))
++target = on_architecture(arch, grid)
++function glorys_on_grid(name, date; surface = false)
++    field = surface ? Field{Center, Center, Nothing}(target) : CenterField(target)
++    set!(field, Metadatum(name; dataset = GLORYSDaily(), date, region = glorys_region, dir_kw...))
++    values = Float64.(Array(interior(field)))
++    return surface ? values[:, :, 1] : values
++end
++
++glorys_profiles = [zeros(Nz, number_of_days) for _ in 1:Nr]
++glorys_speed    = zeros(number_of_days, Nr)
++glorys_u★       = zeros(number_of_days, Nr)
++for d in 1:number_of_days
++    date = start_date + Day(d - 1)
++    S  = glorys_on_grid(:salinity, date)
++    uₒ = glorys_on_grid(:u_velocity, date)[:, :, Nz]
++    vₒ = glorys_on_grid(:v_velocity, date)[:, :, Nz]
++    ℵ  = glorys_on_grid(:sea_ice_concentration, date; surface = true)
++    uᵢ = glorys_on_grid(:sea_ice_u_velocity, date; surface = true)
++    vᵢ = glorys_on_grid(:sea_ice_v_velocity, date; surface = true)
++    for (r, mask) in enumerate(masks)
++        glorys_profiles[r][:, d] = region_profile(S, mask)
++        statistics = ice_statistics(ℵ, uᵢ, vᵢ, uₒ, vₒ, mask)
++        glorys_speed[d, r] = statistics.speed
++        glorys_u★[d, r]    = statistics.u★
++    end
++    @info "GLORYS, $(Date(date)): on the model grid"
++end
++
++ΔS_surface = [model_profiles[r][Nz, d] - glorys_profiles[r][Nz, d] for d in 1:number_of_days, r in 1:Nr]
++ΔS_lens    = [layer_mean(model_profiles[r][:, d], lens_layer) - layer_mean(glorys_profiles[r][:, d], lens_layer)
++              for d in 1:number_of_days, r in 1:Nr]
++
++#####
++##### Table
++#####
++
++# Does the surface excess grow on the days the model's stirring exceeds GLORYS's? Correlation over the days of
++# d(ΔS surface)/dt with the excess of u★³ (model − GLORYS).
++function growth_correlation(r)
++    growth = diff(ΔS_surface[:, r])
++    excess = (model_u★[2:end, r] .^ 3 .- glorys_u★[2:end, r] .^ 3)
++    keep = isfinite.(growth) .& isfinite.(excess)
++    return count(keep) > 3 ? cor(growth[keep], excess[keep]) : NaN
++end
++
++io = IOBuffer()
++println(io, "# Melt lens: $experiment, first $number_of_days days from $(Date(start_date))\n")
++println(io, "Region means, model / GLORYS, daily. ΔS: model − GLORYS salinity at the surface (top level) and over ",
++            "$(Int(-lens_layer[2]))–$(Int(-lens_layer[1])) m. Ice speed and u★ = √c_d |uᵢ − uₒ| (c_d = $drag_coefficient) in cm/s, ",
++            "over cells with more than 15 % ice, from daily means. κᶜ: the model's mean over $(Int(-mixing_layer[2]))–",
++            "$(Int(-mixing_layer[1])) m (m²/s).\n")
++println(io, "| Region | Day | ΔS surface | ΔS $(Int(-lens_layer[2]))–$(Int(-lens_layer[1])) m | Ice speed | u★ | κᶜ |")
++println(io, "|---|---|---|---|---|---|---|")
++for r in 1:Nr, d in filter(≤(number_of_days), [1, 2, 3, 5, 7, 10, 15, 20, 25, 30])
++    println(io, @sprintf("| %s | %d | %+.3f | %+.3f | %.1f / %.1f | %.2f / %.2f | %.1e |", region_names[r], d,
++                         ΔS_surface[d, r], ΔS_lens[d, r], 100model_speed[d, r], 100glorys_speed[d, r],
++                         100model_u★[d, r], 100glorys_u★[d, r], model_κ[d, r]))
++end
++println(io, "\nCorrelation over the days of the daily growth of the surface excess with the excess of u★³ ",
++            "(model − GLORYS); near +1: the excess grows when the model stirs harder than GLORYS.\n")
++println(io, "| Region | Correlation | Mean u★, model / GLORYS (cm/s) | Mean ice speed, model / GLORYS (cm/s) |")
++println(io, "|---|---|---|---|")
++for r in 1:Nr
++    println(io, @sprintf("| %s | %+.2f | %.2f / %.2f | %.1f / %.1f |", region_names[r], growth_correlation(r),
++                         100mean(filter(isfinite, model_u★[:, r])), 100mean(filter(isfinite, glorys_u★[:, r])),
++                         100mean(filter(isfinite, model_speed[:, r])), 100mean(filter(isfinite, glorys_speed[:, r]))))
++end
++
++table_text = String(take!(io))
++print(table_text)
++table_file = joinpath(output_dir, "melt_lens.md")
++write(table_file, table_text)
++@info "Wrote $table_file"
++
++#####
++##### Figure: one column per region
++#####
++
++run_day = (1:number_of_days) .- 0.5
++upper = findall(>(-60), zc)
++profile_days = filter(≤(number_of_days), [1, 2, 3, 5, 10, 20, 30])
++colors = cgrad(:viridis, length(profile_days); categorical = true)
++fig = Figure(size = (330 * Nr, 1300))
++for r in 1:Nr
++    ax = Axis(fig[1, r]; title = region_names[r], ylabel = r == 1 ? "ΔS (g/kg)" : "")
++    hlines!(ax, 0; color = :black, linewidth = 0.5)
++    lines!(ax, run_day, ΔS_surface[:, r]; color = :red, label = "surface")
++    lines!(ax, run_day, ΔS_lens[:, r]; color = :blue, label = "$(Int(-lens_layer[2]))–$(Int(-lens_layer[1])) m")
++    r == 1 && axislegend(ax; position = :lb, framevisible = false, labelsize = 10)
++
++    ax = Axis(fig[2, r]; ylabel = r == 1 ? "ice speed (cm/s)" : "")
++    lines!(ax, run_day, 100model_speed[:, r]; color = :red, label = "model")
++    lines!(ax, run_day, 100glorys_speed[:, r]; color = :black, label = "GLORYS")
++    r == 1 && axislegend(ax; position = :lt, framevisible = false, labelsize = 10)
++
++    ax = Axis(fig[3, r]; ylabel = r == 1 ? "u★ under ice (cm/s)" : "")
++    lines!(ax, run_day, 100model_u★[:, r]; color = :red)
++    lines!(ax, run_day, 100glorys_u★[:, r]; color = :black)
++
++    ax = Axis(fig[4, r]; ylabel = r == 1 ? "κᶜ, $(Int(-mixing_layer[2]))–$(Int(-mixing_layer[1])) m (m²/s)" : "",
++              xlabel = "days since $(Date(start_date))", yscale = log10)
++    all(isnan, model_κ[:, r]) || lines!(ax, run_day, max.(model_κ[:, r], 1e-6); color = :red)
++
++    ax = Axis(fig[5, r]; xlabel = "ΔS (g/kg)", ylabel = r == 1 ? "z (m)" : "", limits = (nothing, (-60, 0)))
++    vlines!(ax, 0; color = :black, linewidth = 0.5)
++    for (c, d) in enumerate(profile_days)
++        Δ = model_profiles[r][:, d] .- glorys_profiles[r][:, d]
++        scatterlines!(ax, Δ[upper], zc[upper]; color = colors[c], markersize = 4, label = "day $d")
++    end
++    r == 1 && axislegend(ax; position = :rb, framevisible = false, labelsize = 9)
++end
++Label(fig[0, :], "$experiment: model − GLORYS near the surface, the sea ice and the mixing, first $number_of_days days";
++      fontsize = 18)
++file = joinpath(figure_dir, "melt_lens.png")
++save(file, fig)
++@info "Wrote $file"
+-- 
+2.43.0
+
