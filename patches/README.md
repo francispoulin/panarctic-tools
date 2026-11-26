@@ -120,6 +120,8 @@ Numbered in the order to apply, across repositories. Each was checked to apply w
 | 113 | PanArcticShenanigans | `fjp/test-098` | after 112 | `tools/start_runners.sh` refuses a GPU that is not a number (a literal `B` restarted a failing runner every 30 s); `analysis/restart_check.jl` stops with a clear message when a run has no output yet |
 | 114 | PanArcticShenanigans | `fjp/test-098` | after 113 | `analysis/restart_check.jl`: no pass unless the restarted run reaches the reference's last day (passed on days 0–3 only, before part b had written anything) |
 | 115 | NumericalEarth.jl | `fjp/net-inflow-0.9.4` (#975); also applies on `main` | 117ae7c | `docs/Project.toml`: Terrarium compat `"0.1.10, 0.2"` (missed in #968). The workspace (docs, examples, test) is resolved together, so docs' `"0.1.10"` broke every CI job that instantiates test once Terrarium main became 0.2.0-DEV |
+| 116 | NumericalEarth.jl | `fjp/net-inflow-0.9.4` (#975) | f96285c (after 115) | `docs/Project.toml`: SpeedyWeather compat `"0.23, 0.24, 0.25, 0.26"` as in test/: Terrarium main (0.2.0-DEV) now needs SpeedyWeatherInternals 1.0.1, which SpeedyWeather ≤ 0.24 does not allow; the workspace is resolved as a whole |
+| 117 | PanArcticShenanigans | `fjp/test-098` | after 114 | `config_smoke_restart_b_cpu.toml`: restart test part b on the CPU, for a stack trace of the DomainError after the restore (`-g2` fails: ptxas rejects non-ASCII names) |
 
 ## Applying 001–006
 

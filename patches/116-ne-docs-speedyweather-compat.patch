@@ -1,0 +1,31 @@
+From 9547b1f709bbece05ba1bfa39bb19ba558fcba2d Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 26 Nov 2026 17:22:03 -0500
+Subject: [PATCH] docs/Project.toml: SpeedyWeather compat up to 0.26, as in
+ Project.toml and test/
+
+Terrarium's main (0.2.0-DEV, taken from git by the workspace) now requires SpeedyWeatherInternals 1.0.1, which
+SpeedyWeather 0.23-0.24 do not allow. The workspace (docs, examples, test) is resolved as a whole, so docs' older
+SpeedyWeather compat made instantiating the test environment unsatisfiable. Project.toml allows 0.22-0.26 and
+test/ 0.23-0.26; docs/ now matches test/.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AbhhvpxdTuD5JaD3hFhzdz
+---
+ docs/Project.toml | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/docs/Project.toml b/docs/Project.toml
+index af4a0abc..50966122 100755
+--- a/docs/Project.toml
++++ b/docs/Project.toml
+@@ -50,5 +50,5 @@ Enzyme = "0.13.166"
+ Literate = "2.2"
+ Oceananigans = "0.117.2, 0.118"
+ Reactant = "0.2.278"
+-SpeedyWeather = "0.23, 0.24"
++SpeedyWeather = "0.23, 0.24, 0.25, 0.26"
+ Terrarium = "0.1.10, 0.2"
+-- 
+2.43.0
+
