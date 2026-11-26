@@ -1,0 +1,52 @@
+From 973e28ee73c14a4b9c2f8befc1ca4899d8ad129f Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 26 Nov 2026 12:10:26 -0500
+Subject: [PATCH] start_runners.sh refuses a GPU that is not a number;
+ restart_check.jl says when a run has no output yet
+
+On 26 Nov `start_runners.sh B` (a placeholder taken literally) started a runner whose Julia failed at
+parse(Int, "B") and was restarted every 30 s by runner_loop.sh, without claiming any job. restart_check.jl, run before
+the jobs had run, failed writing into a folder that did not exist.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AbhhvpxdTuD5JaD3hFhzdz
+---
+ analysis/restart_check.jl | 5 +++++
+ tools/start_runners.sh    | 5 +++++
+ 2 files changed, 10 insertions(+)
+
+diff --git a/analysis/restart_check.jl b/analysis/restart_check.jl
+index 23c9b78..aa26901 100644
+--- a/analysis/restart_check.jl
++++ b/analysis/restart_check.jl
+@@ -31,6 +31,11 @@ function largest_difference(a, b)
+     return maximum(abs.(a[both] .- b[both]))
+ end
+ 
++for experiment in (restarted, reference)
++    isfile(joinpath(output_root, experiment, "arctic_ocean.jld2")) ||
++        error("output/$experiment has no arctic_ocean.jld2 yet: has its run finished? (bash tools/qstat.sh)")
++end
++
+ io = IOBuffer()
+ println(io, "# Restart check: $restarted (restarted) against $reference (in one go)\n")
+ verdicts = Bool[]
+diff --git a/tools/start_runners.sh b/tools/start_runners.sh
+index 9fbda35..4a56c04 100755
+--- a/tools/start_runners.sh
++++ b/tools/start_runners.sh
+@@ -10,6 +10,11 @@ root=$(pwd)
+ host=$(hostname -s)
+ gpus=${*:-0 1 2 3}
+ mkdir -p ~/logs/old
++for g in $gpus; do
++    case "$g" in
++        ''|*[!0-9]*) echo "GPU \"$g\" is not a number (GPUs are numbered as in nvidia-smi: 0, 1, 2, 3); nothing started"; exit 1 ;;
++    esac
++done
+ for g in $gpus; do
+     s="runner-$host-g$g"
+     if tmux has-session -t "$s" 2>/dev/null; then
+-- 
+2.43.0
+
