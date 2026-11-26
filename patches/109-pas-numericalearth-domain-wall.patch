@@ -1,0 +1,31 @@
+From aff0172da4a22d4157fda7273eee40e0b486e67d Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 26 Nov 2026 07:07:14 -0500
+Subject: [PATCH] Manifest: NumericalEarth fjp/net-inflow-0.9.4 with
+ domain_wall (patch 108)
+
+Tree 1f4bbfb: the merged branch plus the rename that lets NumericalEarth precompile again
+(main's on_domain_boundary fallback overwrote the ocean bands' one).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AbhhvmHjZYCHhFxumZ9A47
+---
+ Manifest.toml | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/Manifest.toml b/Manifest.toml
+index 28d55f3..e5f1624 100644
+--- a/Manifest.toml
++++ b/Manifest.toml
+@@ -1836,7 +1836,7 @@ version = "1.3.0"
+ 
+ [[deps.NumericalEarth]]
+ deps = ["Accessors", "Adapt", "CFTime", "ClimaSeaIce", "CodecZlib", "CubedSphere", "DataDeps", "Dates", "Distances", "DocStringExtensions", "Downloads", "GPUArraysCore", "Glob", "ImageMorphology", "JLD2", "KernelAbstractions", "LibCURL", "MeshArrays", "NCDatasets", "NetworkOptions", "Oceananigans", "OffsetArrays", "PrecompileTools", "Printf", "Scratch", "SeawaterPolynomials", "StaticArrays", "Statistics", "Tar", "Thermodynamics", "ZipFile"]
+-git-tree-sha1 = "b4f7bf6fd0fd137243c55b1f1e35ec4a01baf416"
++git-tree-sha1 = "1f4bbfb559176ca27b18d8b2769d2571ed470a44"
+ repo-rev = "fjp/net-inflow-0.9.4"
+ repo-url = "https://github.com/NumericalEarth/NumericalEarth.jl"
+ uuid = "904d977b-046a-4731-8b86-9235c0d1ef02"
+-- 
+2.43.0
+

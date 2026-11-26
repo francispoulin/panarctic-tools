@@ -112,6 +112,8 @@ Numbered in the order to apply, across repositories. Each was checked to apply w
 | 105 | NumericalEarth | `fjp/net-inflow-0.9.4` (PR #975) | after 096 | cherry-pick of main's #968 (Terrarium compat "0.1.10, 0.2"): CI's test environment pulls Terrarium from its `main`, now 0.2.0-DEV **Superseded by 106; do not apply.** |
 | 106 | NumericalEarth | `fjp/net-inflow-0.9.4` (PR #975) | on f2e7db8 (bundle; fast-forward) | merge current main (#968 … #748; conflicts in Bathymetry: native_bottom_height kept, reading static bathymetry through main's retrieve_bathymetry); `$(SIGNATURES)` for hydrostatic_ocean_model / _simulation |
 | 107 | PanArcticShenanigans | `fjp/test-098` | after 098 | Manifest: NumericalEarth tree b4f7bf6 (106); smoke test `config_smoke_test_ne094.toml` |
+| 108 | NumericalEarth | `fjp/net-inflow-0.9.4` (PR #975) | after the merge of 106 | rename the ocean bands' `on_domain_boundary` to `domain_wall`: main's (#924) generic fallback overwrote it and broke precompilation |
+| 109 | PanArcticShenanigans | `fjp/test-098` | after 107 | Manifest: NumericalEarth tree 1f4bbfb (108) |
 
 ## Applying 001–006
 

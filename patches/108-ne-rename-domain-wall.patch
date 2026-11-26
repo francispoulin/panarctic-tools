@@ -1,0 +1,45 @@
+From 5abc107239f9f7c87edab3b32081c0470860ba95 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 26 Nov 2026 07:06:31 -0500
+Subject: [PATCH] Rename the ocean bands' on_domain_boundary to domain_wall
+
+Merging main brought #924's on_domain_boundary(topology, ::Type{<:AbstractBoundarySide}) into
+NestedModels, whose fallback on_domain_boundary(topology, SideType) = true overwrote ours,
+on_domain_boundary(T, side) = false, and broke precompilation ("Method overwriting is not
+permitted"). The two answer different questions: #924's whether a side is not a rank seam
+(Periodic counts), ours whether a side is a Closed or Open wall of the whole domain, the sides
+that get boundary bands (Periodic does not). Ours becomes domain_wall.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AbhhvmHjZYCHhFxumZ9A47
+---
+ src/NestedModels/ocean_boundary_bands.jl | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/src/NestedModels/ocean_boundary_bands.jl b/src/NestedModels/ocean_boundary_bands.jl
+index 47f52c88..325ce484 100644
+--- a/src/NestedModels/ocean_boundary_bands.jl
++++ b/src/NestedModels/ocean_boundary_bands.jl
+@@ -256,8 +256,8 @@ end
+ 
+ # Whether `side` of a grid with topology `T` in its direction is a wall of the whole domain: a `Closed` or `Open`
+ # side, not one `Connected` to another rank of a distributed grid.
+-on_domain_boundary(::Type{TwoSided{L, R}}, side) where {L, R} = wall_side(ifelse(side ∈ (:west, :south), L, R))
+-on_domain_boundary(T, side) = false
++domain_wall(::Type{TwoSided{L, R}}, side) where {L, R} = wall_side(ifelse(side ∈ (:west, :south), L, R))
++domain_wall(T, side) = false
+ 
+ wall_side(::Type{<:Union{Closed, Open}}) = true
+ wall_side(S) = false
+@@ -271,7 +271,7 @@ sides of the local rank that lie on the edge of the global domain.
+ function domain_boundary_sides(grid, sides)
+     TX, TY, _ = topology(grid)
+     side_topology(side) = boundary_dimension(side) == 1 ? TX : TY
+-    return Tuple(side for side in sides if on_domain_boundary(side_topology(side), side))
++    return Tuple(side for side in sides if domain_wall(side_topology(side), side))
+ end
+ 
+ @kernel function _compute_wet_surface_cells!(wet, grid, Nz)
+-- 
+2.43.0
+
