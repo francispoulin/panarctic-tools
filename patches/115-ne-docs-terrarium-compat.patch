@@ -1,0 +1,30 @@
+From 59dfb905cd85371b08f078e69b230cb77d1dbfde Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 26 Nov 2026 17:11:29 -0500
+Subject: [PATCH] docs/Project.toml: Terrarium compat 0.1.10, 0.2 (missed in
+ #968)
+
+The root Project.toml declares a workspace (docs, examples, test), so instantiating the test environment resolves
+docs' compat too. #968 allowed Terrarium 0.2 in Project.toml, test/ and examples/ but not docs/, where Terrarium comes
+from its main branch (now 0.2.0-DEV): every CI job that instantiates test fails with
+"empty intersection between Terrarium@0.2.0+DEV and project compatibility 0.1.10 - 0.1".
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AbhhvpxdTuD5JaD3hFhzdz
+---
+ docs/Project.toml | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/docs/Project.toml b/docs/Project.toml
+index 2032cf5a..af4a0abc 100755
+--- a/docs/Project.toml
++++ b/docs/Project.toml
+@@ -51,4 +51,4 @@ Literate = "2.2"
+ Oceananigans = "0.117.2, 0.118"
+ Reactant = "0.2.278"
+ SpeedyWeather = "0.23, 0.24"
+-Terrarium = "0.1.10"
++Terrarium = "0.1.10, 0.2"
+-- 
+2.43.0
+

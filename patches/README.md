@@ -119,6 +119,7 @@ Numbered in the order to apply, across repositories. Each was checked to apply w
 | 112 | PanArcticShenanigans | `fjp/test-098` (worktree `panarctic-098`) | after 110 (098) | Hindcast configs for #51: `config_hindcast_2004_2006_nemo_nz100.toml` (spin-up Sep 2004 – Aug 2005 + the Tsubouchi year) and `config_hindcast_2005_2006_nemo_nz100_nospinup.toml` (twin); `[time] build_only` + `config_download_hindcast_2004_2006.toml` (download job); restart test `config_smoke_restart_{a,b,ref}.toml` + `analysis/restart_check.jl`; `[output] checkpoint_cleanup` (keep the latest checkpoint only); `[output] scorecard = false` (runner skips the scorecard) |
 | 113 | PanArcticShenanigans | `fjp/test-098` | after 112 | `tools/start_runners.sh` refuses a GPU that is not a number (a literal `B` restarted a failing runner every 30 s); `analysis/restart_check.jl` stops with a clear message when a run has no output yet |
 | 114 | PanArcticShenanigans | `fjp/test-098` | after 113 | `analysis/restart_check.jl`: no pass unless the restarted run reaches the reference's last day (passed on days 0–3 only, before part b had written anything) |
+| 115 | NumericalEarth.jl | `fjp/net-inflow-0.9.4` (#975); also applies on `main` | 117ae7c | `docs/Project.toml`: Terrarium compat `"0.1.10, 0.2"` (missed in #968). The workspace (docs, examples, test) is resolved together, so docs' `"0.1.10"` broke every CI job that instantiates test once Terrarium main became 0.2.0-DEV |
 
 ## Applying 001–006
 
