@@ -114,6 +114,7 @@ Numbered in the order to apply, across repositories. Each was checked to apply w
 | 107 | PanArcticShenanigans | `fjp/test-098` | after 098 | Manifest: NumericalEarth tree b4f7bf6 (106); smoke test `config_smoke_test_ne094.toml` |
 | 108 | NumericalEarth | `fjp/net-inflow-0.9.4` (PR #975) | after the merge of 106 | rename the ocean bands' `on_domain_boundary` to `domain_wall`: main's (#924) generic fallback overwrote it and broke precompilation |
 | 109 | PanArcticShenanigans | `fjp/test-098` | after 107 | Manifest: NumericalEarth tree 1f4bbfb (108) |
+| 110 | PanArcticShenanigans | `fjp/test-061` and `fjp/test-098` | after 104 (061), after 109 (098) | `tools/start_runners.sh`: fresh runner log per start, previous kept in `~/logs/old/` |
 
 ## Applying 001–006
 

@@ -1,0 +1,54 @@
+From 8415153e3827c82026628bfdd08028e0f39f1f64 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 26 Nov 2026 07:16:48 -0500
+Subject: [PATCH] start_runners.sh: a fresh log for each runner start, the old
+ one kept in ~/logs/old/
+
+The runner logs ~/logs/runner-<host>-g<gpu>.log were appended to across days and worktrees, so an
+old failure (e.g. 24 Nov's smoke_test_nemo) looked like a current one. Now each start moves the
+previous log to ~/logs/old/runner-<host>-g<gpu>-<date-time>.log and begins the new one with a
+line naming the runner, the time and the worktree. A runner that is already running keeps its log.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AbhhvmHjZYCHhFxumZ9A47
+---
+ tools/start_runners.sh | 10 +++++++---
+ 1 file changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/tools/start_runners.sh b/tools/start_runners.sh
+index 665114f..9fbda35 100755
+--- a/tools/start_runners.sh
++++ b/tools/start_runners.sh
+@@ -1,6 +1,7 @@
+ #!/bin/bash
+ # Start one queue runner per GPU on this server, each in its own tmux session runner-<host>-g<gpu>, logged to
+-# ~/logs/runner-<host>-g<gpu>.log. Default: all four GPUs. Runners stop by themselves after the queue has been empty for
++# ~/logs/runner-<host>-g<gpu>.log. Each start begins a fresh log; the previous one is kept in
++# ~/logs/old/runner-<host>-g<gpu>-<date-time>.log. Default: all four GPUs. Runners stop by themselves after the queue has been empty for
+ # 15 min ($PANARCTIC_IDLE_MINUTES), and wait while someone else uses their GPU.
+ #     bash tools/start_runners.sh            # GPUs 0 1 2 3
+ #     bash tools/start_runners.sh 2 3        # only GPUs 2 and 3
+@@ -8,15 +9,18 @@ cd "$(dirname "$0")/.." || exit 1
+ root=$(pwd)
+ host=$(hostname -s)
+ gpus=${*:-0 1 2 3}
+-mkdir -p ~/logs
++mkdir -p ~/logs/old
+ for g in $gpus; do
+     s="runner-$host-g$g"
+     if tmux has-session -t "$s" 2>/dev/null; then
+         echo "$s is already running"
+         continue
+     fi
++    log=~/logs/$s.log
++    [ -s "$log" ] && mv "$log" ~/logs/old/$s-$(date +%Y%m%d-%H%M%S).log
++    echo "== $s started $(date '+%Y-%m-%d %H:%M') in $root" > "$log"
+     tmux new-session -d -s "$s"
+-    tmux pipe-pane -o -t "$s" "cat >> ~/logs/$s.log"
++    tmux pipe-pane -o -t "$s" "cat >> $log"
+     tmux send-keys -t "$s" "ocean_setup && cd $root && bash tools/runner_loop.sh $g; exit" Enter
+     echo "started $s (log: ~/logs/$s.log)"
+ done
+-- 
+2.43.0
+
