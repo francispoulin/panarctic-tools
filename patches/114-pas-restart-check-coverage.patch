@@ -1,0 +1,37 @@
+From 4be384f78a29c4dc0a46b7b8192f6fb892ecb795 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 26 Nov 2026 15:08:18 -0500
+Subject: [PATCH] restart_check.jl: no pass unless the restarted run reaches
+ the reference's last day
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+On 26 Nov it passed comparing only days 0–3, all from part a, while part b (days 3–5) had not yet appended anything.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AbhhvpxdTuD5JaD3hFhzdz
+---
+ analysis/restart_check.jl | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/analysis/restart_check.jl b/analysis/restart_check.jl
+index aa26901..c61afcc 100644
+--- a/analysis/restart_check.jl
++++ b/analysis/restart_check.jl
+@@ -53,6 +53,12 @@ for (component, names) in (("arctic_ocean.jld2", ("T", "S", "u", "v", "η")), ("
+     println(io, "## $component\n")
+     println(io, "Record times (days): $restarted ", join((@sprintf("%.2f", d) for d in days_a), ", "),
+                 "; $reference ", join((@sprintf("%.2f", d) for d in days_b), ", "))
++    # The restarted run must reach the reference's last day; otherwise nothing after the restart is compared
++    short = isempty(days_a) || maximum(days_a) < maximum(days_b) - 0.01
++    short && println(io, "\n**$restarted ends at day $(round(maximum(days_a; init = 0.0), digits = 2)), $reference at day ",
++                         "$(round(maximum(days_b), digits = 2)): the restarted part is not in the file (still running, ",
++                         "or written elsewhere).**")
++    push!(verdicts, !short)
+     repeated = length(unique(round.(days_a, digits = 3))) < length(days_a)
+     repeated && println(io, "\n**$restarted has a repeated record time (a day written twice after the restart).**")
+     push!(verdicts, !repeated)
+-- 
+2.43.0
+
