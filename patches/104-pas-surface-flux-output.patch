@@ -1,0 +1,364 @@
+From 50f40639f205f98a93fd7ea1d5c4addb23193a73 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 25 Nov 2026 23:12:43 -0500
+Subject: [PATCH] [output] surface_fluxes: the ocean's net surface fluxes of T
+ and S, daily; a 30-day NEMO run with them
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+panarctic.jl: with [output] surface_fluxes = true, averages over average_hours of NumericalEarth's
+net_fluxes of the child (T, S and the freshwater volume flux η, those that are fields) in
+arctic_surface_fluxes.jld2. melt_lens.jl reads it when present: freshening under ice Jˢ / S
+(mm/day; negative = brine) and heat loss ρ₀ cₚ Jᵀ (W/m²), table and two figure rows.
+config_smoke_test_fluxes.toml (100 km, 4 days) and
+config_sep2005_30d_nemo_glorys12_nz100_fluxes.toml (September 2005, as the four-month NEMO run).
+
+Why: under ice the top 10 m has κᶜ of 1–40 m²/s from day 1 (melt_lens.md), which only the enhanced
+vertical diffusion (100 m²/s where N² < 0) can give, with e ~1e-4 m²/s² in the top cells: the top
+cells are statically unstable much of the time. Brine (salt into the top cell) or cooling?
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AbhhvmHjZYCHhFxumZ9A47
+---
+ analysis/melt_lens.jl                         | 45 ++++++++-
+ ...ep2005_30d_nemo_glorys12_nz100_fluxes.toml | 98 +++++++++++++++++++
+ config_smoke_test_fluxes.toml                 | 89 +++++++++++++++++
+ panarctic.jl                                  | 15 +++
+ 4 files changed, 244 insertions(+), 3 deletions(-)
+ create mode 100644 config_sep2005_30d_nemo_glorys12_nz100_fluxes.toml
+ create mode 100644 config_smoke_test_fluxes.toml
+
+diff --git a/analysis/melt_lens.jl b/analysis/melt_lens.jl
+index ce65c2c..4e8fae4 100644
+--- a/analysis/melt_lens.jl
++++ b/analysis/melt_lens.jl
+@@ -1,7 +1,8 @@
+ # When does the surface fresh layer get mixed down, and does it follow the sea ice? Daily, over the first days of a
+ # run, in the ice-covered regions: the model − GLORYS salinity at the surface and at 15–40 m, the ice speed and the
+ # under-ice friction velocity u★ (model and GLORYS), the model's κᶜ at 0–10 m and 10–40 m, and its κᶜ and TKE e
+-# profiles over the top 60 m on the first days (is the top 10 m mixed through on day 1?).
++# profiles over the top 60 m on the first days (is the top 10 m mixed through on day 1?), and, for runs with
++# [output] surface_fluxes, the surface freshening (Jˢ / S, mm/day) and heat loss (W/m²) under ice.
+ #
+ #   julia +1.13 --project=. analysis/melt_lens.jl [config.toml] [number of days, default 30]
+ #
+@@ -18,7 +19,7 @@
+ # comparison is like for like. Velocities in each dataset's own frame (the model's grid, GLORYS east/north): speeds and
+ # u★ are frame-independent. The model's face velocities are taken at the face west and south of each cell.
+ #
+-# Reads arctic_ocean.jld2 (S, u, v), arctic_sea_ice.jld2 (ℵ, uᵢ, vᵢ) and, if present, arctic_mixing.jld2 (κᶜ, e) from
++# Reads arctic_ocean.jld2 (S, u, v), arctic_sea_ice.jld2 (ℵ, uᵢ, vᵢ) and, if present, arctic_mixing.jld2 (κᶜ, e) and arctic_surface_fluxes.jld2 (Jᵀ, Jˢ) from
+ # `output_dir`; GLORYS daily salinity, ocean velocity and sea ice, regridded onto the model grid each day (on the
+ # config's architecture: use a GPU; the 3-D regridding of S, u and v is the slow part, ~1–2 h for 30 days). Writes
+ # melt_lens.md to `output_dir` and melt_lens.png to `figure_dir`.
+@@ -133,6 +134,12 @@ model_κ        = fill(NaN, number_of_days, Nr)
+ model_κ_top    = fill(NaN, number_of_days, Nr)
+ model_κ_profiles = [fill(NaN, length(mixing_levels), number_of_days) for _ in 1:Nr]
+ model_e_profiles = [fill(NaN, length(mixing_levels), number_of_days) for _ in 1:Nr]
++
++flux_file = joinpath(output_dir, "arctic_surface_fluxes.jld2")
++Jˢt = isfile(flux_file) ? FieldTimeSeries(flux_file, "S"; backend = OnDisk()) : nothing
++Jᵀt = isfile(flux_file) ? FieldTimeSeries(flux_file, "T"; backend = OnDisk()) : nothing
++model_freshening = fill(NaN, number_of_days, Nr)   # mm/day of fresh water, Jˢ / S at the surface, over ice
++model_heat_loss  = fill(NaN, number_of_days, Nr)   # W/m², ρ₀ cₚ Jᵀ, over ice
+ function κ_layer_mean(r, d, layer)
+     values = [model_κ_profiles[r][m, d] for (m, k) in enumerate(mixing_levels)
+               if layer[1] ≤ zc[k] ≤ layer[2] && isfinite(model_κ_profiles[r][m, d])]
+@@ -165,6 +172,17 @@ for d in 1:number_of_days
+             model_κ_top[d, r] = κ_layer_mean(r, d, surface_layer)
+         end
+     end
++    if !isnothing(Jˢt)
++        Jˢ = Float64.(Array(interior(Jˢt[record_of(Jˢt.times, d)])))[:, :, 1]
++        Jᵀ = Float64.(Array(interior(Jᵀt[record_of(Jᵀt.times, d)])))[:, :, 1]
++        freshening = Jˢ ./ S[:, :, Nz] .* 86400e3
++        for (r, mask) in enumerate(masks)
++            ice_cells = mask .& (ice["ℵ"] .> 0.15) .& isfinite.(freshening)
++            any(ice_cells) || continue
++            model_freshening[d, r] = sum(A[ice_cells] .* freshening[ice_cells]) / sum(A[ice_cells])
++            model_heat_loss[d, r]  = 1020 * 3991.87 * sum(A[ice_cells] .* Jᵀ[ice_cells]) / sum(A[ice_cells])
++        end
++    end
+     @info "Model, day $d"
+ end
+ 
+@@ -241,6 +259,18 @@ for r in 1:Nr
+                          100mean(filter(isfinite, model_speed[:, r])), 100mean(filter(isfinite, glorys_speed[:, r]))))
+ end
+ 
++if !all(isnan, model_freshening)
++    println(io, "\nSurface fluxes into the ocean under ice (cells with more than 15 % ice), model: freshening Jˢ / S ",
++                "(mm/day of fresh water; negative = brine) and heat loss ρ₀ cₚ Jᵀ (W/m²; positive = the ocean loses heat).\n")
++    println(io, "| Region | " * join(["day $d" for d in filter(≤(number_of_days), [1, 2, 3, 5, 7, 10, 15, 20, 25, 30])], " | ") * " |")
++    println(io, "|---|" * repeat("---|", length(filter(≤(number_of_days), [1, 2, 3, 5, 7, 10, 15, 20, 25, 30]))))
++    for r in 1:Nr
++        cells = [@sprintf("%+.1f mm, %+.0f W", model_freshening[d, r], model_heat_loss[d, r])
++                 for d in filter(≤(number_of_days), [1, 2, 3, 5, 7, 10, 15, 20, 25, 30])]
++        println(io, "| $(region_names[r]) | " * join(cells, " | ") * " |")
++    end
++end
++
+ table_text = String(take!(io))
+ print(table_text)
+ table_file = joinpath(output_dir, "melt_lens.md")
+@@ -255,7 +285,7 @@ run_day = (1:number_of_days) .- 0.5
+ upper = findall(>(-60), zc)
+ profile_days = filter(≤(number_of_days), [1, 2, 3, 5, 10, 20, 30])
+ colors = cgrad(:viridis, length(profile_days); categorical = true)
+-fig = Figure(size = (330 * Nr, 1800))
++fig = Figure(size = (330 * Nr, isnothing(Jˢt) ? 1800 : 2300))
+ for r in 1:Nr
+     ax = Axis(fig[1, r]; title = region_names[r], ylabel = r == 1 ? "ΔS (g/kg)" : "")
+     hlines!(ax, 0; color = :black, linewidth = 0.5)
+@@ -288,6 +318,15 @@ for r in 1:Nr
+     end
+     r == 1 && axislegend(ax; position = :rb, framevisible = false, labelsize = 9)
+ 
++    if !isnothing(Jˢt)
++        ax = Axis(fig[8, r]; ylabel = r == 1 ? "freshening under ice (mm/day)" : "")
++        hlines!(ax, 0; color = :black, linewidth = 0.5)
++        lines!(ax, run_day, model_freshening[:, r]; color = :blue)
++        ax = Axis(fig[9, r]; ylabel = r == 1 ? "heat loss under ice (W/m²)" : "", xlabel = "days since $(Date(start_date))")
++        hlines!(ax, 0; color = :black, linewidth = 0.5)
++        lines!(ax, run_day, model_heat_loss[:, r]; color = :red)
++    end
++
+     isempty(mixing_levels) && continue
+     zm = zc[mixing_levels]
+     for (row, profiles, quantity) in ((6, model_κ_profiles, "κᶜ (m²/s)"), (7, model_e_profiles, "e (m²/s²)"))
+diff --git a/config_sep2005_30d_nemo_glorys12_nz100_fluxes.toml b/config_sep2005_30d_nemo_glorys12_nz100_fluxes.toml
+new file mode 100644
+index 0000000..d471f66
+--- /dev/null
++++ b/config_sep2005_30d_nemo_glorys12_nz100_fluxes.toml
+@@ -0,0 +1,98 @@
++# September 2005 (30 days) of config_sep2005_4mo_nemo_glorys12_nz100.toml (NEMO TKE, GLORYS12 settings, 100 levels;
++# identical to config_sep2005_30d_nemo_glorys12_lim2_nz100.toml) with the ocean's surface fluxes of T and S saved daily
++# ([output] surface_fluxes, patch 104). Why (25 Nov, melt_lens.md): under ice the top 10 m has κᶜ of 1–40 m²/s from
++# day 1, which only the enhanced vertical diffusion (100 m²/s where N² < 0) can give: the top cells are statically
++# unstable a large part of the time. Is it brine (salt flux into the top cell) or cooling? Then
++#   julia +1.13 --project=. analysis/melt_lens.jl config_sep2005_30d_nemo_glorys12_nz100_fluxes.toml
++#   bash tools/submit.sh config_sep2005_30d_nemo_glorys12_nz100_fluxes.toml
++
++architecture = "GPU"   # "GPU" or "CPU"
++experiment   = "sep2005_30d_nemo_glorys12_nz100_fluxes"  # name of the run: output and figures go to output_dir/<experiment> and figure_dir/<experiment>
++
++[grid]
++spacing_km = 15     # largest horizontal grid spacing [km] (at the pole; ~15% finer near the Atlantic edge)
++Nz         = 100    # vertical levels
++depth      = 5000   # maximum depth (m)
++bathymetry       = "GEBCO2026"   # "GEBCO2026" (15″, with IBCAO), "ETOPO" (ETOPO 2022, 60″) or "GLORYS" (GLORYS's own sea floor)
++bottom           = "partial"     # "partial": bottom cells cut at the sea floor; "full": whole cells
++partial_cell_fix = true          # with partial cells: flux-form momentum advection at bottom-cell thickness jumps
++                                 # (Oceananigans.jl#6533), which removes the bottom jets of issue #6532
++
++[time]
++start_date = 2005-09-01   # initial condition (GLORYS); the run starts at 00:00 on this date
++end_date   = 2005-10-01   # the run ends at 00:00 on this date; for short tests a date and time, e.g. 1993-01-01T03:00
++dt_minutes = 10           # time step
++
++[atmosphere]
++jra55 = "multi_year"   # "multi_year": JRA55 for the run's own dates; "repeat_year": the 1990–91 repeat year
++pressure = false           # true: JRA55's sea-level pressure acts on the ocean (nested_pressure_fix.jl). Off for now: with it,
++                           # Fram Strait drifts far from GLORYS (1–5 Jan 1993, 15 km: day 4 −12.4 Sv, GLORYS −2.1, −5.6
++                           # without pressure; the same at 100 km), which looks like an error in the pressure path, not
++                           # physics. Main has had no pressure on the ocean since #43.
++inverse_barometer = false  # with pressure = true: GLORYS's η carries no response to the pressure (issue #37), so add the
++                           # inverse-barometer sea level −(pᵃ − ⟨pᵃ⟩)/(ρ₀g) to GLORYS's η at the open sides (Flather) and
++                           # to the initial free surface; its domain mean is removed, so the volume is unchanged.
++                           # Keep false with pressure = false: then neither the model nor GLORYS feels the pressure
++
++[output]
++average_hours   = 24      # time-averaged output (3D ocean, free surface, sea ice), written to output_dir
++checkpoint_days = 30      # how often the full model state is saved for restarts
++restart         = false   # true: continue from the latest checkpoint in output_dir
++monitor_hours   = 1       # monitor.csv: transports through the open sides, mean η against GLORYS's, volume budget,
++                          # fastest point (plotting/volume_budget.jl, plotting/max_speed.jl); 0 = off
++mixing_depth    = 60      # daily CATKE κᶜ and e over the top this many metres in arctic_mixing.jld2; 0 = off
++post_run_analysis = true  # at the end: clear the model from memory, then the scorecard (scorecard.md)
++surface_fluxes  = true    # daily averages of the ocean surface fluxes of T and S in arctic_surface_fluxes.jld2 (patch 104)
++
++[transports]
++# Volume, heat, salt and freshwater transports through the sections below and the open boundaries (see transports.jl).
++online                = true   # true: computed every time step and averaged over average_hours, written to arctic_transports.jld2
++reference_temperature = 0      # heat transport relative to this temperature (°C)
++reference_salinity    = 34.8   # freshwater transport relative to this salinity (g/kg)
++
++# Each section is a great-circle path through (longitude, latitude) waypoints. Positive transport flows to the right,
++# walking from the first waypoint to the last; these are ordered so that positive is into the Arctic. Both ends should
++# be on land, so the section spans the whole strait on any grid. Check with plotting/transport_sections.jl.
++[transports.sections]
++# Fram Strait follows the mooring array at 78°50′N; intermediate waypoints keep the great circles on that latitude.
++fram_strait         = { lon = [15.0, 10.0, 5.0, 0.0, -5.0, -10.0, -15.0, -20.0],
++                        lat = [78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333] }
++# Barents Sea Opening follows the mooring line from Norway (Fugløya) via Bjørnøya to Sørkapp, Svalbard.
++barents_sea_opening = { lon = [20.0, 19.0, 16.5],  lat = [70.0, 74.45, 77.0] }
++bering_strait       = { lon = [-166.0, -171.0], lat = [66.0, 66.0] }
++davis_strait        = { lon = [-53.0, -63.0],   lat = [67.0, 66.5] }
++
++[paths]
++data_dir   = ""   # where downloads are stored; "" = each dataset's default cache
++output_dir = "output"    # model output: time averages (.jld2), checkpoints and the config; one folder per experiment
++figure_dir = "figures"   # figures and movies from the plotting/ scripts; one folder per experiment
++
++[boundaries]
++velocity_inflow_days = 0.0417   # oblique radiation on u, v: nudging timescale toward GLORYS on inflow (0.0417 days = 1 hour).
++                                # With 1 day, a partial bottom cell on the Atlantic open face drifted to −0.9 m/s
++                                # (GLORYS −0.26); 1 hour removes it and moves the section transports by < 0.1 Sv
++tracer_inflow_km     = 20  # T, S reservoir inflow relaxation length, both open sides
++relaxation_hours     = 6   # T, S and baroclinic u, v relax toward GLORYS in a ~2/3° band along the open sides
++                           # over this timescale; 0 = off (nested_ocean_model's default is 6)
++
++# Volume control (volume_control.jl): the net inflow through the two open sides together is pinned at every barotropic
++# substep, as NEMO and ROMS do; Flather splits it between the sides. Without it the domain's volume drifts from GLORYS's.
++follow_glorys_volume      = true   # true: the net inflow follows GLORYS's domain-mean η, with the surface freshwater handed back
++volume_relaxation_days    = 1      # with follow_glorys_volume: time over which the remaining drift from GLORYS's mean η is removed
++follow_glorys_tendency    = false  # with follow_glorys_volume: true also follows GLORYS's rate of change exactly
++# net_inflow_Sv           = 0.0    # with follow_glorys_volume = false: a constant net inflow instead (Sv, positive into the domain);
++                                   # with neither, Flather alone (no volume control)
++net_inflow_depth_exponent = 0.5    # the pin's correction to each boundary column ∝ Hᵖ: 0 uniform per length, 1 uniform velocity
++                                   # (NEMO, ROMS), 0.5 a uniform shift of GLORYS's η in Flather
++
++[ocean]
++closure = "NEMO"   # NEMO's TKE scheme (patch 085): "CATKE" (default), "NEMO", "RiBased", "TKEDissipation" or "none"
++nemo_parameters = "glorys12"          # "reference" (NEMO 3.6-4.x namelist) or "glorys12" (NEMO 3.1 code defaults; patch 087)
++# nemo_surface_tke = 3.75             # surface TKE = this × u★² (NEMO's rn_ebb; default: the preset's)
++# nemo_convective_diffusivity = 100   # m²/s where N² < 0 (NEMO's rn_evd; 0 = off)
++
++[sea_ice]
++ice_salinity               = 6        # g/kg (default 4)
++ice_ocean_drag_coefficient = 5e-3     # (default 5.5e-3)
++ice_compressive_strength   = 20000    # P*, N/m² (default 27 500)
++albedo                     = "ccsm3"  # "constant" (0.7, default) or "ccsm3" (state-dependent, SeaIceAlbedo)
+diff --git a/config_smoke_test_fluxes.toml b/config_smoke_test_fluxes.toml
+new file mode 100644
+index 0000000..26874ee
+--- /dev/null
++++ b/config_smoke_test_fluxes.toml
+@@ -0,0 +1,89 @@
++# Smoke test of patch 104 ([output] surface_fluxes): config_smoke_test_nemo.toml (100 km, 1–5 September 2005, NEMO)
++# with the ocean's surface fluxes written to arctic_surface_fluxes.jld2. Look for the line
++#   Surface flux output: (:T, :S, :η) in arctic_surface_fluxes.jld2
++# and that the run finishes. Then config_sep2005_30d_nemo_glorys12_nz100_fluxes.toml.
++
++architecture = "GPU"   # "GPU" or "CPU"
++experiment   = "smoke_test_fluxes"  # name of the run: output and figures go to output_dir/<experiment> and figure_dir/<experiment>
++
++[grid]
++spacing_km = 100    # largest horizontal grid spacing [km] (at the pole; ~15% finer near the Atlantic edge)
++Nz         = 20     # vertical levels
++depth      = 5000   # maximum depth (m)
++bathymetry       = "GEBCO2026"   # "GEBCO2026" (15″, with IBCAO), "ETOPO" (ETOPO 2022, 60″) or "GLORYS" (GLORYS's own sea floor)
++bottom           = "partial"     # "partial": bottom cells cut at the sea floor; "full": whole cells
++partial_cell_fix = true          # with partial cells: flux-form momentum advection at bottom-cell thickness jumps
++                                 # (Oceananigans.jl#6533), which removes the bottom jets of issue #6532
++
++[time]
++start_date = 2005-09-01   # initial condition (GLORYS); the run starts at 00:00 on this date
++end_date   = 2005-09-05   # the run ends at 00:00 on this date; for short tests a date and time, e.g. 1993-01-01T03:00
++dt_minutes = 10           # time step
++
++[atmosphere]
++jra55 = "multi_year"   # "multi_year": JRA55 for the run's own dates; "repeat_year": the 1990–91 repeat year
++pressure = false           # true: JRA55's sea-level pressure acts on the ocean (nested_pressure_fix.jl). Off for now: with it,
++                           # Fram Strait drifts far from GLORYS (1–5 Jan 1993, 15 km: day 4 −12.4 Sv, GLORYS −2.1, −5.6
++                           # without pressure; the same at 100 km), which looks like an error in the pressure path, not
++                           # physics. Main has had no pressure on the ocean since #43.
++inverse_barometer = false  # with pressure = true: GLORYS's η carries no response to the pressure (issue #37), so add the
++                           # inverse-barometer sea level −(pᵃ − ⟨pᵃ⟩)/(ρ₀g) to GLORYS's η at the open sides (Flather) and
++                           # to the initial free surface; its domain mean is removed, so the volume is unchanged.
++                           # Keep false with pressure = false: then neither the model nor GLORYS feels the pressure
++
++[output]
++average_hours   = 24      # time-averaged output (3D ocean, free surface, sea ice), written to output_dir
++checkpoint_days = 30      # how often the full model state is saved for restarts
++restart         = false   # true: continue from the latest checkpoint in output_dir
++monitor_hours   = 1       # monitor.csv: transports through the open sides, mean η against GLORYS's, volume budget,
++                          # fastest point (plotting/volume_budget.jl, plotting/max_speed.jl); 0 = off
++surface_fluxes  = true    # daily averages of the ocean surface fluxes of T and S in arctic_surface_fluxes.jld2 (patch 104)
++
++[transports]
++# Volume, heat, salt and freshwater transports through the sections below and the open boundaries (see transports.jl).
++online                = true   # true: computed every time step and averaged over average_hours, written to arctic_transports.jld2
++reference_temperature = 0      # heat transport relative to this temperature (°C)
++reference_salinity    = 34.8   # freshwater transport relative to this salinity (g/kg)
++
++# Each section is a great-circle path through (longitude, latitude) waypoints. Positive transport flows to the right,
++# walking from the first waypoint to the last; these are ordered so that positive is into the Arctic. Both ends should
++# be on land, so the section spans the whole strait on any grid. Check with plotting/transport_sections.jl.
++[transports.sections]
++# Fram Strait follows the mooring array at 78°50′N; intermediate waypoints keep the great circles on that latitude.
++fram_strait         = { lon = [15.0, 10.0, 5.0, 0.0, -5.0, -10.0, -15.0, -20.0],
++                        lat = [78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333] }
++# Barents Sea Opening follows the mooring line from Norway (Fugløya) via Bjørnøya to Sørkapp, Svalbard.
++barents_sea_opening = { lon = [20.0, 19.0, 16.5],  lat = [70.0, 74.45, 77.0] }
++bering_strait       = { lon = [-166.0, -171.0], lat = [66.0, 66.0] }
++davis_strait        = { lon = [-53.0, -63.0],   lat = [67.0, 66.5] }
++
++[paths]
++data_dir   = ""   # where downloads are stored; "" = each dataset's default cache
++output_dir = "output"    # model output: time averages (.jld2), checkpoints and the config; one folder per experiment
++figure_dir = "figures"   # figures and movies from the plotting/ scripts; one folder per experiment
++
++[boundaries]
++velocity_inflow_days = 0.0417   # oblique radiation on u, v: nudging timescale toward GLORYS on inflow (0.0417 days = 1 hour).
++                                # With 1 day, a partial bottom cell on the Atlantic open face drifted to −0.9 m/s
++                                # (GLORYS −0.26); 1 hour removes it and moves the section transports by < 0.1 Sv
++tracer_inflow_km     = 20  # T, S reservoir inflow relaxation length, both open sides
++relaxation_hours     = 6   # T, S and baroclinic u, v relax toward GLORYS in a ~2/3° band along the open sides
++                           # over this timescale; 0 = off (nested_ocean_model's default is 6)
++
++# Volume control (volume_control.jl): the net inflow through the two open sides together is pinned at every barotropic
++# substep, as NEMO and ROMS do; Flather splits it between the sides. Without it the domain's volume drifts from GLORYS's.
++follow_glorys_volume      = true   # true: the net inflow follows GLORYS's domain-mean η, with the surface freshwater handed back
++volume_relaxation_days    = 1      # with follow_glorys_volume: time over which the remaining drift from GLORYS's mean η is removed
++follow_glorys_tendency    = false  # with follow_glorys_volume: true also follows GLORYS's rate of change exactly
++# net_inflow_Sv           = 0.0    # with follow_glorys_volume = false: a constant net inflow instead (Sv, positive into the domain);
++                                   # with neither, Flather alone (no volume control)
++net_inflow_depth_exponent = 0.5    # the pin's correction to each boundary column ∝ Hᵖ: 0 uniform per length, 1 uniform velocity
++                                   # (NEMO, ROMS), 0.5 a uniform shift of GLORYS's η in Flather
++
++[ocean]
++closure = "NEMO"   # NEMO's TKE scheme (patch 085): "CATKE" (default), "NEMO", "RiBased", "TKEDissipation" or "none"
++# nemo_surface_tke = 67.83            # surface TKE = this × u★² (NEMO's rn_ebb)
++# nemo_convective_diffusivity = 100   # m²/s where N² < 0 (NEMO's rn_evd; 0 = off)
++
++[sea_ice]
++ice_ocean_friction_velocity = "drag"   # u★ of the ice–ocean heat exchange: "constant" (0.002 m/s) or "drag" (√Cᴰ |uⁱ − uᵒ|, ≥ 0.002 m/s)
+diff --git a/panarctic.jl b/panarctic.jl
+index 7ce2302..e7e912e 100644
+--- a/panarctic.jl
++++ b/panarctic.jl
+@@ -71,6 +71,7 @@ using ClimaSeaIce.Rheologies: ElastoViscoPlasticRheology
+ using NumericalEarth.SeaIces: sea_ice_dynamics
+ using NumericalEarth.Radiations: SeaIceAlbedo, SurfaceRadiationProperties
+ using NumericalEarth.EarthSystemModels: reference_density, heat_capacity
++using NumericalEarth.EarthSystemModels.InterfaceComputations: net_fluxes
+ 
+ # ## Ocean, nested in GLORYS
+ #
+@@ -365,6 +366,20 @@ if mixing_depth > 0
+     @info "Mixing output: κᶜ and e above $(round(zᶠ[k₀], digits = 1)) m (levels $k₀ to $Nz) in arctic_mixing.jld2"
+ end
+ 
++# [output] surface_fluxes (default false): averages over average_hours of the ocean's net surface fluxes of T and S
++# (positive upward: Jˢ > 0 freshens, Jᵀ > 0 cools) and its freshwater volume flux, as NumericalEarth hands them to the
++# child, in arctic_surface_fluxes.jld2 (analysis/melt_lens.jl). The implicit part of an IMEX flux is not included.
++if get(output, "surface_fluxes", false)
++    child_fluxes = net_fluxes(child)
++    surface_fluxes = (; (name => child_fluxes[name] for name in (:T, :S, :η)
++                         if haskey(child_fluxes, name) && child_fluxes[name] isa Oceananigans.Fields.AbstractField)...)
++    simulation.output_writers[:surface_fluxes] = JLD2Writer(child, surface_fluxes;
++                                                            filename = joinpath(output_dir, "arctic_surface_fluxes.jld2"),
++                                                            schedule = AveragedTimeInterval(output["average_hours"] * Oceananigans.Units.hours),
++                                                            overwrite_files = !restart)
++    @info "Surface flux output: $(keys(surface_fluxes)) in arctic_surface_fluxes.jld2"
++end
++
+ # Transports through the sections in [transports] and the open boundaries (transports.jl): computed every time step and
+ # averaged over the same interval, so they include the covariance of velocity and tracers within each average, which
+ # transports computed offline from the averaged fields (analysis/transports.jl) miss.
+-- 
+2.43.0
+

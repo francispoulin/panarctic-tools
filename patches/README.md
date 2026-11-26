@@ -108,6 +108,7 @@ Numbered in the order to apply, across repositories. Each was checked to apply w
 | 101 | PanArcticShenanigans | `fjp/test-061` (and later `fjp/test-098`) | after 100 | `analysis/melt_lens.jl`: daily, first 30 days, ice-covered regions: model − GLORYS salinity at the surface and 15–40 m, ice speed and under-ice u★ (model and GLORYS), κᶜ, top-60 m profiles |
 | 102 | PanArcticShenanigans | `fjp/test-061` | after 101 | `analysis/initial_stability.jl`: unstable faces (N² < −1e-6) in the initial state by region and depth, the 15 worst, maps |
 | 103 | PanArcticShenanigans | `fjp/test-061` | after 102 | `melt_lens.jl`: κᶜ over the top 10 m, and κᶜ and e profiles (top 60 m) on days 1–30 |
+| 104 | PanArcticShenanigans | `fjp/test-061` | after 103 | `[output] surface_fluxes` (daily T, S surface fluxes); `melt_lens.jl` reads them; `config_smoke_test_fluxes.toml`, `config_sep2005_30d_nemo_glorys12_nz100_fluxes.toml` |
 
 ## Applying 001–006
 
