@@ -1,0 +1,178 @@
+From 08e833fed7f8ab40b37f7e6efbc68f340c67a033 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 25 Nov 2026 22:43:58 -0500
+Subject: [PATCH] analysis/initial_stability.jl: where the initial state is
+ statically unstable
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Faces with N² < −1e-6 s⁻² between vertically adjacent wet cells in the run's initial state
+(TEOS-10 as the model, from t = 0 in arctic_ocean.jld2), by region and depth band (0–10, 10–40,
+40–200, deeper), with the share of each region's columns that have one; the 15 worst faces with
+position, depth, S and T on both sides; maps of the unstable faces in the top 40 m and of the
+depth of the shallowest.
+
+Why: the 15 km, 100-level runs start with 56 860 unstable faces, the worst at k = 99 (second
+level) with N² ≈ −2.4e-2 s⁻². NEMO's TKE scheme mixes each at 100 m²/s at the first step, and the
+melt-lens dipole is already in the first daily mean under ice, with κᶜ at 10–40 m a hundred times
+background on day 1.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AbhhvmHjZYCHhFxumZ9A47
+---
+ analysis/initial_stability.jl | 142 ++++++++++++++++++++++++++++++++++
+ 1 file changed, 142 insertions(+)
+ create mode 100644 analysis/initial_stability.jl
+
+diff --git a/analysis/initial_stability.jl b/analysis/initial_stability.jl
+new file mode 100644
+index 0000000..174845e
+--- /dev/null
++++ b/analysis/initial_stability.jl
+@@ -0,0 +1,142 @@
++# Where is the initial state statically unstable? Faces with N² < −1e-6 s⁻² between wet cells in the run's initial
++# state (GLORYS regridded and inpainted onto the model grid), by region and depth, and the worst ones.
++#
++#   julia +1.13 --project=. analysis/initial_stability.jl [config.toml]
++#
++# Why (25 Nov 2026): panarctic.jl warns of 56 860 unstable faces in the initial state of the 15 km, 100-level runs, the
++# worst at k = 99 (the second level from the top) with N² ≈ −2.4e-2 s⁻². NEMO's TKE scheme gives every such face
++# 100 m²/s (nemo_convective_diffusivity) at the first step. In the four-month NEMO run a salty-surface / fresh-below
++# dipole is already there in the first daily mean under ice, with κᶜ at 10–40 m a hundred times background on day 1
++# (melt_lens.md). If the unstable faces sit in the top metres of the ice-covered regions, the start-up mixing makes it.
++#
++# N² as panarctic.jl and the model compute it: b = −g ρ′(Θ, S, z) / ρ₀ with TEOS-10 (SeawaterPolynomials, ρ₀ = 1020),
++# each cell at its own reference depth, differenced between vertically adjacent wet cells. Reads the initial state
++# (t = 0) of T and S in arctic_ocean.jld2 from `output_dir`. Writes initial_stability.md to `output_dir` and
++# initial_stability.png (per column: unstable faces in the top 40 m, and the depth of the shallowest) to `figure_dir`.
++# CPU, seconds.
++
++include("../config.jl")
++
++using Oceananigans
++using Oceananigans.Operators: Azᶜᶜᶜ
++using Oceananigans.OutputReaders: OnDisk
++using CairoMakie, Printf
++
++const SeawaterPolynomials = Oceananigans.BuoyancyFormulations.SeawaterPolynomials
++equation_of_state = SeawaterPolynomials.TEOS10.TEOS10EquationOfState(reference_density = 1020.0)
++gravitational_acceleration = 9.80665
++unstable_threshold = -1e-6
++
++St = FieldTimeSeries(ocean_output_file, "S"; backend = OnDisk())
++Tt = FieldTimeSeries(ocean_output_file, "T"; backend = OnDisk())
++initial = findfirst(==(0), St.times)
++isnothing(initial) && error("$ocean_output_file has no initial state (t = 0)")
++S = Float64.(Array(interior(St[initial])))
++T = Float64.(Array(interior(Tt[initial])))
++
++grid = St.grid
++Nx, Ny, Nz = size(grid)
++ug = grid.underlying_grid
++zf = Float64.(collect(ug.z.cᵃᵃᶠ[1:Nz+1]))
++zc = (zf[1:end-1] .+ zf[2:end]) ./ 2
++bottom_height = grid.immersed_boundary.bottom_height
++hb = [Float64(bottom_height[i, j, 1]) for i in 1:Nx, j in 1:Ny]
++H  = max.(-hb, 0)
++λ  = mod.(Array(λnodes(ug, Center(), Center(), Center())) .+ 180, 360) .- 180
++φ  = Array(φnodes(ug, Center(), Center(), Center()))
++A  = [Azᶜᶜᶜ(i, j, 1, ug) for i in 1:Nx, j in 1:Ny]
++wet = [zf[k+1] > hb[i, j] for i in 1:Nx, j in 1:Ny, k in 1:Nz]   # any part of the cell above the sea floor
++
++regions = [("Beaufort Gyre",    (λ, φ, H) -> 70.5 ≤ φ ≤ 80.5 && -170 ≤ λ ≤ -130 && H > 300),
++           ("Central Arctic",   (λ, φ, H) -> φ > 82),
++           ("Siberian shelves", (λ, φ, H) -> 66 ≤ φ ≤ 82 && (λ ≥ 60 || λ ≤ -170) && H < 200),
++           ("Barents Sea",      (λ, φ, H) -> 68 ≤ φ ≤ 80 && 15 ≤ λ < 60),
++           ("Nordic Seas",      (λ, φ, H) -> 62 ≤ φ ≤ 79 && -20 ≤ λ < 15),
++           ("Archipelago",      (λ, φ, H) -> 68 ≤ φ ≤ 82 && -125 ≤ λ ≤ -80),
++           ("Baffin Bay",       (λ, φ, H) -> 67 ≤ φ ≤ 78 && -80 < λ ≤ -55),
++           ("rest, north of 66°N", (λ, φ, H) -> φ ≥ 66),
++           ("rest, south of 66°N", (λ, φ, H) -> true)]
++region_names = first.(regions)
++region_of = [H[i, j] > 0 ? findfirst(r -> r[2](λ[i, j], φ[i, j], H[i, j]), regions) : 0 for i in 1:Nx, j in 1:Ny]
++
++#####
++##### N² on the faces between vertically adjacent wet cells
++#####
++
++buoyancy(Θ, Sᴬ, z) = -gravitational_acceleration * SeawaterPolynomials.ρ′(Θ, Sᴬ, z, equation_of_state) / 1020.0
++b = [wet[i, j, k] ? buoyancy(T[i, j, k], S[i, j, k], zc[k]) : NaN for i in 1:Nx, j in 1:Ny, k in 1:Nz]
++
++# Face k lies between cells k − 1 (below) and k (above), at depth −zf[k]
++N² = fill(NaN, Nx, Ny, Nz)
++for k in 2:Nz, j in 1:Ny, i in 1:Nx
++    wet[i, j, k-1] && wet[i, j, k] && (N²[i, j, k] = (b[i, j, k] - b[i, j, k-1]) / (zc[k] - zc[k-1]))
++end
++unstable = isfinite.(N²) .& (N² .< unstable_threshold)
++@info "$(count(unstable)) faces with N² < $unstable_threshold s⁻² (panarctic.jl's check counts the same faces)"
++
++#####
++##### Tables
++#####
++
++depth_bands = [("0–10 m", 0, 10), ("10–40 m", 10, 40), ("40–200 m", 40, 200), ("200 m and deeper", 200, Inf)]
++face_depth = -zf
++in_band(k, (_, top, bottom)) = top ≤ face_depth[k] < bottom
++
++io = IOBuffer()
++println(io, "# Static instability of the initial state: $experiment ($(config["time"]["start_date"]))\n")
++println(io, "Faces between vertically adjacent wet cells with N² < $unstable_threshold s⁻² (TEOS-10, as the model), from the ",
++            "initial state in arctic_ocean.jld2. NEMO's TKE scheme gives each 100 m²/s at the first step.\n")
++println(io, "## 1. By region and depth of the face (number of unstable faces; in brackets, % of the region's columns with one)\n")
++println(io, "| Region | " * join(first.(depth_bands), " | ") * " | All |")
++println(io, "|---|" * repeat("---|", length(depth_bands) + 1))
++for (r, name) in enumerate(region_names)
++    columns = count(==(r), region_of)
++    cells = String[]
++    for band in [depth_bands; [("all", 0, Inf)]]
++        ks = [k for k in 2:Nz if in_band(k, band)]
++        faces = sum(count(unstable[:, :, k] .& (region_of .== r)) for k in ks; init = 0)
++        with_one = count(ij -> region_of[ij] == r && any(unstable[ij, k] for k in ks), CartesianIndices((Nx, Ny)))
++        push!(cells, @sprintf("%d (%.1f %%)", faces, columns > 0 ? 100 * with_one / columns : 0.0))
++    end
++    println(io, "| $name | " * join(cells, " | ") * " |")
++end
++
++println(io, "\n## 2. The 15 most unstable faces\n")
++println(io, "| i, j, k | Longitude, latitude | Region | Face depth (m) | Column depth (m) | N² (s⁻²) | S below / above | T below / above (°C) |")
++println(io, "|---|---|---|---|---|---|---|---|")
++worst = sort(findall(unstable), by = I -> N²[I])[1:min(15, count(unstable))]
++for I in worst
++    i, j, k = Tuple(I)
++    println(io, @sprintf("| %d, %d, %d | %.1f, %.1f | %s | %.1f | %.0f | %.2e | %.3f / %.3f | %.2f / %.2f |", i, j, k,
++                         λ[i, j], φ[i, j], region_of[i, j] > 0 ? region_names[region_of[i, j]] : "land", face_depth[k],
++                         H[i, j], N²[I], S[i, j, k-1], S[i, j, k], T[i, j, k-1], T[i, j, k]))
++end
++
++table_text = String(take!(io))
++print(table_text)
++table_file = joinpath(output_dir, "initial_stability.md")
++write(table_file, table_text)
++@info "Wrote $table_file"
++
++#####
++##### Maps
++#####
++
++top40 = [k for k in 2:Nz if face_depth[k] < 40]
++count_top40 = [H[i, j] > 0 ? Float64(count(k -> unstable[i, j, k], top40)) : NaN for i in 1:Nx, j in 1:Ny]
++shallowest = [let ks = findall(k -> unstable[i, j, k], 2:Nz); isempty(ks) ? NaN : minimum(face_depth[ks .+ 1]) end
++              for i in 1:Nx, j in 1:Ny]
++
++fig = Figure(size = (1500, 700))
++ax = Axis(fig[1, 1]; title = "unstable faces in the top 40 m", aspect = DataAspect(), xlabel = "i", ylabel = "j")
++hm = heatmap!(ax, 1:Nx, 1:Ny, ifelse.(count_top40 .> 0, count_top40, NaN); colormap = :viridis, nan_color = :white)
++contour!(ax, 1:Nx, 1:Ny, Float64.(H .> 0); levels = [0.5], color = :gray)
++Colorbar(fig[1, 2], hm; label = "faces")
++ax = Axis(fig[1, 3]; title = "depth of the shallowest unstable face (m)", aspect = DataAspect(), xlabel = "i")
++hm = heatmap!(ax, 1:Nx, 1:Ny, shallowest; colormap = :plasma, colorscale = log10, colorrange = (1, 1000), nan_color = :white)
++contour!(ax, 1:Nx, 1:Ny, Float64.(H .> 0); levels = [0.5], color = :gray)
++Colorbar(fig[1, 4], hm; label = "m")
++Label(fig[0, :], "$experiment: N² < $unstable_threshold s⁻² in the initial state"; fontsize = 18)
++file = joinpath(figure_dir, "initial_stability.png")
++save(file, fig)
++@info "Wrote $file"
+-- 
+2.43.0
+
