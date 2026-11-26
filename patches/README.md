@@ -153,3 +153,4 @@ Plots, from `nested/`: `julia --project=.. plot_budget.jl <folder>` and `julia -
   annual means over many years and the run is four days of one January, so look for sign and order of magnitude.
 - `nested_monitor.csv`: `pin_correction_Sv`, `pin_max_velocity` (how hard the pin pushes) and the Atlantic/Pacific
   split.
+| 119 | PanArcticShenanigans | `fjp/test-098` | after 118 | `analysis/atlantic_water.jl`: AW layer (core T, S, depth; 0 °C bounds, thickness, heat content) by region against WOA23 decade 2005–2014 (A5B4, annual, 1°; downloaded once from NCEI), for a period of a run (`[from] [to] [every n days]`); table, region-mean profiles, maps. CPU only |

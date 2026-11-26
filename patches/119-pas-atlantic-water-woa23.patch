@@ -1,0 +1,464 @@
+From ce6f52f4d2c630dfac278b5d8bb550e46ba482dd Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 26 Nov 2026 18:36:45 -0500
+Subject: [PATCH] =?UTF-8?q?analysis/atlantic=5Fwater.jl:=20the=20Atlantic?=
+ =?UTF-8?q?=20Water=20layer=20against=20WOA23=20(2005=E2=80=932014)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Criterion 2 of #15. For a period of a run (default the whole run; for example the hindcast's Tsubouchi year), the
+time-mean T and S of each column against WOA23's decade 2005–2014 (A5B4, annual, 1°, downloaded once from NCEI and
+interpolated onto the model's columns): AW core temperature, salinity and depth (maximum between 100 and 1500 m), the
+0 °C bounds above and below, thickness and heat content relative to 0 °C, by region (Nordic Seas, Fram Strait, Eurasian
+Basin, Amerasian north of 82°N, Canada Basin, all deep basins). Table atlantic_water_<from>_<to>.md, region-mean T and S
+profiles, maps of core temperature and depth. CPU only.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AbhhvpKgDchWb93a6aYpaq
+---
+ analysis/atlantic_water.jl | 432 +++++++++++++++++++++++++++++++++++++
+ 1 file changed, 432 insertions(+)
+ create mode 100644 analysis/atlantic_water.jl
+
+diff --git a/analysis/atlantic_water.jl b/analysis/atlantic_water.jl
+new file mode 100644
+index 0000000..bd9943c
+--- /dev/null
++++ b/analysis/atlantic_water.jl
+@@ -0,0 +1,432 @@
++# Criterion 2 of issue #15 (Shu et al. 2023): the Atlantic Water layer, model against observations. The model's time
++# mean over a period is compared with the World Ocean Atlas 2023 decade 2005–2014 (WOA23 "A5B4", annual, 1°), not with
++# GLORYS: for each water column, the AW core (the temperature maximum between 100 and 1500 m: its temperature, salinity
++# and depth, refined by a parabola through the warmest level and its neighbours), the 0 °C isotherms above and below
++# the core (the AW layer's bounds; "0 m" when the column is above 0 °C up to the surface, as in the Nordic Seas), the
++# layer's thickness and its heat content relative to 0 °C (ρ₀cₚ ∫ max(T, 0) dz between the bounds). WOA is interpolated
++# horizontally onto the model's columns (bilinear, over its wet neighbours) and kept on its own standard depths, so
++# each profile is read at its own vertical resolution. Region means are area-weighted over the columns where both the
++# model and WOA have a profile; the layer's bounds and thickness over the columns that have AW (core above 0 °C).
++#
++#   julia --project=. analysis/atlantic_water.jl config.toml [from yyyy-mm-dd] [to yyyy-mm-dd] [every n days, default 5]
++#
++# For example the Tsubouchi year of the hindcast:
++#   julia --project=. analysis/atlantic_water.jl config_hindcast_2004_2006_nemo_nz100.toml 2005-09-01 2006-09-01
++# Without dates: the whole run. Reads arctic_ocean.jld2 (daily T and S) from `output_dir`, one daily mean every n days
++# within the period; CPU only (no GPU needed). Downloads, once, WOA23's two files (~40 MB each, from NCEI) into the
++# NumericalEarth data cache ("WOA23_A5B4"), or into data_dir/WOA23_A5B4. Writes atlantic_water_<from>_<to>.md to
++# `output_dir`, and atlantic_water_profiles_<from>_<to>.png (region-mean T and S profiles) and
++# atlantic_water_maps_<from>_<to>.png (core temperature and depth: model, WOA, model − WOA) to `figure_dir`.
++#
++# Caveats: WOA's temperature is in situ, the model's is GLORYS's potential temperature carried by a TEOS-10 model; in
++# these cold waters above 1500 m the differences are a few hundredths of a degree, ignored here. WOA is a decadal mean
++# smoothed over ~1° (fewer observations under the ice): fronts and boundary currents are broader than in the model. The
++# regions are boxes with depth limits (the Lomonosov Ridge taken as the 140°E / 50°W line), the same for both.
++
++include("../config.jl")
++
++using NumericalEarth, Oceananigans
++using Oceananigans.Operators: Azᶜᶜᶜ
++using Oceananigans.OutputReaders: OnDisk
++using NumericalEarth.DataWrangling: NCDatasets, Downloads, download_cache
++using .NCDatasets: Dataset
++using CairoMakie, Dates, Printf
++
++start_date = DateTime(config["time"]["start_date"])
++end_date   = DateTime(config["time"]["end_date"])
++from_date  = length(ARGS) ≥ 2 ? DateTime(ARGS[2]) : start_date
++to_date    = length(ARGS) ≥ 3 ? DateTime(ARGS[3]) : end_date
++every      = length(ARGS) ≥ 4 ? parse(Int, ARGS[4]) : 5
++window     = config["output"]["average_hours"] / 24   # length of each saved average (days)
++period_tag = Dates.format(from_date, "yyyymmdd") * "_" * Dates.format(to_date, "yyyymmdd")
++const ρ₀cₚ = 1026.0 * 3991.9                          # J/(m³ K)
++
++#####
++##### The model's time mean over the period
++#####
++
++Tt = FieldTimeSeries(ocean_output_file, "T"; backend = OnDisk())
++St = FieldTimeSeries(ocean_output_file, "S"; backend = OnDisk())
++grid = Tt.grid
++saved_days = Tt.times ./ 86400            # each average is saved at the end of its window
++Nx, Ny, Nz = size(grid)
++
++after_start(d) = start_date + Millisecond(round(Int64, d * 86400e3))
++in_period = [n for n in eachindex(saved_days) if saved_days[n] > 0 &&
++             from_date ≤ after_start(saved_days[n] - window) && after_start(saved_days[n]) ≤ to_date]
++isempty(in_period) && error("No saved average of $experiment lies between $(Date(from_date)) and $(Date(to_date)) " *
++                            "(the output covers days $(first(saved_days)) to $(last(saved_days)) after $(Date(start_date)))")
++chosen = in_period[1:every:end]
++
++Tm = zeros(Nx, Ny, Nz)
++Sm = zeros(Nx, Ny, Nz)
++for n in chosen
++    Tm .+= Float64.(interior(Tt[n]))
++    Sm .+= Float64.(interior(St[n]))
++end
++Tm ./= length(chosen)
++Sm ./= length(chosen)
++first_mean = Date(after_start(saved_days[first(chosen)] - window))
++last_mean  = Date(after_start(saved_days[last(chosen)] - window))
++@info "Model: mean of $(length(chosen)) daily averages, $first_mean to $last_mean (one every $every)"
++
++ug  = grid.underlying_grid
++zf  = Float64.(collect(ug.z.cᵃᵃᶠ[1:Nz+1]))
++bottom_height = grid.immersed_boundary.bottom_height
++hb  = [Float64(bottom_height[i, j, 1]) for i in 1:Nx, j in 1:Ny]
++λ   = mod.(Array(λnodes(ug, Center(), Center(), Center())) .+ 180, 360) .- 180
++φ   = Array(φnodes(ug, Center(), Center(), Center()))
++A   = [Azᶜᶜᶜ(i, j, 1, ug) for i in 1:Nx, j in 1:Ny]
++H   = max.(-hb, 0)
++ocean = H .> 0
++
++# Middle of each cell's wet part (the partial bottom cell's too); NaN where the cell is dry
++zmid = [zf[k+1] > hb[i, j] ? (max(zf[k], hb[i, j]) + zf[k+1]) / 2 : NaN for i in 1:Nx, j in 1:Ny, k in 1:Nz]
++
++#####
++##### WOA23, decade 2005–2014, annual, 1°
++#####
++
++woa_dir = isempty(data_dir) ? download_cache("WOA23_A5B4") : mkpath(joinpath(data_dir, "WOA23_A5B4"))
++
++function woa_file(v)
++    path = joinpath(woa_dir, "woa23_A5B4_$(v)00_01.nc")
++    if !isfile(path)
++        variable_folder = v == "t" ? "temperature" : "salinity"
++        url = "https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/$variable_folder/netcdf/A5B4/1.00/woa23_A5B4_$(v)00_01.nc"
++        @info "Downloading $url"
++        partial = path * ".part"
++        Downloads.download(url, partial)
++        mv(partial, path; force = true)
++    end
++    return path
++end
++
++function read_woa(v, φmin)
++    ds  = Dataset(woa_file(v))
++    lon = Float64.(ds["lon"][:])
++    lat = Float64.(ds["lat"][:])
++    depth = Float64.(ds["depth"][:])
++    j1 = findfirst(≥(φmin - 1), lat)
++    raw = ds["$(v)_an"][:, j1:length(lat), :, 1]
++    close(ds)
++    data = [ismissing(x) ? NaN : Float64(x) for x in raw]
++    return lon, lat[j1:end], depth, data
++end
++
++# Bilinear interpolation onto the model's columns, over the wet neighbours only
++function woa_on_columns(lon, lat, data, λ, φ)
++    Nλ, Nφ, Nk = size(data)
++    out = fill(NaN, size(λ)..., Nk)
++    Δλ, Δφ = lon[2] - lon[1], lat[2] - lat[1]
++    for j in axes(λ, 2), i in axes(λ, 1)
++        x = (λ[i, j] - lon[1]) / Δλ
++        y = (φ[i, j] - lat[1]) / Δφ
++        i0, j0 = floor(Int, x), floor(Int, y)
++        wx, wy = x - i0, y - j0
++        ia, ib = mod(i0, Nλ) + 1, mod(i0 + 1, Nλ) + 1
++        ja, jb = clamp(j0 + 1, 1, Nφ), clamp(j0 + 2, 1, Nφ)
++        corners = ((ia, ja, (1 - wx) * (1 - wy)), (ib, ja, wx * (1 - wy)), (ia, jb, (1 - wx) * wy), (ib, jb, wx * wy))
++        for k in 1:Nk
++            total, weight = 0.0, 0.0
++            for (ii, jj, w) in corners
++                value = data[ii, jj, k]
++                if w > 0 && isfinite(value)
++                    total += w * value
++                    weight += w
++                end
++            end
++            weight > 0 && (out[i, j, k] = total / weight)
++        end
++    end
++    return out
++end
++
++φmin = minimum(φ[ocean])
++lon, lat, woa_depth, woa_T = read_woa("t", φmin)
++_, _, _, woa_S = read_woa("s", φmin)
++Tw = woa_on_columns(lon, lat, woa_T, λ, φ)
++Sw = woa_on_columns(lon, lat, woa_S, λ, φ)
++zw = -woa_depth
++@info "WOA23 A5B4: $(length(woa_depth)) standard depths, interpolated onto the model's $(count(ocean)) wet columns"
++
++#####
++##### Atlantic Water diagnostics of one profile (z top first, decreasing, m; T in °C)
++#####
++
++const aw_names = (:core_T, :core_S, :core_depth, :upper, :lower, :thickness, :heat)
++
++function interpolate_at(z, v, zq)
++    for k in 1:length(z)-1
++        if z[k] ≥ zq ≥ z[k+1]
++            w = (z[k] - zq) / (z[k] - z[k+1])
++            return (1 - w) * v[k] + w * v[k+1]
++        end
++    end
++    return NaN
++end
++
++function aw_column(z, T, S; z_shallowest = -100.0, z_deepest = -1500.0)
++    K = length(z)
++    ks = [k for k in 1:K if z_shallowest ≥ z[k] ≥ z_deepest && isfinite(T[k])]
++    isempty(ks) && return NamedTuple{aw_names}(ntuple(_ -> NaN, length(aw_names)))
++
++    # Core: the warmest level in the search range, refined by a parabola through it and its neighbours
++    kc = ks[argmax(T[ks])]
++    zc, Tc = z[kc], T[kc]
++    if 1 < kc < K && isfinite(T[kc-1]) && isfinite(T[kc+1])
++        z1, z2, z3 = z[kc-1], z[kc], z[kc+1]
++        T1, T2, T3 = T[kc-1], T[kc], T[kc+1]
++        d = (z1 - z2) * (z1 - z3) * (z2 - z3)
++        a = (z3 * (T2 - T1) + z2 * (T1 - T3) + z1 * (T3 - T2)) / d
++        b = (z3^2 * (T1 - T2) + z2^2 * (T3 - T1) + z1^2 * (T2 - T3)) / d
++        c = (z2 * z3 * (z2 - z3) * T1 + z3 * z1 * (z3 - z1) * T2 + z1 * z2 * (z1 - z2) * T3) / d
++        if a < 0
++            zv = -b / (2a)
++            if min(z1, z_shallowest) ≥ zv ≥ max(z3, z_deepest)
++                zc, Tc = zv, a * zv^2 + b * zv + c
++            end
++        end
++    end
++    Sc = interpolate_at(z, S, zc)
++    isfinite(Sc) || (Sc = S[kc])
++
++    Tc > 0 || return (core_T = Tc, core_S = Sc, core_depth = -zc, upper = NaN, lower = NaN, thickness = NaN, heat = 0.0)
++
++    # Upper 0 °C crossing, up from the core; the surface if the column is warm all the way up
++    z_upper, warm_to_surface = 0.0, true
++    for k in kc-1:-1:1
++        isfinite(T[k]) || break
++        if T[k] ≤ 0
++            z_upper = z[k+1] + (0 - T[k+1]) * (z[k] - z[k+1]) / (T[k] - T[k+1])
++            warm_to_surface = false
++            break
++        end
++    end
++
++    # Lower 0 °C crossing, down from the core; the deepest level if the column is warm to the bottom
++    z_lower, k_last = NaN, kc
++    for k in kc+1:K
++        isfinite(T[k]) || break
++        if T[k] ≤ 0
++            z_lower = z[k-1] + (0 - T[k-1]) * (z[k] - z[k-1]) / (T[k] - T[k-1])
++            break
++        end
++        k_last = k
++    end
++    warm_to_bottom = isnan(z_lower)
++    warm_to_bottom && (z_lower = z[k_last])
++
++    # Heat content relative to 0 °C between the bounds (trapezoids through the levels in between)
++    zs = [z_upper]
++    Ts = [warm_to_surface ? max(T[1], 0.0) : 0.0]
++    for k in 1:K
++        if z_upper > z[k] > z_lower && isfinite(T[k])
++            push!(zs, z[k])
++            push!(Ts, max(T[k], 0.0))
++        end
++    end
++    push!(zs, z_lower)
++    push!(Ts, warm_to_bottom ? max(T[k_last], 0.0) : 0.0)
++    integral = sum((zs[m] - zs[m+1]) * (Ts[m] + Ts[m+1]) / 2 for m in 1:length(zs)-1; init = 0.0)
++
++    return (core_T = Tc, core_S = Sc, core_depth = -zc, upper = -z_upper, lower = -z_lower,
++            thickness = z_upper - z_lower, heat = ρ₀cₚ * integral / 1e9)   # heat in GJ/m²
++end
++
++function model_profile(i, j, ocean, zmid, T, S)
++    ocean[i, j] || return nothing
++    ks = [k for k in size(zmid, 3):-1:1 if isfinite(zmid[i, j, k])]
++    isempty(ks) && return nothing
++    return zmid[i, j, ks], T[i, j, ks], S[i, j, ks]
++end
++
++function woa_profile(i, j, ocean, zw, T, S)
++    ocean[i, j] || return nothing
++    n = findfirst(!isfinite, view(T, i, j, :))
++    K = n === nothing ? length(zw) : n - 1
++    K ≥ 2 || return nothing
++    return zw[1:K], T[i, j, 1:K], S[i, j, 1:K]
++end
++
++# Closures made inside functions, so that the column loops are type-stable
++model_columns(ocean, zmid, T, S) = (i, j) -> model_profile(i, j, ocean, zmid, T, S)
++woa_columns(ocean, zw, T, S)     = (i, j) -> woa_profile(i, j, ocean, zw, T, S)
++
++function diagnose(profile, Nx, Ny)
++    out = NamedTuple{aw_names}(ntuple(_ -> fill(NaN, Nx, Ny), length(aw_names)))
++    for j in 1:Ny, i in 1:Nx
++        p = profile(i, j)
++        p === nothing && continue
++        d = aw_column(p...)
++        for name in aw_names
++            out[name][i, j] = d[name]
++        end
++    end
++    return out
++end
++
++model_column = model_columns(ocean, zmid, Tm, Sm)
++woa_column   = woa_columns(ocean, zw, Tw, Sw)
++model_aw = diagnose(model_column, Nx, Ny)
++woa_aw   = diagnose(woa_column, Nx, Ny)
++both = isfinite.(model_aw.core_T) .& isfinite.(woa_aw.core_T)
++@info "Atlantic Water diagnostics: $(count(both)) columns with a model and a WOA profile below 100 m"
++
++#####
++##### Regions (the same boxes for both; the Lomonosov Ridge taken as the 140°E / 50°W line)
++#####
++
++eurasian_side(λ) = -50 < λ < 140
++regions = [("Nordic Seas",             (λ, φ, H) -> 64 ≤ φ ≤ 76 && -15 ≤ λ ≤ 12 && H > 1000),
++           ("Fram Strait",             (λ, φ, H) -> 77.5 ≤ φ ≤ 80 && -8 ≤ λ ≤ 12 && H > 500),
++           ("Eurasian Basin",          (λ, φ, H) -> φ ≥ 81 && eurasian_side(λ) && H > 2500),
++           ("Amerasian, north of 82°N", (λ, φ, H) -> φ ≥ 82 && !eurasian_side(λ) && H > 2500),
++           ("Canada Basin",            (λ, φ, H) -> 71 ≤ φ < 80.5 && -165 ≤ λ ≤ -125 && H > 2500),
++           ("Arctic deep basins",      (λ, φ, H) -> H > 2500 && (φ ≥ 81 || (!eurasian_side(λ) && φ ≥ 71)))]
++masks = [[both[i, j] && test(λ[i, j], φ[i, j], H[i, j]) for i in 1:Nx, j in 1:Ny] for (_, test) in regions]
++
++function area_mean(v, mask, A)
++    m = mask .& isfinite.(v)
++    any(m) || return NaN
++    return sum(v[m] .* A[m]) / sum(A[m])
++end
++
++region_value(aw, f, mask, A) = area_mean(aw[f], mask, A)
++aw_fraction(aw, mask, A) = any(mask) ? 100 * sum(A[mask .& (aw.core_T .> 0)]) / sum(A[mask]) : NaN
++
++#####
++##### Tables
++#####
++
++show_pair(f, a, b) = isfinite(a) || isfinite(b) ? f(a, b) : "–"
++fmt1(a, b) = @sprintf("%.2f / %.2f", a, b)
++fmt2(a, b) = @sprintf("%.3f / %.3f", a, b)
++fmt0(a, b) = @sprintf("%.0f / %.0f", a, b)
++
++io = IOBuffer()
++println(io, "# Atlantic Water layer: $experiment against WOA23 (2005–2014), $first_mean to $last_mean\n")
++println(io, "Model: mean of $(length(chosen)) daily averages (one every $every days). WOA23 decade 2005–2014 (A5B4), ",
++            "annual, 1°, interpolated onto the model's columns. Core: temperature maximum between 100 and 1500 m. ",
++            "Bounds: the 0 °C isotherms above and below the core (0 m: warm up to the surface). Heat: ρ₀cₚ ∫ max(T, 0) dz ",
++            "between the bounds. Area-weighted means over the columns with both profiles; bounds and thickness over the ",
++            "columns with AW (core above 0 °C). Each cell: model / WOA.\n")
++println(io, "| Region | Columns | AW present (%) | Core T (°C) | Core S | Core depth (m) | Upper 0 °C (m) | Lower 0 °C (m) | Thickness (m) | Heat (GJ/m²) |")
++println(io, "|---|---|---|---|---|---|---|---|---|---|")
++for ((name, _), mask) in zip(regions, masks)
++    count(mask) == 0 && continue
++    both_values(f) = (region_value(model_aw, f, mask, A), region_value(woa_aw, f, mask, A))
++    println(io, "| ", name, " | ", count(mask),
++                " | ", show_pair(fmt0, aw_fraction(model_aw, mask, A), aw_fraction(woa_aw, mask, A)),
++                " | ", show_pair(fmt1, both_values(:core_T)...),
++                " | ", show_pair(fmt2, both_values(:core_S)...),
++                " | ", show_pair(fmt0, both_values(:core_depth)...),
++                " | ", show_pair(fmt0, both_values(:upper)...),
++                " | ", show_pair(fmt0, both_values(:lower)...),
++                " | ", show_pair(fmt0, both_values(:thickness)...),
++                " | ", show_pair(fmt1, both_values(:heat)...), " |")
++end
++println(io, "\n## Model − WOA\n")
++println(io, "| Region | Core T (°C) | Core S | Core depth (m) | Thickness (m) | Heat (GJ/m²) |")
++println(io, "|---|---|---|---|---|---|")
++for ((name, _), mask) in zip(regions, masks)
++    count(mask) == 0 && continue
++    Δ(f) = region_value(model_aw, f, mask, A) - region_value(woa_aw, f, mask, A)
++    println(io, @sprintf("| %s | %+.2f | %+.3f | %+.0f | %+.0f | %+.2f |", name,
++                         Δ(:core_T), Δ(:core_S), Δ(:core_depth), Δ(:thickness), Δ(:heat)))
++end
++println(io)
++table_text = String(take!(io))
++print(table_text)
++table_file = joinpath(output_dir, "atlantic_water_$(period_tag).md")
++write(table_file, table_text)
++@info "Wrote $table_file"
++
++#####
++##### Region-mean profiles, model and WOA, on the same columns
++#####
++
++profile_depths = collect(0.0:10.0:1500.0)
++
++# A profile (z top first, decreasing) at the given depths (positive, increasing), in one sweep: constant above the
++# first level, NaN below the last
++function on_depths(z, v, depths)
++    out = fill(NaN, length(depths))
++    k = 1
++    for (m, depth) in enumerate(depths)
++        zq = -depth
++        if zq ≥ z[1]
++            out[m] = v[1]
++            continue
++        end
++        while k < length(z) && z[k+1] > zq
++            k += 1
++        end
++        k < length(z) || break
++        w = (z[k] - zq) / (z[k] - z[k+1])
++        out[m] = (1 - w) * v[k] + w * v[k+1]
++    end
++    return out
++end
++
++function mean_profile(profile, values_index, mask, A, depths)
++    total  = zeros(length(depths))
++    weight = zeros(length(depths))
++    for j in axes(mask, 2), i in axes(mask, 1)
++        mask[i, j] || continue
++        p = profile(i, j)
++        p === nothing && continue
++        column = on_depths(p[1], p[values_index], depths)
++        for m in eachindex(column)
++            if isfinite(column[m])
++                total[m] += A[i, j] * column[m]
++                weight[m] += A[i, j]
++            end
++        end
++    end
++    return [w > 0 ? t / w : NaN for (t, w) in zip(total, weight)]
++end
++
++Nr = length(regions)
++fig = Figure(size = (330Nr, 900))
++for (r, ((name, _), mask)) in enumerate(zip(regions, masks))
++    count(mask) == 0 && continue
++    for (row, (variable_index, axis_label)) in enumerate(((2, "temperature (°C)"), (3, "salinity")))
++        ax = Axis(fig[row, r]; title = row == 1 ? name : "", xlabel = axis_label, yreversed = true,
++                  ylabel = r == 1 ? "depth (m)" : "")
++        lines!(ax, mean_profile(model_column, variable_index, mask, A, profile_depths), profile_depths;
++               color = :red, label = "model")
++        lines!(ax, mean_profile(woa_column, variable_index, mask, A, profile_depths), profile_depths;
++               color = :black, label = "WOA23 2005–14")
++        row == 1 && vlines!(ax, 0; color = :gray, linestyle = :dot)
++        (r == 1 && row == 1) && axislegend(ax; position = :rb, framevisible = false, labelsize = 10)
++    end
++end
++Label(fig[0, :], "$experiment, $first_mean to $last_mean: region-mean profiles against WOA23 (2005–2014)"; fontsize = 18)
++file = joinpath(figure_dir, "atlantic_water_profiles_$(period_tag).png")
++save(file, fig)
++@info "Wrote $file"
++
++#####
++##### Maps: core temperature and depth
++#####
++
++fig = Figure(size = (1500, 1000))
++map_rows = ((:core_T, "AW core temperature (°C)", :thermal, (-1, 4), (-2, 2)),
++            (:core_depth, "AW core depth (m)", :deep, (0, 800), (-300, 300)))
++shown = (model_aw.core_T .> 0) .| (woa_aw.core_T .> 0)
++for (row, (f, map_label, map_colormap, map_range, Δrange)) in enumerate(map_rows)
++    mm = ifelse.(both .& shown, model_aw[f], NaN)
++    wm = ifelse.(both .& shown, woa_aw[f], NaN)
++    for (col, (panel, panel_values, cmap, crange)) in enumerate((("model", mm, map_colormap, map_range),
++                                                                 ("WOA23", wm, map_colormap, map_range),
++                                                                 ("model − WOA", mm .- wm, :balance, Δrange)))
++        ax = Axis(fig[row, 2col - 1]; title = "$panel: $map_label", aspect = DataAspect(), xlabel = "i", ylabel = "j")
++        hm = heatmap!(ax, 1:Nx, 1:Ny, panel_values; colormap = cmap, colorrange = crange, nan_color = :lightgray)
++        Colorbar(fig[row, 2col], hm)
++    end
++end
++Label(fig[0, :], "$experiment, $first_mean to $last_mean: Atlantic Water core against WOA23 (2005–2014)"; fontsize = 18)
++file = joinpath(figure_dir, "atlantic_water_maps_$(period_tag).png")
++save(file, fig)
++@info "Wrote $file"
+-- 
+2.43.0
+
