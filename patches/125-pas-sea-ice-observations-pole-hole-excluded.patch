@@ -1,0 +1,87 @@
+From d3ea490cb0712d540f4c612ea25e9589922cdd43 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 26 Nov 2026 21:38:37 -0500
+Subject: [PATCH] sea_ice_observations.jl: leave the satellite pole hole out of
+ both, whatever its encoding
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+124 assumed the hole is stored as 0; the rerun changed almost nothing, so it is not. North of 86°N any observed value
+below 15 % is taken as the hole and left out of model and observations alike; its raw values are reported once.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AbhhvpKgDchWb93a6aYpaq
+---
+ analysis/sea_ice_observations.jl | 27 ++++++++++++++++-----------
+ 1 file changed, 16 insertions(+), 11 deletions(-)
+
+diff --git a/analysis/sea_ice_observations.jl b/analysis/sea_ice_observations.jl
+index 76c1544..7c75963 100644
+--- a/analysis/sea_ice_observations.jl
++++ b/analysis/sea_ice_observations.jl
+@@ -2,7 +2,7 @@
+ # concentration is compared with the NOAA/NSIDC Climate Data Record of passive-microwave sea-ice concentration (daily,
+ # 25 km, north polar stereographic; SSM/I in 2004–06), mapped onto the model's columns: extent (Σ A over ℵ > 0.15) and
+ # area (Σ A ℵ) by region, on the same columns for both (where the observation is valid: ocean, outside the coast and
+-# land flags; the pole hole counts as full ice), plus maps of the concentration.
++# land flags and the satellite pole hole), plus maps of the concentration.
+ #
+ #   julia --project=. analysis/sea_ice_observations.jl config.toml [from yyyy-mm-dd] [to yyyy-mm-dd] [every n days, default 5]
+ #
+@@ -121,10 +121,10 @@ end
+ first_variable(ds, candidates) = (name = findfirst(n -> haskey(ds, n), candidates);
+                                   name === nothing ? nothing : candidates[name])
+ 
+-# Concentration in 0–1; the pole hole as full ice; coast, land, lakes and missing as NaN. The record leaves the pole hole
+-# at 0 (seen 26 Nov 2026), or flags it 2.51: north of 84°N an exact 0 can only be the hole (no open water there in
+-# 2004–06, Sep–Dec or otherwise)
+-function read_observation(path)
++# Concentration in 0–1; coast, land, lakes, missing and the pole hole as NaN (left out of both model and observations).
++# The pole hole (no satellite coverage north of ~87°N) is not read as a flag in these files: any observed value below
++# 15 % north of 86°N is taken as the hole (no open water there in 2004–06), and its raw values are reported once.
++function read_observation(path; report = false)
+     ds = Dataset(path)
+     name = first_variable(ds, ["cdr_seaice_conc", "seaice_conc_cdr"])
+     name === nothing && error("No CDR concentration variable in $path; it has: $(join(keys(ds), ", "))")
+@@ -138,10 +138,15 @@ function read_observation(path)
+     latitude === nothing && @warn "No latitude in $path: the pole hole cannot be told from open water"
+     close(ds)
+     size(data) == (length(x), length(y)) || error("Unexpected grid in $path: $(size(data)) values, $(length(x)) × $(length(y)) cells")
+-    pole_hole(k) = latitude !== nothing && latitude[k] ≥ 84
+-    c = map(CartesianIndices(data)) do k
+-        v = data[k]
+-        ismissing(v) ? NaN : v == 0 && pole_hole(k) ? 1.0 : v ≤ 1 ? Float64(v) : 2.505 < v < 2.515 ? 1.0 : NaN
++    c = map(v -> ismissing(v) || !(0 ≤ v ≤ 1) ? NaN : Float64(v), data)
++    if latitude !== nothing
++        hole = [latitude[k] ≥ 86 && !(isfinite(c[k]) && c[k] ≥ 0.15) for k in CartesianIndices(c)]
++        if report
++            raw = unique(data[hole])
++            @info "Pole hole: $(count(hole)) observed cells north of 86°N without ice; raw values there: " *
++                  join(string.(raw[1:min(end, 8)]), ", ") * "; left out of model and observations"
++        end
++        c[hole] .= NaN
+     end
+     return c, x, y, latitude
+ end
+@@ -183,7 +188,7 @@ for (n, date) in enumerate(sample_dates)
+         @warn "No observed concentration on $date; skipped"
+         continue
+     end
+-    c, x, y, latitude = read_observation(path)
++    c, x, y, latitude = read_observation(path; report = cell_x === nothing)
+     if cell_x === nothing
+         global cell_x, cell_y = observation_cells(x, y, λ, φ, ocean)
+         mapped = cell_x .> 0
+@@ -231,7 +236,7 @@ end
+ io = IOBuffer()
+ println(io, "# Sea ice against satellite observations: $experiment, $(first(sample_dates)) to $(last(sample_dates))\n")
+ println(io, "Observations: NOAA/NSIDC CDR daily sea-ice concentration (25 km), mapped onto the model's columns. Both on ",
+-            "the columns where the observation is valid; the pole hole counts as full ice. Extent: area of cells with ",
++            "the columns where the observation is valid (the satellite pole hole is left out of both). Extent: area of cells with ",
+             "concentration above 15 %; area: Σ A ℵ. $(Ns) days (one every $every). Units 10⁶ km².\n")
+ println(io, "## Period means by region\n")
+ println(io, "| Region | Extent model | Extent obs | Δ extent | RMS Δ extent | Area model | Area obs | Δ area |")
+-- 
+2.43.0
+
