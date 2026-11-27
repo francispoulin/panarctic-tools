@@ -1,0 +1,72 @@
+From e0ec14fc8f3c3cbacbb26189741d27d27f8f875e Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 26 Nov 2026 19:15:32 -0500
+Subject: [PATCH] Pin Terrarium to its last 0.1.x main commit in docs, test and
+ examples
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Every released SpeedyWeather (0.20.2 to 0.25.0) has Terrarium as a weak dependency with compat 0.1. Terrarium's main
+became 0.2.0 on 25 Nov, so with `[sources] rev = "main"` no SpeedyWeather release resolves and every CI job stops at
+"Instantiate test environment" (main fails the same way). Pin Terrarium to dd4480a2, its main when this repository's
+CI was last green (25 Nov; version 0.1.11-DEV, Oceananigans 0.113.5–0.118), in all three environments: the workspace
+is resolved as a whole. Revert docs' SpeedyWeather compat to 0.23, 0.24 (as before 2a24234b), the versions that run.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AbhhvpKgDchWb93a6aYpaq
+---
+ docs/Project.toml     | 4 ++--
+ examples/Project.toml | 2 +-
+ test/Project.toml     | 2 +-
+ 3 files changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/docs/Project.toml b/docs/Project.toml
+index 50966122..433d9e95 100755
+--- a/docs/Project.toml
++++ b/docs/Project.toml
+@@ -36,7 +36,7 @@ WorldOceanAtlasTools = "04f20302-f1b9-11e8-29d9-7d841cb0a64a"
+ 
+ [sources]
+ NumericalEarth = {path = ".."}
+-Terrarium = {url = "https://github.com/NumericalEarth/Terrarium.jl", rev = "main"} # TODO: remove once Terrarium 0.1.11 is released with Oceananigans 0.117 compat
++Terrarium = {url = "https://github.com/NumericalEarth/Terrarium.jl", rev = "dd4480a2f70590b10d6b304d3c9e513d51cf0ade"} # Terrarium main at our last green CI (25 Nov; 0.1.11-DEV): every released SpeedyWeather (≤ 0.25) allows only Terrarium 0.1
+ 
+ [compat]
+ ArchGDAL = "0.10"
+@@ -50,5 +50,5 @@ Enzyme = "0.13.166"
+ Literate = "2.2"
+ Oceananigans = "0.117.2, 0.118"
+ Reactant = "0.2.278"
+-SpeedyWeather = "0.23, 0.24, 0.25, 0.26"
++SpeedyWeather = "0.23, 0.24"
+ Terrarium = "0.1.10, 0.2"
+diff --git a/examples/Project.toml b/examples/Project.toml
+index c3f947a3..249b2009 100644
+--- a/examples/Project.toml
++++ b/examples/Project.toml
+@@ -16,7 +16,7 @@ Terrarium = "80418d68-07fa-499d-ae2b-c12e531f5cd8"
+ 
+ [sources]
+ NumericalEarth = {path = ".."}
+-Terrarium = {url = "https://github.com/NumericalEarth/Terrarium.jl", rev = "main"} # TODO: remove once Terrarium 0.2 is released
++Terrarium = {url = "https://github.com/NumericalEarth/Terrarium.jl", rev = "dd4480a2f70590b10d6b304d3c9e513d51cf0ade"} # Terrarium main at our last green CI (25 Nov; 0.1.11-DEV): every released SpeedyWeather (≤ 0.25) allows only Terrarium 0.1
+ 
+ [compat]
+ Breeze = "0.15"
+diff --git a/test/Project.toml b/test/Project.toml
+index 2ed54004..9766bf84 100644
+--- a/test/Project.toml
++++ b/test/Project.toml
+@@ -44,7 +44,7 @@ ZipFile = "a5390f91-8eb1-5f08-bee0-b1d1ffed6cea"
+ 
+ [sources]
+ NumericalEarth = {path = ".."}
+-Terrarium = {url = "https://github.com/NumericalEarth/Terrarium.jl", rev = "main"} # TODO: remove once Terrarium 0.1.11 is released with Oceananigans 0.117 compat
++Terrarium = {url = "https://github.com/NumericalEarth/Terrarium.jl", rev = "dd4480a2f70590b10d6b304d3c9e513d51cf0ade"} # Terrarium main at our last green CI (25 Nov; 0.1.11-DEV): every released SpeedyWeather (≤ 0.25) allows only Terrarium 0.1
+ 
+ [compat]
+ ArchGDAL = "0.10"
+-- 
+2.43.0
+
