@@ -1,0 +1,52 @@
+From 007734a4149caa33d7b0601fe59ae2ef502037c2 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 26 Nov 2026 21:34:28 -0500
+Subject: [PATCH] sea_ice_observations.jl: count the pole hole as ice when the
+ record stores it as 0
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The first run (26 Nov) showed the observed pole hole as open water: a disc of zeros at the pole, 0.33 × 10⁶ km² of
+missing extent in the Central Arctic and the whole domain every day. North of 84°N an observed 0 can only be the hole.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AbhhvpKgDchWb93a6aYpaq
+---
+ analysis/sea_ice_observations.jl | 11 ++++++++---
+ 1 file changed, 8 insertions(+), 3 deletions(-)
+
+diff --git a/analysis/sea_ice_observations.jl b/analysis/sea_ice_observations.jl
+index 2a5a43a..76c1544 100644
+--- a/analysis/sea_ice_observations.jl
++++ b/analysis/sea_ice_observations.jl
+@@ -121,7 +121,9 @@ end
+ first_variable(ds, candidates) = (name = findfirst(n -> haskey(ds, n), candidates);
+                                   name === nothing ? nothing : candidates[name])
+ 
+-# Concentration in 0–1; the pole hole (flag 2.51) as full ice; coast, land, lakes and missing as NaN
++# Concentration in 0–1; the pole hole as full ice; coast, land, lakes and missing as NaN. The record leaves the pole hole
++# at 0 (seen 26 Nov 2026), or flags it 2.51: north of 84°N an exact 0 can only be the hole (no open water there in
++# 2004–06, Sep–Dec or otherwise)
+ function read_observation(path)
+     ds = Dataset(path)
+     name = first_variable(ds, ["cdr_seaice_conc", "seaice_conc_cdr"])
+@@ -133,10 +135,13 @@ function read_observation(path)
+     y = haskey(ds, "ygrid") ? Float64.(ds["ygrid"][:]) : collect(5837500.0:-25000.0:-5337500.0)
+     latitude_name = first_variable(ds, ["latitude", "lat"])
+     latitude = latitude_name === nothing ? nothing : Float64.(ds[latitude_name][:, :])
++    latitude === nothing && @warn "No latitude in $path: the pole hole cannot be told from open water"
+     close(ds)
+     size(data) == (length(x), length(y)) || error("Unexpected grid in $path: $(size(data)) values, $(length(x)) × $(length(y)) cells")
+-    c = map(data) do v
+-        ismissing(v) ? NaN : v ≤ 1 ? Float64(v) : 2.505 < v < 2.515 ? 1.0 : NaN
++    pole_hole(k) = latitude !== nothing && latitude[k] ≥ 84
++    c = map(CartesianIndices(data)) do k
++        v = data[k]
++        ismissing(v) ? NaN : v == 0 && pole_hole(k) ? 1.0 : v ≤ 1 ? Float64(v) : 2.505 < v < 2.515 ? 1.0 : NaN
+     end
+     return c, x, y, latitude
+ end
+-- 
+2.43.0
+
