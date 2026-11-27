@@ -1,0 +1,52 @@
+From 3c55ad9032157f6891c67a355fbd62c88a86a9e6 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 27 Nov 2026 07:16:58 -0500
+Subject: [PATCH] Sections: count each face once where two segments meet
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+section_faces adds the faces of each segment of a section; where two segments meet, their wedges can overlap by a cell
+and the same face was counted by both segments (sign ±2). On the 15 km grid, Fram Strait's section did this at the
+10°E waypoint, in the West Spitsbergen Current (u(279, 215), v(278, 215)): over Sep-Dec 2005 Fram's southward transport
+came out -0.26 Sv instead of -2.14 Sv on the box's boundary (GLORYS about -2.2). The signs are now clamped to -1, 0, +1,
+with a log line when a section had such faces. Davis, the BSO and Bering were not affected; the multi-waypoint
+Greenland-Scotland Ridge sections of sections.toml (#50) make it more likely.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Abhhvmt8meskhHGBgsw6yN
+---
+ transports.jl | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/transports.jl b/transports.jl
+index 746f6c6..0ef7b25 100644
+--- a/transports.jl
++++ b/transports.jl
+@@ -57,6 +57,11 @@ For each segment, the cells to the right of its great circle and between its two
+ marked cell and one to the left of the great circle are the faces the segment crosses, with sign +1 where the positive
+ velocity points into the marked cell. Cells on the edge of the domain are never marked, so the domain edges are not
+ section faces.
++
++Where two segments meet, their wedges can overlap by a cell, and both segments then count the same face (sign ±2).
++Each face is counted once: the signs are clamped to -1, 0, +1. (Without this, on the 15 km grid two faces of Fram
++Strait's section at the 10°E waypoint, in the West Spitsbergen Current, were counted twice, and Fram's southward
++transport came out -0.26 Sv instead of -2.14 Sv over Sep-Dec 2005.)
+ """
+ function section_faces(grid, lons, lats)
+     grid = on_architecture(CPU(), grid)
+@@ -91,7 +96,10 @@ function section_faces(grid, lons, lats)
+         end
+     end
+ 
+-    return sᵘ, sᵛ
++    doubled = count(s -> abs(s) > 1, sᵘ) + count(s -> abs(s) > 1, sᵛ)
++    doubled > 0 && @info "Section through ($(first(lons))°E, $(first(lats))°N) … ($(last(lons))°E, $(last(lats))°N): " *
++                         "$doubled faces crossed by two segments where they meet, counted once"
++    return sign.(sᵘ), sign.(sᵛ)
+ end
+ 
+ # A face is open if it is not on or below the bathymetry. Only the immersed boundary counts, so the faces on the open
+-- 
+2.43.0
+
