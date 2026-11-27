@@ -1,0 +1,70 @@
+From ae3b79a1ce3b09b3deb8ade8b177aeb7774ee28d Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 27 Nov 2026 15:18:54 -0500
+Subject: [PATCH] Restart fix: bring the ocean's GLORYS parent to the restored
+ time before the updates, always
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+NumericalEarth's NestedModel checkpoints only its child, so after a restore the GLORYS parent's clock and its two-day
+window are still at the start date, and the exchanger's update samples the boundary bands for the restored day out of
+that window: garbage (restart probe, 27 Nov: η ~1e9 m, T to 1e38 and NaN, S ~0), hence the DomainError on the first
+step (GPU) and the segmentation fault (CPU). With advance_parent! first (132's option), the bands hold GLORYS's day-3
+state and the first ocean and sea-ice steps run. It is now done on every restart; the option is gone. Nothing changes
+for a run that is not restarted.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Abhhvmt8meskhHGBgsw6yN
+---
+ config_smoke_restart_probe_parent.toml |  5 ++---
+ panarctic.jl                           | 12 +++++++-----
+ 2 files changed, 9 insertions(+), 8 deletions(-)
+
+diff --git a/config_smoke_restart_probe_parent.toml b/config_smoke_restart_probe_parent.toml
+index 238c0e5..4d368c0 100644
+--- a/config_smoke_restart_probe_parent.toml
++++ b/config_smoke_restart_probe_parent.toml
+@@ -1,5 +1,5 @@
+-# Patch 132. Restart probe with [output] restart_advance_parent (the GLORYS parent moved to the restored time before the
+-# updates); otherwise as config_smoke_restart_probe.toml (patch 131): as part b of the restart test (config_smoke_restart_b.toml), but with [output] restart_probe:
++# Patch 132 (since 137 the parent is always moved to the restored time, so this is now the same as
++# config_smoke_restart_probe.toml): as part b of the restart test (config_smoke_restart_b.toml), but with [output] restart_probe:
+ # after the restore it synchronises CUDA after each update and each component's first step, to find the stage whose
+ # kernel throws the DomainError, prints the range of the restored fields and fluxes, and does not run. Submit with
+ # --force (smoke_restart has output). Send the "Restart probe" lines of the runner log.
+@@ -42,7 +42,6 @@ average_hours   = 24      # time-averaged output (3D ocean, free surface, sea ic
+ checkpoint_days = 1      # how often the full model state is saved for restarts
+ restart         = true   # true: continue from the latest checkpoint in output_dir
+ restart_probe   = true   # find the stage that fails after the restore; no run (patch 131)
+-restart_advance_parent = true   # bring the ocean's GLORYS parent to the restored time first (patch 132)
+ monitor_hours   = 1       # monitor.csv: transports through the open sides, mean η against GLORYS's, volume budget,
+                           # fastest point (plotting/volume_budget.jl, plotting/max_speed.jl); 0 = off
+ mixing_depth    = 0      # daily CATKE κᶜ and e over the top this many metres in arctic_mixing.jld2; 0 = off
+diff --git a/panarctic.jl b/panarctic.jl
+index 14b10fe..29ea138 100644
+--- a/panarctic.jl
++++ b/panarctic.jl
+@@ -517,12 +517,14 @@ function probe_all_ranges(label)
+     return nothing
+ end
+ 
+-# [output] restart_advance_parent = true (patch 132): bring the ocean's GLORYS parent to the restored time before the
+-# updates, as advance_parent! does after every step of a run. The checkpoint holds only the NestedModel's child, so after
+-# a restore the parent's clock and its two-day GLORYS window are still at the start date, and the exchanger samples the
+-# boundary bands for the restored day from that window.
++# On a restart, first bring the ocean's GLORYS parent to the restored time, as advance_parent! does after every step of
++# a run (patch 137). The checkpoint holds only the NestedModel's child, so after a restore the parent's clock and its
++# two-day GLORYS window are still at the start date, and the exchanger's update samples the boundary bands for the
++# restored day out of that window: garbage (27 Nov restart probe: η ~1e9 m, T to 1e38 and NaN, S ~0), hence the
++# DomainError of the first step on the GPU and the segmentation fault on the CPU. To raise in NumericalEarth: restoring
++# a NestedModel should bring its parent to the child's time.
+ restart_probe && (try probe_boundaries("restored, before the updates") catch err; @warn "Restart probe: boundaries unreadable" exception = err end)
+-if restart && get(output, "restart_advance_parent", false) && hasproperty(ocean.model, :parent)
++if restart && hasproperty(ocean.model, :parent)
+     NumericalEarth.NestedModels.advance_parent!(ocean.model.parent, ocean_child.clock)
+     restart_probe && probe_sync("advance_parent! of the ocean's GLORYS parent")
+     @info @sprintf("Restart: the ocean's GLORYS parent moved to day %.4f", ocean.model.parent.clock.time / 86400)
+-- 
+2.43.0
+
