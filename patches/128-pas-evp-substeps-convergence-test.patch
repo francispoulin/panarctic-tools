@@ -1,0 +1,769 @@
+From 488351bb36bb5d1e80a2c10b8a0ae9458157316d Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 27 Nov 2026 07:54:50 -0500
+Subject: [PATCH] Sea ice: [sea_ice] evp_substeps, EVP diagnostics output, and
+ an EVP convergence test
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+ClimaSeaIce's adaptive EVP (v0.7.2) moves the stresses about 1/α of the way to their plastic values per substep, with α
+set locally between 50 and 300, and NumericalEarth runs it with 150 substeps: where α exceeds the number of substeps
+the ice may resist less than its strength allows. This tests whether the solver converges.
+
+- [sea_ice] evp_substeps (default 150) is passed to sea_ice_dynamics as SplitExplicitSolver(grid; substeps).
+- [output] evp_diagnostics = true writes daily averages of α, the ice strength P and the deformation rate Δ to
+  arctic_evp.jld2.
+- config_smoke_test_evp.toml: 100 km, 4 days, 300 substeps, with the EVP output.
+- config_evp_dec2005_n150/300/600/1200.toml: 2 days from GLORYS on 1 Dec 2005, as the hindcast twin otherwise (no
+  online transports, no scorecard), differing only in evp_substeps.
+- analysis/evp_convergence.jl: compares the runs' last daily averages with the first config's (the most substeps), by
+  region: mean ice speed, RMS and max of the velocity difference, median α, share of cells with α > N/3 and the mean
+  exp(-N/α); evp_convergence.md and evp_convergence.png.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Abhhvmt8meskhHGBgsw6yN
+---
+ analysis/evp_convergence.jl   | 160 ++++++++++++++++++++++++++++++++++
+ config_evp_dec2005_n1200.toml |  97 +++++++++++++++++++++
+ config_evp_dec2005_n150.toml  |  97 +++++++++++++++++++++
+ config_evp_dec2005_n300.toml  |  97 +++++++++++++++++++++
+ config_evp_dec2005_n600.toml  |  97 +++++++++++++++++++++
+ config_smoke_test_evp.toml    |  94 ++++++++++++++++++++
+ panarctic.jl                  |  21 ++++-
+ 7 files changed, 661 insertions(+), 2 deletions(-)
+ create mode 100644 analysis/evp_convergence.jl
+ create mode 100644 config_evp_dec2005_n1200.toml
+ create mode 100644 config_evp_dec2005_n150.toml
+ create mode 100644 config_evp_dec2005_n300.toml
+ create mode 100644 config_evp_dec2005_n600.toml
+ create mode 100644 config_smoke_test_evp.toml
+
+diff --git a/analysis/evp_convergence.jl b/analysis/evp_convergence.jl
+new file mode 100644
+index 0000000..730db41
+--- /dev/null
++++ b/analysis/evp_convergence.jl
+@@ -0,0 +1,160 @@
++# How well the sea-ice EVP solver converges (patch 128). Runs that differ only in [sea_ice] evp_substeps, from the same
++# start, are compared with the run with the most substeps: where more substeps change the ice velocity, the solver had
++# not converged. Also reads each run's EVP relaxation parameter α (arctic_evp.jld2, [output] evp_diagnostics = true).
++# ClimaSeaIce's adaptive EVP moves the stresses about 1/α of the way to their plastic values per substep (α between 50
++# and 300), so after N substeps a fraction of about exp(-N/α) is left: the "unconverged" columns below.
++#
++#   julia --project=. analysis/evp_convergence.jl config_evp_dec2005_n1200.toml config_evp_dec2005_n150.toml config_evp_dec2005_n300.toml config_evp_dec2005_n600.toml
++#
++# The first config is the reference. Uses the last daily average of each run (the first day includes the ice starting
++# from rest), over cells where the reference's concentration exceeds 15 %. Writes evp_convergence.md to the reference's
++# output_dir and evp_convergence.png to its figure_dir. CPU only.
++
++include("../config.jl")   # the reference run: config, output_dir, figure_dir, ocean_output_file
++
++using Oceananigans
++using Oceananigans.OutputReaders: OnDisk
++using CairoMakie, JLD2, Printf, Statistics, TOML
++
++length(ARGS) ≥ 2 || error("give the reference config first, then at least one other run's config")
++
++run_configs    = [TOML.parsefile(file) for file in ARGS]
++run_dirs       = [joinpath(c["paths"]["output_dir"], c["experiment"]) for c in run_configs]
++run_names      = [c["experiment"] for c in run_configs]
++substep_counts = [get(get(c, "sea_ice", Dict{String, Any}()), "evp_substeps", 150) for c in run_configs]
++
++#####
++##### Grid and regions (as in sea_ice_comparison.jl)
++#####
++
++grid = FieldTimeSeries(ocean_output_file, "η"; backend = OnDisk()).grid
++Nx, Ny, Nz = size(grid)
++ug = grid.underlying_grid
++bottom_height = grid.immersed_boundary.bottom_height
++H = [max(-Float64(bottom_height[i, j, 1]), 0.0) for i in 1:Nx, j in 1:Ny]
++ocean = H .> 0
++λ = mod.(Array(λnodes(ug, Center(), Center(), Center())) .+ 180, 360) .- 180
++φ = Array(φnodes(ug, Center(), Center(), Center()))
++
++regions = [("Whole domain",     (λ, φ, H) -> true),
++           ("Beaufort Gyre",    (λ, φ, H) -> 70.5 ≤ φ ≤ 80.5 && -170 ≤ λ ≤ -130 && H > 300),
++           ("Central Arctic",   (λ, φ, H) -> φ > 82),
++           ("Siberian shelves", (λ, φ, H) -> 66 ≤ φ ≤ 82 && (λ ≥ 60 || λ ≤ -170) && H < 200),
++           ("Barents Sea",      (λ, φ, H) -> 68 ≤ φ ≤ 80 && 15 ≤ λ < 60),
++           ("Greenland Sea",    (λ, φ, H) -> 65 ≤ φ ≤ 82 && -40 ≤ λ < 15),
++           ("Archipelago",      (λ, φ, H) -> 68 ≤ φ ≤ 82 && -125 ≤ λ ≤ -80),
++           ("Baffin Bay",       (λ, φ, H) -> 67 ≤ φ ≤ 78 && -80 < λ ≤ -55)]
++masks = [[ocean[i, j] && test(λ[i, j], φ[i, j], H[i, j]) for i in 1:Nx, j in 1:Ny] for (_, test) in regions]
++
++#####
++##### The last daily average of each run
++#####
++
++# Interior of a saved 2-D array, with or without halos (centre and face fields; u, v taken at the west and south faces)
++function interior_part(a)
++    a = ndims(a) == 3 ? a[:, :, 1] : a
++    hx, hy = (size(a, 1) - Nx) ÷ 2, (size(a, 2) - Ny) ÷ 2
++    return Float64.(a[hx+1:hx+Nx, hy+1:hy+Ny])
++end
++
++function last_average(file, names)
++    jldopen(file) do f
++        iterations = sort(filter(!=("serialized"), keys(f["timeseries/t"])), by = s -> parse(Int, s))
++        last_iteration = last(iterations)
++        day = f["timeseries/t/$last_iteration"] / 86400
++        fields = Dict(name => interior_part(f["timeseries/$name/$last_iteration"]) for name in names)
++        return day, fields
++    end
++end
++
++ice_runs = [last_average(joinpath(dir, "arctic_sea_ice.jld2"), ("h", "ℵ", "uᵢ", "vᵢ")) for dir in run_dirs]
++evp_runs = [isfile(joinpath(dir, "arctic_evp.jld2")) ? last(last_average(joinpath(dir, "arctic_evp.jld2"), ("α", "P", "Δ"))) : nothing
++            for dir in run_dirs]
++average_days = [first(r) for r in ice_runs]
++all(≈(first(average_days)), average_days) || @warn "The runs' last averages end on different days" average_days
++
++reference = last(first(ice_runs))
++ice = ocean .& (reference["ℵ"] .> 0.15)
++
++ice_speed(f) = sqrt.(f["uᵢ"] .^ 2 .+ f["vᵢ"] .^ 2)
++speed_difference(f, g) = sqrt.((f["uᵢ"] .- g["uᵢ"]) .^ 2 .+ (f["vᵢ"] .- g["vᵢ"]) .^ 2)
++unconverged_fraction(α, substeps) = exp.(-substeps ./ max.(α, 1))
++
++reference_speed = ice_speed(reference)
++differences = [speed_difference(last(r), reference) for r in ice_runs]
++
++#####
++##### Table
++#####
++
++format_number(x) = isfinite(x) ? @sprintf("%.3f", x) : "—"
++
++io = IOBuffer()
++println(io, "# EVP convergence: runs against $(first(run_names)) (N = $(first(substep_counts)) substeps)\n")
++println(io, @sprintf("Daily average ending on day %.2f; cells with reference concentration > 15 %%. Speeds in m/s. ", first(average_days)),
++            "|Δu|: the vector difference of the ice velocity from the reference. Unconverged: exp(−N/α) from the daily-mean ",
++            "relaxation parameter α, the part of the way to the plastic stresses left after N substeps.\n")
++for (r, (region_name, _)) in enumerate(regions)
++    cells = masks[r] .& ice
++    println(io, "## $region_name ($(count(cells)) cells)\n")
++    println(io, "| Run | N | mean speed | RMS abs(Δu) | RMS / mean speed | max abs(Δu) | median α | α > N/3 (%) | mean unconverged |")
++    println(io, "|---|---|---|---|---|---|---|---|---|")
++    for (k, name) in enumerate(run_names)
++        if count(cells) == 0
++            println(io, "| $name | $(substep_counts[k]) | — | — | — | — | — | — | — |")
++            continue
++        end
++        mean_speed = mean(ice_speed(last(ice_runs[k]))[cells])
++        rms_difference = sqrt(mean(differences[k][cells] .^ 2))
++        relative = rms_difference / mean(reference_speed[cells])
++        max_difference = maximum(differences[k][cells])
++        if isnothing(evp_runs[k])
++            α_text = ("—", "—", "—")
++        else
++            α = evp_runs[k]["α"][cells]
++            α_text = (format_number(median(α)),
++                      @sprintf("%.1f", 100 * count(α .> substep_counts[k] / 3) / length(α)),
++                      format_number(mean(unconverged_fraction(α, substep_counts[k]))))
++        end
++        println(io, "| $name | $(substep_counts[k]) | $(format_number(mean_speed)) | $(format_number(rms_difference)) | ",
++                    "$(format_number(relative)) | $(format_number(max_difference)) | $(α_text[1]) | $(α_text[2]) | $(α_text[3]) |")
++    end
++    println(io)
++end
++
++table_text = String(take!(io))
++print(table_text)
++table_file = joinpath(output_dir, "evp_convergence.md")
++write(table_file, table_text)
++@info "Wrote $table_file"
++
++#####
++##### Maps: reference speed and each run's difference from it (top); each run's unconverged fraction (bottom)
++#####
++
++masked(a) = [ice[i, j] ? a[i, j] : NaN for i in 1:Nx, j in 1:Ny]
++
++fig = Figure(size = (420 * length(run_names), 820))
++for (k, name) in enumerate(run_names)
++    top = fig[1, k] = GridLayout()
++    if k == 1
++        ax = Axis(top[1, 1]; title = "$name: ice speed (m/s)", aspect = DataAspect())
++        hm = heatmap!(ax, masked(reference_speed); colorrange = (0, 0.5), colormap = :viridis)
++    else
++        ax = Axis(top[1, 1]; title = "$name: abs(Δu) from $(first(run_names)) (m/s)", aspect = DataAspect())
++        hm = heatmap!(ax, masked(differences[k]); colorrange = (0, 0.1), colormap = :magma)
++    end
++    hidedecorations!(ax)
++    Colorbar(top[1, 2], hm)
++
++    isnothing(evp_runs[k]) && continue
++    bottom = fig[2, k] = GridLayout()
++    ax = Axis(bottom[1, 1]; title = "$name: exp(−N/α), N = $(substep_counts[k])", aspect = DataAspect())
++    hm = heatmap!(ax, masked(unconverged_fraction(evp_runs[k]["α"], substep_counts[k])); colorrange = (0, 1), colormap = :viridis)
++    hidedecorations!(ax)
++    Colorbar(bottom[1, 2], hm)
++end
++
++figure_file = joinpath(figure_dir, "evp_convergence.png")
++save(figure_file, fig)
++@info "Wrote $figure_file"
+diff --git a/config_evp_dec2005_n1200.toml b/config_evp_dec2005_n1200.toml
+new file mode 100644
+index 0000000..2ef5b2a
+--- /dev/null
++++ b/config_evp_dec2005_n1200.toml
+@@ -0,0 +1,97 @@
++# Patch 128. EVP convergence test: 2 days from GLORYS on 1 Dec 2005 with 1200 EVP substeps, otherwise as the hindcast
++# twin (hindcast_2005_2006_nemo_nz100_nospinup). The four runs n150, n300, n600, n1200 differ only in evp_substeps;
++# analysis/evp_convergence.jl compares them with n1200.
++
++architecture = "GPU"   # "GPU" or "CPU"
++experiment   = "evp_dec2005_n1200"  # name of the run: output and figures go to output_dir/<experiment> and figure_dir/<experiment>
++
++[grid]
++spacing_km = 15     # largest horizontal grid spacing [km] (at the pole; ~15% finer near the Atlantic edge)
++Nz         = 100    # vertical levels
++depth      = 5000   # maximum depth (m)
++bathymetry       = "GEBCO2026"   # "GEBCO2026" (15″, with IBCAO), "ETOPO" (ETOPO 2022, 60″) or "GLORYS" (GLORYS's own sea floor)
++bottom           = "partial"     # "partial": bottom cells cut at the sea floor; "full": whole cells
++partial_cell_fix = true          # with partial cells: flux-form momentum advection at bottom-cell thickness jumps
++                                 # (Oceananigans.jl#6533), which removes the bottom jets of issue #6532
++
++[time]
++start_date = 2005-12-01   # initial condition (GLORYS); the run starts at 00:00 on this date
++end_date   = 2005-12-03   # the run ends at 00:00 on this date; for short tests a date and time, e.g. 1993-01-01T03:00
++dt_minutes = 10           # time step
++
++[atmosphere]
++jra55 = "multi_year"   # "multi_year": JRA55 for the run's own dates; "repeat_year": the 1990–91 repeat year
++pressure = false           # true: JRA55's sea-level pressure acts on the ocean (nested_pressure_fix.jl). Off for now: with it,
++                           # Fram Strait drifts far from GLORYS (1–5 Jan 1993, 15 km: day 4 −12.4 Sv, GLORYS −2.1, −5.6
++                           # without pressure; the same at 100 km), which looks like an error in the pressure path, not
++                           # physics. Main has had no pressure on the ocean since #43.
++inverse_barometer = false  # with pressure = true: GLORYS's η carries no response to the pressure (issue #37), so add the
++                           # inverse-barometer sea level −(pᵃ − ⟨pᵃ⟩)/(ρ₀g) to GLORYS's η at the open sides (Flather) and
++                           # to the initial free surface; its domain mean is removed, so the volume is unchanged.
++                           # Keep false with pressure = false: then neither the model nor GLORYS feels the pressure
++
++[output]
++checkpoint_cleanup = true   # true: only the latest checkpoint is kept (patch 112)
++scorecard       = false   # no scorecard from the runner (patch 112); analyses run by hand afterwards
++evp_diagnostics = true    # α, P, Δ of the EVP solver in arctic_evp.jld2 (patch 128)
++average_hours   = 24      # time-averaged output (3D ocean, free surface, sea ice), written to output_dir
++checkpoint_days = 30      # how often the full model state is saved for restarts
++restart         = false  # true: continue from the latest checkpoint in output_dir
++monitor_hours   = 1       # monitor.csv: transports through the open sides, mean η against GLORYS's, volume budget,
++                          # fastest point (plotting/volume_budget.jl, plotting/max_speed.jl); 0 = off
++mixing_depth    = 0      # daily CATKE κᶜ and e over the top this many metres in arctic_mixing.jld2; 0 = off
++post_run_analysis = false # the runner's scorecard step is skipped too (scorecard = false below)
++
++[transports]
++# Volume, heat, salt and freshwater transports through the sections below and the open boundaries (see transports.jl).
++online                = false  # true: computed every time step and averaged over average_hours, written to arctic_transports.jld2
++reference_temperature = 0      # heat transport relative to this temperature (°C)
++reference_salinity    = 34.8   # freshwater transport relative to this salinity (g/kg)
++
++# Each section is a great-circle path through (longitude, latitude) waypoints. Positive transport flows to the right,
++# walking from the first waypoint to the last; these are ordered so that positive is into the Arctic. Both ends should
++# be on land, so the section spans the whole strait on any grid. Check with plotting/transport_sections.jl.
++[transports.sections]
++# Fram Strait follows the mooring array at 78°50′N; intermediate waypoints keep the great circles on that latitude.
++fram_strait         = { lon = [15.0, 10.0, 5.0, 0.0, -5.0, -10.0, -15.0, -20.0],
++                        lat = [78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333] }
++# Barents Sea Opening follows the mooring line from Norway (Fugløya) via Bjørnøya to Sørkapp, Svalbard.
++barents_sea_opening = { lon = [20.0, 19.0, 16.5],  lat = [70.0, 74.45, 77.0] }
++bering_strait       = { lon = [-166.0, -171.0], lat = [66.0, 66.0] }
++davis_strait        = { lon = [-53.0, -63.0],   lat = [67.0, 66.5] }
++
++[paths]
++data_dir   = ""   # where downloads are stored; "" = each dataset's default cache
++output_dir = "output"    # model output: time averages (.jld2), checkpoints and the config; one folder per experiment
++figure_dir = "figures"   # figures and movies from the plotting/ scripts; one folder per experiment
++
++[boundaries]
++velocity_inflow_days = 0.0417   # oblique radiation on u, v: nudging timescale toward GLORYS on inflow (0.0417 days = 1 hour).
++                                # With 1 day, a partial bottom cell on the Atlantic open face drifted to −0.9 m/s
++                                # (GLORYS −0.26); 1 hour removes it and moves the section transports by < 0.1 Sv
++tracer_inflow_km     = 20  # T, S reservoir inflow relaxation length, both open sides
++relaxation_hours     = 6   # T, S and baroclinic u, v relax toward GLORYS in a ~2/3° band along the open sides
++                           # over this timescale; 0 = off (nested_ocean_model's default is 6)
++
++# Volume control (volume_control.jl): the net inflow through the two open sides together is pinned at every barotropic
++# substep, as NEMO and ROMS do; Flather splits it between the sides. Without it the domain's volume drifts from GLORYS's.
++follow_glorys_volume      = true   # true: the net inflow follows GLORYS's domain-mean η, with the surface freshwater handed back
++volume_relaxation_days    = 1      # with follow_glorys_volume: time over which the remaining drift from GLORYS's mean η is removed
++follow_glorys_tendency    = false  # with follow_glorys_volume: true also follows GLORYS's rate of change exactly
++# net_inflow_Sv           = 0.0    # with follow_glorys_volume = false: a constant net inflow instead (Sv, positive into the domain);
++                                   # with neither, Flather alone (no volume control)
++net_inflow_depth_exponent = 0.5    # the pin's correction to each boundary column ∝ Hᵖ: 0 uniform per length, 1 uniform velocity
++                                   # (NEMO, ROMS), 0.5 a uniform shift of GLORYS's η in Flather
++
++[ocean]
++closure = "NEMO"   # NEMO's TKE scheme (patch 085): "CATKE" (default), "NEMO", "RiBased", "TKEDissipation" or "none"
++nemo_parameters = "glorys12"          # "reference" (NEMO 3.6-4.x namelist) or "glorys12" (NEMO 3.1 code defaults; patch 087)
++# nemo_surface_tke = 3.75             # surface TKE = this × u★² (NEMO's rn_ebb; default: the preset's)
++# nemo_convective_diffusivity = 100   # m²/s where N² < 0 (NEMO's rn_evd; 0 = off)
++
++[sea_ice]
++evp_substeps = 1200   # EVP substeps per time step (default 150; patch 128)
++ice_salinity               = 6        # g/kg (default 4)
++ice_ocean_drag_coefficient = 5e-3     # (default 5.5e-3)
++ice_compressive_strength   = 20000    # P*, N/m² (default 27 500)
++albedo                     = "ccsm3"  # "constant" (0.7, default) or "ccsm3" (state-dependent, SeaIceAlbedo)
+diff --git a/config_evp_dec2005_n150.toml b/config_evp_dec2005_n150.toml
+new file mode 100644
+index 0000000..6b74e4e
+--- /dev/null
++++ b/config_evp_dec2005_n150.toml
+@@ -0,0 +1,97 @@
++# Patch 128. EVP convergence test: 2 days from GLORYS on 1 Dec 2005 with 150 EVP substeps, otherwise as the hindcast
++# twin (hindcast_2005_2006_nemo_nz100_nospinup). The four runs n150, n300, n600, n1200 differ only in evp_substeps;
++# analysis/evp_convergence.jl compares them with n1200.
++
++architecture = "GPU"   # "GPU" or "CPU"
++experiment   = "evp_dec2005_n150"  # name of the run: output and figures go to output_dir/<experiment> and figure_dir/<experiment>
++
++[grid]
++spacing_km = 15     # largest horizontal grid spacing [km] (at the pole; ~15% finer near the Atlantic edge)
++Nz         = 100    # vertical levels
++depth      = 5000   # maximum depth (m)
++bathymetry       = "GEBCO2026"   # "GEBCO2026" (15″, with IBCAO), "ETOPO" (ETOPO 2022, 60″) or "GLORYS" (GLORYS's own sea floor)
++bottom           = "partial"     # "partial": bottom cells cut at the sea floor; "full": whole cells
++partial_cell_fix = true          # with partial cells: flux-form momentum advection at bottom-cell thickness jumps
++                                 # (Oceananigans.jl#6533), which removes the bottom jets of issue #6532
++
++[time]
++start_date = 2005-12-01   # initial condition (GLORYS); the run starts at 00:00 on this date
++end_date   = 2005-12-03   # the run ends at 00:00 on this date; for short tests a date and time, e.g. 1993-01-01T03:00
++dt_minutes = 10           # time step
++
++[atmosphere]
++jra55 = "multi_year"   # "multi_year": JRA55 for the run's own dates; "repeat_year": the 1990–91 repeat year
++pressure = false           # true: JRA55's sea-level pressure acts on the ocean (nested_pressure_fix.jl). Off for now: with it,
++                           # Fram Strait drifts far from GLORYS (1–5 Jan 1993, 15 km: day 4 −12.4 Sv, GLORYS −2.1, −5.6
++                           # without pressure; the same at 100 km), which looks like an error in the pressure path, not
++                           # physics. Main has had no pressure on the ocean since #43.
++inverse_barometer = false  # with pressure = true: GLORYS's η carries no response to the pressure (issue #37), so add the
++                           # inverse-barometer sea level −(pᵃ − ⟨pᵃ⟩)/(ρ₀g) to GLORYS's η at the open sides (Flather) and
++                           # to the initial free surface; its domain mean is removed, so the volume is unchanged.
++                           # Keep false with pressure = false: then neither the model nor GLORYS feels the pressure
++
++[output]
++checkpoint_cleanup = true   # true: only the latest checkpoint is kept (patch 112)
++scorecard       = false   # no scorecard from the runner (patch 112); analyses run by hand afterwards
++evp_diagnostics = true    # α, P, Δ of the EVP solver in arctic_evp.jld2 (patch 128)
++average_hours   = 24      # time-averaged output (3D ocean, free surface, sea ice), written to output_dir
++checkpoint_days = 30      # how often the full model state is saved for restarts
++restart         = false  # true: continue from the latest checkpoint in output_dir
++monitor_hours   = 1       # monitor.csv: transports through the open sides, mean η against GLORYS's, volume budget,
++                          # fastest point (plotting/volume_budget.jl, plotting/max_speed.jl); 0 = off
++mixing_depth    = 0      # daily CATKE κᶜ and e over the top this many metres in arctic_mixing.jld2; 0 = off
++post_run_analysis = false # the runner's scorecard step is skipped too (scorecard = false below)
++
++[transports]
++# Volume, heat, salt and freshwater transports through the sections below and the open boundaries (see transports.jl).
++online                = false  # true: computed every time step and averaged over average_hours, written to arctic_transports.jld2
++reference_temperature = 0      # heat transport relative to this temperature (°C)
++reference_salinity    = 34.8   # freshwater transport relative to this salinity (g/kg)
++
++# Each section is a great-circle path through (longitude, latitude) waypoints. Positive transport flows to the right,
++# walking from the first waypoint to the last; these are ordered so that positive is into the Arctic. Both ends should
++# be on land, so the section spans the whole strait on any grid. Check with plotting/transport_sections.jl.
++[transports.sections]
++# Fram Strait follows the mooring array at 78°50′N; intermediate waypoints keep the great circles on that latitude.
++fram_strait         = { lon = [15.0, 10.0, 5.0, 0.0, -5.0, -10.0, -15.0, -20.0],
++                        lat = [78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333] }
++# Barents Sea Opening follows the mooring line from Norway (Fugløya) via Bjørnøya to Sørkapp, Svalbard.
++barents_sea_opening = { lon = [20.0, 19.0, 16.5],  lat = [70.0, 74.45, 77.0] }
++bering_strait       = { lon = [-166.0, -171.0], lat = [66.0, 66.0] }
++davis_strait        = { lon = [-53.0, -63.0],   lat = [67.0, 66.5] }
++
++[paths]
++data_dir   = ""   # where downloads are stored; "" = each dataset's default cache
++output_dir = "output"    # model output: time averages (.jld2), checkpoints and the config; one folder per experiment
++figure_dir = "figures"   # figures and movies from the plotting/ scripts; one folder per experiment
++
++[boundaries]
++velocity_inflow_days = 0.0417   # oblique radiation on u, v: nudging timescale toward GLORYS on inflow (0.0417 days = 1 hour).
++                                # With 1 day, a partial bottom cell on the Atlantic open face drifted to −0.9 m/s
++                                # (GLORYS −0.26); 1 hour removes it and moves the section transports by < 0.1 Sv
++tracer_inflow_km     = 20  # T, S reservoir inflow relaxation length, both open sides
++relaxation_hours     = 6   # T, S and baroclinic u, v relax toward GLORYS in a ~2/3° band along the open sides
++                           # over this timescale; 0 = off (nested_ocean_model's default is 6)
++
++# Volume control (volume_control.jl): the net inflow through the two open sides together is pinned at every barotropic
++# substep, as NEMO and ROMS do; Flather splits it between the sides. Without it the domain's volume drifts from GLORYS's.
++follow_glorys_volume      = true   # true: the net inflow follows GLORYS's domain-mean η, with the surface freshwater handed back
++volume_relaxation_days    = 1      # with follow_glorys_volume: time over which the remaining drift from GLORYS's mean η is removed
++follow_glorys_tendency    = false  # with follow_glorys_volume: true also follows GLORYS's rate of change exactly
++# net_inflow_Sv           = 0.0    # with follow_glorys_volume = false: a constant net inflow instead (Sv, positive into the domain);
++                                   # with neither, Flather alone (no volume control)
++net_inflow_depth_exponent = 0.5    # the pin's correction to each boundary column ∝ Hᵖ: 0 uniform per length, 1 uniform velocity
++                                   # (NEMO, ROMS), 0.5 a uniform shift of GLORYS's η in Flather
++
++[ocean]
++closure = "NEMO"   # NEMO's TKE scheme (patch 085): "CATKE" (default), "NEMO", "RiBased", "TKEDissipation" or "none"
++nemo_parameters = "glorys12"          # "reference" (NEMO 3.6-4.x namelist) or "glorys12" (NEMO 3.1 code defaults; patch 087)
++# nemo_surface_tke = 3.75             # surface TKE = this × u★² (NEMO's rn_ebb; default: the preset's)
++# nemo_convective_diffusivity = 100   # m²/s where N² < 0 (NEMO's rn_evd; 0 = off)
++
++[sea_ice]
++evp_substeps = 150   # EVP substeps per time step (default 150; patch 128)
++ice_salinity               = 6        # g/kg (default 4)
++ice_ocean_drag_coefficient = 5e-3     # (default 5.5e-3)
++ice_compressive_strength   = 20000    # P*, N/m² (default 27 500)
++albedo                     = "ccsm3"  # "constant" (0.7, default) or "ccsm3" (state-dependent, SeaIceAlbedo)
+diff --git a/config_evp_dec2005_n300.toml b/config_evp_dec2005_n300.toml
+new file mode 100644
+index 0000000..06d20e7
+--- /dev/null
++++ b/config_evp_dec2005_n300.toml
+@@ -0,0 +1,97 @@
++# Patch 128. EVP convergence test: 2 days from GLORYS on 1 Dec 2005 with 300 EVP substeps, otherwise as the hindcast
++# twin (hindcast_2005_2006_nemo_nz100_nospinup). The four runs n150, n300, n600, n1200 differ only in evp_substeps;
++# analysis/evp_convergence.jl compares them with n1200.
++
++architecture = "GPU"   # "GPU" or "CPU"
++experiment   = "evp_dec2005_n300"  # name of the run: output and figures go to output_dir/<experiment> and figure_dir/<experiment>
++
++[grid]
++spacing_km = 15     # largest horizontal grid spacing [km] (at the pole; ~15% finer near the Atlantic edge)
++Nz         = 100    # vertical levels
++depth      = 5000   # maximum depth (m)
++bathymetry       = "GEBCO2026"   # "GEBCO2026" (15″, with IBCAO), "ETOPO" (ETOPO 2022, 60″) or "GLORYS" (GLORYS's own sea floor)
++bottom           = "partial"     # "partial": bottom cells cut at the sea floor; "full": whole cells
++partial_cell_fix = true          # with partial cells: flux-form momentum advection at bottom-cell thickness jumps
++                                 # (Oceananigans.jl#6533), which removes the bottom jets of issue #6532
++
++[time]
++start_date = 2005-12-01   # initial condition (GLORYS); the run starts at 00:00 on this date
++end_date   = 2005-12-03   # the run ends at 00:00 on this date; for short tests a date and time, e.g. 1993-01-01T03:00
++dt_minutes = 10           # time step
++
++[atmosphere]
++jra55 = "multi_year"   # "multi_year": JRA55 for the run's own dates; "repeat_year": the 1990–91 repeat year
++pressure = false           # true: JRA55's sea-level pressure acts on the ocean (nested_pressure_fix.jl). Off for now: with it,
++                           # Fram Strait drifts far from GLORYS (1–5 Jan 1993, 15 km: day 4 −12.4 Sv, GLORYS −2.1, −5.6
++                           # without pressure; the same at 100 km), which looks like an error in the pressure path, not
++                           # physics. Main has had no pressure on the ocean since #43.
++inverse_barometer = false  # with pressure = true: GLORYS's η carries no response to the pressure (issue #37), so add the
++                           # inverse-barometer sea level −(pᵃ − ⟨pᵃ⟩)/(ρ₀g) to GLORYS's η at the open sides (Flather) and
++                           # to the initial free surface; its domain mean is removed, so the volume is unchanged.
++                           # Keep false with pressure = false: then neither the model nor GLORYS feels the pressure
++
++[output]
++checkpoint_cleanup = true   # true: only the latest checkpoint is kept (patch 112)
++scorecard       = false   # no scorecard from the runner (patch 112); analyses run by hand afterwards
++evp_diagnostics = true    # α, P, Δ of the EVP solver in arctic_evp.jld2 (patch 128)
++average_hours   = 24      # time-averaged output (3D ocean, free surface, sea ice), written to output_dir
++checkpoint_days = 30      # how often the full model state is saved for restarts
++restart         = false  # true: continue from the latest checkpoint in output_dir
++monitor_hours   = 1       # monitor.csv: transports through the open sides, mean η against GLORYS's, volume budget,
++                          # fastest point (plotting/volume_budget.jl, plotting/max_speed.jl); 0 = off
++mixing_depth    = 0      # daily CATKE κᶜ and e over the top this many metres in arctic_mixing.jld2; 0 = off
++post_run_analysis = false # the runner's scorecard step is skipped too (scorecard = false below)
++
++[transports]
++# Volume, heat, salt and freshwater transports through the sections below and the open boundaries (see transports.jl).
++online                = false  # true: computed every time step and averaged over average_hours, written to arctic_transports.jld2
++reference_temperature = 0      # heat transport relative to this temperature (°C)
++reference_salinity    = 34.8   # freshwater transport relative to this salinity (g/kg)
++
++# Each section is a great-circle path through (longitude, latitude) waypoints. Positive transport flows to the right,
++# walking from the first waypoint to the last; these are ordered so that positive is into the Arctic. Both ends should
++# be on land, so the section spans the whole strait on any grid. Check with plotting/transport_sections.jl.
++[transports.sections]
++# Fram Strait follows the mooring array at 78°50′N; intermediate waypoints keep the great circles on that latitude.
++fram_strait         = { lon = [15.0, 10.0, 5.0, 0.0, -5.0, -10.0, -15.0, -20.0],
++                        lat = [78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333] }
++# Barents Sea Opening follows the mooring line from Norway (Fugløya) via Bjørnøya to Sørkapp, Svalbard.
++barents_sea_opening = { lon = [20.0, 19.0, 16.5],  lat = [70.0, 74.45, 77.0] }
++bering_strait       = { lon = [-166.0, -171.0], lat = [66.0, 66.0] }
++davis_strait        = { lon = [-53.0, -63.0],   lat = [67.0, 66.5] }
++
++[paths]
++data_dir   = ""   # where downloads are stored; "" = each dataset's default cache
++output_dir = "output"    # model output: time averages (.jld2), checkpoints and the config; one folder per experiment
++figure_dir = "figures"   # figures and movies from the plotting/ scripts; one folder per experiment
++
++[boundaries]
++velocity_inflow_days = 0.0417   # oblique radiation on u, v: nudging timescale toward GLORYS on inflow (0.0417 days = 1 hour).
++                                # With 1 day, a partial bottom cell on the Atlantic open face drifted to −0.9 m/s
++                                # (GLORYS −0.26); 1 hour removes it and moves the section transports by < 0.1 Sv
++tracer_inflow_km     = 20  # T, S reservoir inflow relaxation length, both open sides
++relaxation_hours     = 6   # T, S and baroclinic u, v relax toward GLORYS in a ~2/3° band along the open sides
++                           # over this timescale; 0 = off (nested_ocean_model's default is 6)
++
++# Volume control (volume_control.jl): the net inflow through the two open sides together is pinned at every barotropic
++# substep, as NEMO and ROMS do; Flather splits it between the sides. Without it the domain's volume drifts from GLORYS's.
++follow_glorys_volume      = true   # true: the net inflow follows GLORYS's domain-mean η, with the surface freshwater handed back
++volume_relaxation_days    = 1      # with follow_glorys_volume: time over which the remaining drift from GLORYS's mean η is removed
++follow_glorys_tendency    = false  # with follow_glorys_volume: true also follows GLORYS's rate of change exactly
++# net_inflow_Sv           = 0.0    # with follow_glorys_volume = false: a constant net inflow instead (Sv, positive into the domain);
++                                   # with neither, Flather alone (no volume control)
++net_inflow_depth_exponent = 0.5    # the pin's correction to each boundary column ∝ Hᵖ: 0 uniform per length, 1 uniform velocity
++                                   # (NEMO, ROMS), 0.5 a uniform shift of GLORYS's η in Flather
++
++[ocean]
++closure = "NEMO"   # NEMO's TKE scheme (patch 085): "CATKE" (default), "NEMO", "RiBased", "TKEDissipation" or "none"
++nemo_parameters = "glorys12"          # "reference" (NEMO 3.6-4.x namelist) or "glorys12" (NEMO 3.1 code defaults; patch 087)
++# nemo_surface_tke = 3.75             # surface TKE = this × u★² (NEMO's rn_ebb; default: the preset's)
++# nemo_convective_diffusivity = 100   # m²/s where N² < 0 (NEMO's rn_evd; 0 = off)
++
++[sea_ice]
++evp_substeps = 300   # EVP substeps per time step (default 150; patch 128)
++ice_salinity               = 6        # g/kg (default 4)
++ice_ocean_drag_coefficient = 5e-3     # (default 5.5e-3)
++ice_compressive_strength   = 20000    # P*, N/m² (default 27 500)
++albedo                     = "ccsm3"  # "constant" (0.7, default) or "ccsm3" (state-dependent, SeaIceAlbedo)
+diff --git a/config_evp_dec2005_n600.toml b/config_evp_dec2005_n600.toml
+new file mode 100644
+index 0000000..ad1a25e
+--- /dev/null
++++ b/config_evp_dec2005_n600.toml
+@@ -0,0 +1,97 @@
++# Patch 128. EVP convergence test: 2 days from GLORYS on 1 Dec 2005 with 600 EVP substeps, otherwise as the hindcast
++# twin (hindcast_2005_2006_nemo_nz100_nospinup). The four runs n150, n300, n600, n1200 differ only in evp_substeps;
++# analysis/evp_convergence.jl compares them with n1200.
++
++architecture = "GPU"   # "GPU" or "CPU"
++experiment   = "evp_dec2005_n600"  # name of the run: output and figures go to output_dir/<experiment> and figure_dir/<experiment>
++
++[grid]
++spacing_km = 15     # largest horizontal grid spacing [km] (at the pole; ~15% finer near the Atlantic edge)
++Nz         = 100    # vertical levels
++depth      = 5000   # maximum depth (m)
++bathymetry       = "GEBCO2026"   # "GEBCO2026" (15″, with IBCAO), "ETOPO" (ETOPO 2022, 60″) or "GLORYS" (GLORYS's own sea floor)
++bottom           = "partial"     # "partial": bottom cells cut at the sea floor; "full": whole cells
++partial_cell_fix = true          # with partial cells: flux-form momentum advection at bottom-cell thickness jumps
++                                 # (Oceananigans.jl#6533), which removes the bottom jets of issue #6532
++
++[time]
++start_date = 2005-12-01   # initial condition (GLORYS); the run starts at 00:00 on this date
++end_date   = 2005-12-03   # the run ends at 00:00 on this date; for short tests a date and time, e.g. 1993-01-01T03:00
++dt_minutes = 10           # time step
++
++[atmosphere]
++jra55 = "multi_year"   # "multi_year": JRA55 for the run's own dates; "repeat_year": the 1990–91 repeat year
++pressure = false           # true: JRA55's sea-level pressure acts on the ocean (nested_pressure_fix.jl). Off for now: with it,
++                           # Fram Strait drifts far from GLORYS (1–5 Jan 1993, 15 km: day 4 −12.4 Sv, GLORYS −2.1, −5.6
++                           # without pressure; the same at 100 km), which looks like an error in the pressure path, not
++                           # physics. Main has had no pressure on the ocean since #43.
++inverse_barometer = false  # with pressure = true: GLORYS's η carries no response to the pressure (issue #37), so add the
++                           # inverse-barometer sea level −(pᵃ − ⟨pᵃ⟩)/(ρ₀g) to GLORYS's η at the open sides (Flather) and
++                           # to the initial free surface; its domain mean is removed, so the volume is unchanged.
++                           # Keep false with pressure = false: then neither the model nor GLORYS feels the pressure
++
++[output]
++checkpoint_cleanup = true   # true: only the latest checkpoint is kept (patch 112)
++scorecard       = false   # no scorecard from the runner (patch 112); analyses run by hand afterwards
++evp_diagnostics = true    # α, P, Δ of the EVP solver in arctic_evp.jld2 (patch 128)
++average_hours   = 24      # time-averaged output (3D ocean, free surface, sea ice), written to output_dir
++checkpoint_days = 30      # how often the full model state is saved for restarts
++restart         = false  # true: continue from the latest checkpoint in output_dir
++monitor_hours   = 1       # monitor.csv: transports through the open sides, mean η against GLORYS's, volume budget,
++                          # fastest point (plotting/volume_budget.jl, plotting/max_speed.jl); 0 = off
++mixing_depth    = 0      # daily CATKE κᶜ and e over the top this many metres in arctic_mixing.jld2; 0 = off
++post_run_analysis = false # the runner's scorecard step is skipped too (scorecard = false below)
++
++[transports]
++# Volume, heat, salt and freshwater transports through the sections below and the open boundaries (see transports.jl).
++online                = false  # true: computed every time step and averaged over average_hours, written to arctic_transports.jld2
++reference_temperature = 0      # heat transport relative to this temperature (°C)
++reference_salinity    = 34.8   # freshwater transport relative to this salinity (g/kg)
++
++# Each section is a great-circle path through (longitude, latitude) waypoints. Positive transport flows to the right,
++# walking from the first waypoint to the last; these are ordered so that positive is into the Arctic. Both ends should
++# be on land, so the section spans the whole strait on any grid. Check with plotting/transport_sections.jl.
++[transports.sections]
++# Fram Strait follows the mooring array at 78°50′N; intermediate waypoints keep the great circles on that latitude.
++fram_strait         = { lon = [15.0, 10.0, 5.0, 0.0, -5.0, -10.0, -15.0, -20.0],
++                        lat = [78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333] }
++# Barents Sea Opening follows the mooring line from Norway (Fugløya) via Bjørnøya to Sørkapp, Svalbard.
++barents_sea_opening = { lon = [20.0, 19.0, 16.5],  lat = [70.0, 74.45, 77.0] }
++bering_strait       = { lon = [-166.0, -171.0], lat = [66.0, 66.0] }
++davis_strait        = { lon = [-53.0, -63.0],   lat = [67.0, 66.5] }
++
++[paths]
++data_dir   = ""   # where downloads are stored; "" = each dataset's default cache
++output_dir = "output"    # model output: time averages (.jld2), checkpoints and the config; one folder per experiment
++figure_dir = "figures"   # figures and movies from the plotting/ scripts; one folder per experiment
++
++[boundaries]
++velocity_inflow_days = 0.0417   # oblique radiation on u, v: nudging timescale toward GLORYS on inflow (0.0417 days = 1 hour).
++                                # With 1 day, a partial bottom cell on the Atlantic open face drifted to −0.9 m/s
++                                # (GLORYS −0.26); 1 hour removes it and moves the section transports by < 0.1 Sv
++tracer_inflow_km     = 20  # T, S reservoir inflow relaxation length, both open sides
++relaxation_hours     = 6   # T, S and baroclinic u, v relax toward GLORYS in a ~2/3° band along the open sides
++                           # over this timescale; 0 = off (nested_ocean_model's default is 6)
++
++# Volume control (volume_control.jl): the net inflow through the two open sides together is pinned at every barotropic
++# substep, as NEMO and ROMS do; Flather splits it between the sides. Without it the domain's volume drifts from GLORYS's.
++follow_glorys_volume      = true   # true: the net inflow follows GLORYS's domain-mean η, with the surface freshwater handed back
++volume_relaxation_days    = 1      # with follow_glorys_volume: time over which the remaining drift from GLORYS's mean η is removed
++follow_glorys_tendency    = false  # with follow_glorys_volume: true also follows GLORYS's rate of change exactly
++# net_inflow_Sv           = 0.0    # with follow_glorys_volume = false: a constant net inflow instead (Sv, positive into the domain);
++                                   # with neither, Flather alone (no volume control)
++net_inflow_depth_exponent = 0.5    # the pin's correction to each boundary column ∝ Hᵖ: 0 uniform per length, 1 uniform velocity
++                                   # (NEMO, ROMS), 0.5 a uniform shift of GLORYS's η in Flather
++
++[ocean]
++closure = "NEMO"   # NEMO's TKE scheme (patch 085): "CATKE" (default), "NEMO", "RiBased", "TKEDissipation" or "none"
++nemo_parameters = "glorys12"          # "reference" (NEMO 3.6-4.x namelist) or "glorys12" (NEMO 3.1 code defaults; patch 087)
++# nemo_surface_tke = 3.75             # surface TKE = this × u★² (NEMO's rn_ebb; default: the preset's)
++# nemo_convective_diffusivity = 100   # m²/s where N² < 0 (NEMO's rn_evd; 0 = off)
++
++[sea_ice]
++evp_substeps = 600   # EVP substeps per time step (default 150; patch 128)
++ice_salinity               = 6        # g/kg (default 4)
++ice_ocean_drag_coefficient = 5e-3     # (default 5.5e-3)
++ice_compressive_strength   = 20000    # P*, N/m² (default 27 500)
++albedo                     = "ccsm3"  # "constant" (0.7, default) or "ccsm3" (state-dependent, SeaIceAlbedo)
+diff --git a/config_smoke_test_evp.toml b/config_smoke_test_evp.toml
+new file mode 100644
+index 0000000..ff892e8
+--- /dev/null
++++ b/config_smoke_test_evp.toml
+@@ -0,0 +1,94 @@
++# Patch 128. Smoke test of [sea_ice] evp_substeps and [output] evp_diagnostics: 100 km, 4 days, as smoke_test_ne094
++# otherwise. Expect the log lines "EVP substeps 300" and "EVP output", and output/smoke_test_evp/arctic_evp.jld2.
++# Smoke test of patch 097: NumericalEarth fjp/net-inflow merged with v0.9.4 (patch 096), with NEMO's TKE scheme
++# (GLORYS12 settings) as in the four-month runs. 100 km, 1–5 September 2005. It checks that the merged NumericalEarth
++# builds, compiles and runs with sea ice before the four-month run; the numbers are not the test. Look for the lines
++#   Rivers: JRA55, each mouth spread over 1.2° (all wet cells)
++#   Vertical mixing: NEMO (…)
++
++architecture = "GPU"   # "GPU" or "CPU"
++experiment   = "smoke_test_evp"  # name of the run: output and figures go to output_dir/<experiment> and figure_dir/<experiment>
++
++[grid]
++spacing_km = 100    # largest horizontal grid spacing [km] (at the pole; ~15% finer near the Atlantic edge)
++Nz         = 20     # vertical levels
++depth      = 5000   # maximum depth (m)
++bathymetry       = "GEBCO2026"   # "GEBCO2026" (15″, with IBCAO), "ETOPO" (ETOPO 2022, 60″) or "GLORYS" (GLORYS's own sea floor)
++bottom           = "partial"     # "partial": bottom cells cut at the sea floor; "full": whole cells
++partial_cell_fix = true          # with partial cells: flux-form momentum advection at bottom-cell thickness jumps
++                                 # (Oceananigans.jl#6533), which removes the bottom jets of issue #6532
++
++[time]
++start_date = 2005-09-01   # initial condition (GLORYS); the run starts at 00:00 on this date
++end_date   = 2005-09-05   # the run ends at 00:00 on this date; for short tests a date and time, e.g. 1993-01-01T03:00
++dt_minutes = 10           # time step
++
++[atmosphere]
++jra55 = "multi_year"   # "multi_year": JRA55 for the run's own dates; "repeat_year": the 1990–91 repeat year
++pressure = false           # true: JRA55's sea-level pressure acts on the ocean (nested_pressure_fix.jl). Off for now: with it,
++                           # Fram Strait drifts far from GLORYS (1–5 Jan 1993, 15 km: day 4 −12.4 Sv, GLORYS −2.1, −5.6
++                           # without pressure; the same at 100 km), which looks like an error in the pressure path, not
++                           # physics. Main has had no pressure on the ocean since #43.
++inverse_barometer = false  # with pressure = true: GLORYS's η carries no response to the pressure (issue #37), so add the
++                           # inverse-barometer sea level −(pᵃ − ⟨pᵃ⟩)/(ρ₀g) to GLORYS's η at the open sides (Flather) and
++                           # to the initial free surface; its domain mean is removed, so the volume is unchanged.
++                           # Keep false with pressure = false: then neither the model nor GLORYS feels the pressure
++
++[output]
++average_hours   = 24      # time-averaged output (3D ocean, free surface, sea ice), written to output_dir
++checkpoint_days = 30      # how often the full model state is saved for restarts
++restart         = false   # true: continue from the latest checkpoint in output_dir
++evp_diagnostics = true    # α, P, Δ of the EVP solver in arctic_evp.jld2 (patch 128)
++monitor_hours   = 1       # monitor.csv: transports through the open sides, mean η against GLORYS's, volume budget,
++                          # fastest point (plotting/volume_budget.jl, plotting/max_speed.jl); 0 = off
++
++[transports]
++# Volume, heat, salt and freshwater transports through the sections below and the open boundaries (see transports.jl).
++online                = true   # true: computed every time step and averaged over average_hours, written to arctic_transports.jld2
++reference_temperature = 0      # heat transport relative to this temperature (°C)
++reference_salinity    = 34.8   # freshwater transport relative to this salinity (g/kg)
++
++# Each section is a great-circle path through (longitude, latitude) waypoints. Positive transport flows to the right,
++# walking from the first waypoint to the last; these are ordered so that positive is into the Arctic. Both ends should
++# be on land, so the section spans the whole strait on any grid. Check with plotting/transport_sections.jl.
++[transports.sections]
++# Fram Strait follows the mooring array at 78°50′N; intermediate waypoints keep the great circles on that latitude.
++fram_strait         = { lon = [15.0, 10.0, 5.0, 0.0, -5.0, -10.0, -15.0, -20.0],
++                        lat = [78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333] }
++# Barents Sea Opening follows the mooring line from Norway (Fugløya) via Bjørnøya to Sørkapp, Svalbard.
++barents_sea_opening = { lon = [20.0, 19.0, 16.5],  lat = [70.0, 74.45, 77.0] }
++bering_strait       = { lon = [-166.0, -171.0], lat = [66.0, 66.0] }
++davis_strait        = { lon = [-53.0, -63.0],   lat = [67.0, 66.5] }
++
++[paths]
++data_dir   = ""   # where downloads are stored; "" = each dataset's default cache
++output_dir = "output"    # model output: time averages (.jld2), checkpoints and the config; one folder per experiment
++figure_dir = "figures"   # figures and movies from the plotting/ scripts; one folder per experiment
++
++[boundaries]
++velocity_inflow_days = 0.0417   # oblique radiation on u, v: nudging timescale toward GLORYS on inflow (0.0417 days = 1 hour).
++                                # With 1 day, a partial bottom cell on the Atlantic open face drifted to −0.9 m/s
++                                # (GLORYS −0.26); 1 hour removes it and moves the section transports by < 0.1 Sv
++tracer_inflow_km     = 20  # T, S reservoir inflow relaxation length, both open sides
++relaxation_hours     = 6   # T, S and baroclinic u, v relax toward GLORYS in a ~2/3° band along the open sides
++                           # over this timescale; 0 = off (nested_ocean_model's default is 6)
++
++# Volume control (volume_control.jl): the net inflow through the two open sides together is pinned at every barotropic
++# substep, as NEMO and ROMS do; Flather splits it between the sides. Without it the domain's volume drifts from GLORYS's.
++follow_glorys_volume      = true   # true: the net inflow follows GLORYS's domain-mean η, with the surface freshwater handed back
++volume_relaxation_days    = 1      # with follow_glorys_volume: time over which the remaining drift from GLORYS's mean η is removed
++follow_glorys_tendency    = false  # with follow_glorys_volume: true also follows GLORYS's rate of change exactly
++# net_inflow_Sv           = 0.0    # with follow_glorys_volume = false: a constant net inflow instead (Sv, positive into the domain);
++                                   # with neither, Flather alone (no volume control)
++net_inflow_depth_exponent = 0.5    # the pin's correction to each boundary column ∝ Hᵖ: 0 uniform per length, 1 uniform velocity
++                                   # (NEMO, ROMS), 0.5 a uniform shift of GLORYS's η in Flather
++
++[ocean]
++closure = "NEMO"   # NEMO's TKE scheme (patch 085): "CATKE" (default), "NEMO", "RiBased", "TKEDissipation" or "none"
++nemo_parameters = "glorys12"   # GLORYS12's NEMO 3.1 settings, as in the four-month runs
++# nemo_surface_tke = 67.83            # surface TKE = this × u★² (NEMO's rn_ebb)
++# nemo_convective_diffusivity = 100   # m²/s where N² < 0 (NEMO's rn_evd; 0 = off)
++
++[sea_ice]
++evp_substeps = 300   # EVP substeps per time step (default 150; patch 128)
++ice_ocean_friction_velocity = "drag"   # u★ of the ice–ocean heat exchange: "constant" (0.002 m/s) or "drag" (√Cᴰ |uⁱ − uᵒ|, ≥ 0.002 m/s)
+diff --git a/panarctic.jl b/panarctic.jl
+index e68df53..15fc6f9 100644
+--- a/panarctic.jl
++++ b/panarctic.jl
+@@ -68,6 +68,7 @@ using Oceananigans.ImmersedBoundaries: immersed_inactive_node
+ using Printf
+ using ClimaSeaIce: IncrementalRemapping
+ using ClimaSeaIce.Rheologies: ElastoViscoPlasticRheology
++using ClimaSeaIce.SeaIceDynamics: SplitExplicitSolver
+ using NumericalEarth.SeaIces: sea_ice_dynamics
+ using NumericalEarth.Radiations: SeaIceAlbedo, SurfaceRadiationProperties
+ using NumericalEarth.EarthSystemModels: reference_density, heat_capacity
+@@ -195,9 +196,14 @@ ice_compressive_strength   = get(sea_ice_settings, "ice_compressive_strength", 2
+ # ice_consolidation_thickness (m, ClimaSeaIce's hᶜ, default 0.05): both the lead-closing thickness h₀ of the concentration
+ # update and the thickness below which ice gets no conductive flux
+ ice_consolidation_thickness = get(sea_ice_settings, "ice_consolidation_thickness", 0.05)
++# evp_substeps (default 150, NumericalEarth's): substeps of the EVP solver per time step. ClimaSeaIce's adaptive EVP
++# relaxes the stresses by about 1/α per substep, with α set locally between 50 and 300, so where α exceeds the number of
++# substeps the stresses do not reach their plastic values within a step (analysis/evp_convergence.jl).
++evp_substeps = get(sea_ice_settings, "evp_substeps", 150)
+ dynamics = sea_ice_dynamics(child.grid, ocean; sea_ice_ocean_drag_coefficient = ice_ocean_drag_coefficient,
+-                            rheology = ElastoViscoPlasticRheology(; ice_compressive_strength))
+-@info "Sea ice: salinity $ice_salinity, ice–ocean drag $ice_ocean_drag_coefficient, P* $ice_compressive_strength N/m², consolidation thickness $ice_consolidation_thickness m"
++                            rheology = ElastoViscoPlasticRheology(; ice_compressive_strength),
++                            solver = SplitExplicitSolver(child.grid; substeps = evp_substeps))
++@info "Sea ice: salinity $ice_salinity, ice–ocean drag $ice_ocean_drag_coefficient, P* $ice_compressive_strength N/m², consolidation thickness $ice_consolidation_thickness m, EVP substeps $evp_substeps"
+ 
+ sea_ice = nested_sea_ice_simulation(ocean, dataset; dates = (start_date, end_date), dir_kw...,
+                                     advection = IncrementalRemapping(), timestepper = :ForwardEuler,
+@@ -354,6 +360,17 @@ simulation.output_writers[:sea_ice] = JLD2Writer(sea_ice.model, sea_ice_outputs;
+                                                  schedule = AveragedTimeInterval(output["average_hours"] * Oceananigans.Units.hours),
+                                                  overwrite_files = !restart)
+ 
++# [output] evp_diagnostics = true: averages of the EVP solver's relaxation parameter α, the ice strength P (N/m) and the
++# deformation rate Δ (1/s), in arctic_evp.jld2 (analysis/evp_convergence.jl). Off by default.
++if get(output, "evp_diagnostics", false)
++    evp_fields = sea_ice.model.dynamics.auxiliaries.fields
++    simulation.output_writers[:evp] = JLD2Writer(sea_ice.model, (; α = evp_fields.α, P = evp_fields.P, Δ = evp_fields.Δ);
++                                                 filename = joinpath(output_dir, "arctic_evp.jld2"),
++                                                 schedule = AveragedTimeInterval(output["average_hours"] * Oceananigans.Units.hours),
++                                                 overwrite_files = !restart)
++    @info "EVP output: α, P and Δ in arctic_evp.jld2"
++end
++
+ # [output] mixing_depth (m; 0, the default, = off): averages of CATKE's tracer diffusivity κᶜ and its turbulent kinetic
+ # energy e over the top mixing_depth metres, in arctic_mixing.jld2 (analysis/mixing_timeseries.jl).
+ mixing_depth = get(output, "mixing_depth", 0)
+-- 
+2.43.0
+
