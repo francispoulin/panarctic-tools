@@ -1,0 +1,70 @@
+From 331b54d9703b287b095c3d2d3f2128f51394ad0e Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 27 Nov 2026 14:30:00 -0500
+Subject: [PATCH] Restart probe: the free surface is `displacement`; each part
+ of the range printout in its own try
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+132's probe found the cause of the restart failure (after the restore, the boundary bands sampled from the GLORYS parent
+still at day 0 hold garbage: η ~1e9 m, T up to 1e38 and NaN, S ~0), then stopped on ocean_child.free_surface.η, which is
+`displacement`, before the first step, leaving the run lock. Each part of the printout now runs in its own try, so a
+probe that cannot read something warns and goes on to the step.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Abhhvmt8meskhHGBgsw6yN
+---
+ panarctic.jl | 28 +++++++++++++++++++---------
+ 1 file changed, 19 insertions(+), 9 deletions(-)
+
+diff --git a/panarctic.jl b/panarctic.jl
+index a16982e..14b10fe 100644
+--- a/panarctic.jl
++++ b/panarctic.jl
+@@ -494,15 +494,25 @@ function probe_boundaries(label)
+     return nothing
+ end
+ 
++# Each part in its own try: a probe that cannot read something says so and goes on (a failure here would otherwise end
++# the job before the run lock is released)
+ function probe_all_ranges(label)
+-    probe_boundaries(label)
+-    probe_ranges("$label ocean", merge(ocean_child.velocities, ocean_child.tracers, (; η = ocean_child.free_surface.η)))
+-    probe_ranges("$label sea_ice", (; h = sea_ice.model.ice_thickness, ℵ = sea_ice.model.ice_concentration,
+-                                     u = sea_ice.model.velocities.u, v = sea_ice.model.velocities.v))
+-    probe_ranges("$label sea_ice.dynamics", sea_ice.model.dynamics.auxiliaries.fields)
+-    for name in (:atmosphere_ocean_interface, :atmosphere_sea_ice_interface, :sea_ice_ocean_interface)
+-        interface = getproperty(coupled_model.interfaces, name)
+-        isnothing(interface) || probe_ranges("$label $name", interface.fluxes)
++    probe_parts = (() -> probe_boundaries(label),
++                   () -> probe_ranges("$label ocean", merge(ocean_child.velocities, ocean_child.tracers,
++                                                            (; η = ocean_child.free_surface.displacement))),
++                   () -> probe_ranges("$label sea_ice", (; h = sea_ice.model.ice_thickness, ℵ = sea_ice.model.ice_concentration,
++                                                         u = sea_ice.model.velocities.u, v = sea_ice.model.velocities.v)),
++                   () -> probe_ranges("$label sea_ice.dynamics", sea_ice.model.dynamics.auxiliaries.fields),
++                   () -> foreach((:atmosphere_ocean_interface, :atmosphere_sea_ice_interface, :sea_ice_ocean_interface)) do name
++                             interface = getproperty(coupled_model.interfaces, name)
++                             isnothing(interface) || probe_ranges("$label $name", interface.fluxes)
++                         end)
++    for probe_part in probe_parts
++        try
++            probe_part()
++        catch err
++            @warn "Restart probe: could not print part of the ranges ($label)" exception = err
++        end
+     end
+     return nothing
+ end
+@@ -511,7 +521,7 @@ end
+ # updates, as advance_parent! does after every step of a run. The checkpoint holds only the NestedModel's child, so after
+ # a restore the parent's clock and its two-day GLORYS window are still at the start date, and the exchanger samples the
+ # boundary bands for the restored day from that window.
+-restart_probe && probe_boundaries("restored, before the updates")
++restart_probe && (try probe_boundaries("restored, before the updates") catch err; @warn "Restart probe: boundaries unreadable" exception = err end)
+ if restart && get(output, "restart_advance_parent", false) && hasproperty(ocean.model, :parent)
+     NumericalEarth.NestedModels.advance_parent!(ocean.model.parent, ocean_child.clock)
+     restart_probe && probe_sync("advance_parent! of the ocean's GLORYS parent")
+-- 
+2.43.0
+
