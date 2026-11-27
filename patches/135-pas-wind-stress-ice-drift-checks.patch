@@ -1,0 +1,593 @@
+From a85cc3b4190b688214b952ee961cda508003fc2c Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 27 Nov 2026 14:26:03 -0500
+Subject: [PATCH] Wind stress and ice drift checks: [output]
+ surface_stress_hours, wind_stress_check.jl, ice_drift_observations.jl
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The Greenland Sea ice, the water under it and the open-water surface ocean are ~1.6× faster than GLORYS in storms and
+match it on calm days. Two questions: do we apply more stress than NEMO for the same wind, and is GLORYS (forced by
+ERA-Interim, weak in strong winds) the slow one?
+
+- [output] surface_stress_hours: snapshots of u★ of the atmosphere–ocean and atmosphere–sea-ice fluxes, the regridded
+  wind and the ice concentration, in arctic_surface_stress.jld2.
+- analysis/wind_stress_check.jl: our effective drag coefficient u★²/U² by wind-speed bin, over open water and compact
+  ice, against CORE's (Large & Yeager 2009 neutral over water, 1.63e-3 over ice), Greenland Sea and whole domain.
+- analysis/ice_drift_observations.jl: ice speed by region, model / GLORYS / NSIDC Polar Pathfinder daily ice motion
+  (NSIDC-0116 v4.1, downloaded by hand: Earthdata login).
+- config_smoke_test_stress.toml (100 km, 4 days); config_sep2005_30d_nemo_nz100_stress.toml (30 days from 1 Sep 2005,
+  as the four-month ne094 run, 3-hourly stress snapshots).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Abhhvmt8meskhHGBgsw6yN
+---
+ analysis/ice_drift_observations.jl        | 174 ++++++++++++++++++++++
+ analysis/wind_stress_check.jl             | 135 +++++++++++++++++
+ config_sep2005_30d_nemo_nz100_stress.toml |  98 ++++++++++++
+ config_smoke_test_stress.toml             |  93 ++++++++++++
+ panarctic.jl                              |  19 +++
+ 5 files changed, 519 insertions(+)
+ create mode 100644 analysis/ice_drift_observations.jl
+ create mode 100644 analysis/wind_stress_check.jl
+ create mode 100644 config_sep2005_30d_nemo_nz100_stress.toml
+ create mode 100644 config_smoke_test_stress.toml
+
+diff --git a/analysis/ice_drift_observations.jl b/analysis/ice_drift_observations.jl
+new file mode 100644
+index 0000000..7faf327
+--- /dev/null
++++ b/analysis/ice_drift_observations.jl
+@@ -0,0 +1,174 @@
++# Ice drift against satellite observations: the model, GLORYS and NSIDC's Polar Pathfinder daily ice motion (patch 135)
++#
++# The model's Greenland Sea ice is ~1.6× faster than GLORYS's in storms (greenland_ice_drift.jl), but GLORYS is a model
++# forced by ERA-Interim, whose strong winds are known to be weak. This compares the three with an observation: the
++# Polar Pathfinder Daily 25 km EASE-Grid Sea Ice Motion Vectors (NSIDC-0116, version 4), satellite-derived and merged
++# with buoys. Speeds only (they do not depend on the grid's axes), each on its own grid, area-weighted, over cells
++# where the observation has a vector and the concentration exceeds 15 % (model, GLORYS), by region, every n days.
++#
++# The observed file is not downloaded here (NSIDC needs an Earthdata login): download the 2005 northern-hemisphere daily
++# file of NSIDC-0116 v4.1 (e.g. icemotion_daily_nh_25km_20050101_20051231_v4.1.nc) from https://nsidc.org/data/nsidc-0116
++# and give its path. Caveats: Polar Pathfinder is known to underestimate fast drift and has few vectors near the ice
++# edge and coasts, so it is a lower bound where the ice is fast; its daily vectors are 24 h displacements.
++#
++#   julia --project=. analysis/ice_drift_observations.jl config_sep2005_4mo_nemo_glorys12_nz100_ne094.toml <nsidc_file.nc> [every_days]
++#
++# Writes ice_drift_observations.md to output_dir. CPU; reads the GLORYS files greenland_ice_drift.jl downloaded (and
++# downloads any other day it needs).
++
++include("../config.jl")
++
++using NumericalEarth, Oceananigans, Dates, JLD2, Printf, Statistics
++using Oceananigans.Operators: Azᶜᶜᶜ
++using Oceananigans.OutputReaders: OnDisk
++using CopernicusMarine   # enables the GLORYS download extension
++using NumericalEarth.DataWrangling: BoundingBox, Metadatum, NCDatasets, Downloads, default_download_directory
++using NumericalEarth.DataWrangling.GLORYS: GLORYSDaily, GLORYS_dataset_variable_names
++using .NCDatasets: Dataset, dimnames
++
++length(ARGS) ≥ 2 || error("usage: julia --project=. analysis/ice_drift_observations.jl <config.toml> <nsidc_icemotion_file.nc> [every_days]")
++observation_file = ARGS[2]
++every_days = length(ARGS) ≥ 3 ? parse(Int, ARGS[3]) : 3
++start_date = DateTime(config["time"]["start_date"])
++glorys_dir = isempty(data_dir) ? default_download_directory(GLORYSDaily()) : data_dir
++
++regions = (("Greenland Sea", (λ, φ) -> 65 ≤ φ ≤ 82 && -40 ≤ λ < 15),
++           ("Central Arctic", (λ, φ) -> φ > 82),
++           ("Beaufort Gyre", (λ, φ) -> 70.5 ≤ φ ≤ 80.5 && -170 ≤ λ ≤ -130),
++           ("Barents and Kara", (λ, φ) -> 68 ≤ φ ≤ 82 && 15 ≤ λ < 90))
++longitude_of(λ) = mod(λ + 180, 360) - 180
++
++weighted_mean(x, w) = isempty(x) ? NaN : sum(x .* w) / sum(w)
++
++#####
++##### Observations: Polar Pathfinder daily vectors (EASE grid, equal-area cells)
++#####
++
++observed = Dataset(observation_file)
++variable_named(ds, wanted) = ds[only(filter(name -> lowercase(name) == wanted, collect(keys(ds))))]
++obs_u = variable_named(observed, "u")
++obs_v = variable_named(observed, "v")
++obs_scale = occursin("cm", lowercase(get(obs_u.attrib, "units", "cm/s"))) ? 0.01 : 1.0   # to m/s
++obs_lon = longitude_of.(Float64.(coalesce.(variable_named(observed, "longitude")[:, :], NaN)))
++obs_lat = Float64.(coalesce.(variable_named(observed, "latitude")[:, :], NaN))
++obs_dates = Date.(variable_named(observed, "time")[:])
++@info "Polar Pathfinder: $(length(obs_dates)) days, $(first(obs_dates)) to $(last(obs_dates)), units $(get(obs_u.attrib, "units", "?"))"
++
++function observed_speed(date)
++    n = findfirst(==(date), obs_dates)
++    isnothing(n) && return nothing
++    u = Float64.(coalesce.(obs_u[:, :, n], NaN)) .* obs_scale
++    v = Float64.(coalesce.(obs_v[:, :, n], NaN)) .* obs_scale
++    return sqrt.(u .^ 2 .+ v .^ 2)
++end
++
++#####
++##### Model: daily averages
++#####
++
++grid = FieldTimeSeries(ocean_output_file, "η"; backend = OnDisk()).grid
++Nx, Ny, Nz = size(grid)
++ug = grid.underlying_grid
++bottom_height = grid.immersed_boundary.bottom_height
++model_wet = [-Float64(bottom_height[i, j, 1]) > 0 for i in 1:Nx, j in 1:Ny]
++model_λ = longitude_of.(Array(λnodes(ug, Center(), Center(), Center())))
++model_φ = Array(φnodes(ug, Center(), Center(), Center()))
++model_area = [Azᶜᶜᶜ(i, j, 1, ug) for i in 1:Nx, j in 1:Ny]
++
++function interior_part(a)
++    a = ndims(a) == 3 ? a[:, :, 1] : a
++    hx, hy = (size(a, 1) - Nx) ÷ 2, (size(a, 2) - Ny) ÷ 2
++    return Float64.(a[hx+1:hx+Nx, hy+1:hy+Ny])
++end
++
++sea_ice_file = joinpath(output_dir, "arctic_sea_ice.jld2")
++model_days = jldopen(sea_ice_file) do f
++    iterations = sort(filter(!=("serialized"), keys(f["timeseries/t"])), by = s -> parse(Int, s))
++    iterations = filter(n -> parse(Int, n) > 0, iterations)[1:every_days:end]
++    map(iterations) do n
++        end_day = f["timeseries/t/$n"] / 86400
++        date = Date(start_date + Millisecond(round(Int, (end_day - 1) * 86400e3)))
++        u, v = interior_part(f["timeseries/uᵢ/$n"]), interior_part(f["timeseries/vᵢ/$n"])
++        (; date, speed = sqrt.(u .^ 2 .+ v .^ 2), ℵ = interior_part(f["timeseries/ℵ/$n"]))
++    end
++end
++
++#####
++##### GLORYS: daily means over the domain's latitudes, on its own grid
++#####
++
++glorys_box = BoundingBox(longitude = (-180, 180), latitude = (64, 90))
++function read_glorys_surface(name, date)
++    metadata = Metadatum(name; dataset = GLORYSDaily(), date = DateTime(date), region = glorys_box, dir = glorys_dir)
++    ds = Dataset(Downloads.download(metadata))
++    var = ds[GLORYS_dataset_variable_names[name]]
++    lon, lat = Float64.(ds["longitude"][:]), Float64.(ds["latitude"][:])
++    data = Float64.(coalesce.(ndims(var) == 3 ? var[:, :, 1] : var[:, :], NaN))
++    close(ds)
++    return (; lon, lat, data)
++end
++
++#####
++##### Regional means, day by day
++#####
++
++rows = []
++for model_day in model_days
++    obs = observed_speed(model_day.date)
++    isnothing(obs) && (@warn "No observation on $(model_day.date)"; continue)
++    usi = read_glorys_surface(:sea_ice_u_velocity, model_day.date)
++    vsi = read_glorys_surface(:sea_ice_v_velocity, model_day.date).data
++    ci  = read_glorys_surface(:sea_ice_concentration, model_day.date).data
++    glorys_speed = sqrt.(usi.data .^ 2 .+ vsi .^ 2)
++    glorys_λ = [usi.lon[i] for i in eachindex(usi.lon), j in eachindex(usi.lat)]
++    glorys_φ = [usi.lat[j] for i in eachindex(usi.lon), j in eachindex(usi.lat)]
++    glorys_area = cosd.(glorys_φ)
++    for (name, inside) in regions
++        obs_cells = [isfinite(obs[k]) && isfinite(obs_lat[k]) && inside(obs_lon[k], obs_lat[k]) for k in eachindex(obs)]
++        model_cells = [model_wet[k] && model_day.ℵ[k] > 0.15 && inside(model_λ[k], model_φ[k]) for k in eachindex(model_day.ℵ)]
++        glorys_cells = [isfinite(glorys_speed[k]) && coalesce(ci[k] > 0.15, false) && inside(glorys_λ[k], glorys_φ[k])
++                        for k in eachindex(glorys_speed)]
++        push!(rows, (; date = model_day.date, region = name,
++                       model = weighted_mean(model_day.speed[model_cells], model_area[model_cells]),
++                       glorys = weighted_mean(glorys_speed[glorys_cells], glorys_area[glorys_cells]),
++                       observed = isempty(obs[obs_cells]) ? NaN : mean(obs[obs_cells]),
++                       observed_vectors = count(obs_cells)))
++    end
++    @info "Compared $(model_day.date)"
++end
++close(observed)
++
++#####
++##### Table
++#####
++
++format_speed(x) = isfinite(x) ? @sprintf("%.3f", x) : "—"
++io = IOBuffer()
++println(io, "# $experiment: ice speed, model / GLORYS / Polar Pathfinder (NSIDC-0116)\n")
++println(io, "Mean ice speed (m/s) by region: model and GLORYS area-weighted over cells with concentration > 15 %, ",
++            "Polar Pathfinder over its vectors (equal-area cells). Every $every_days days of the run. Polar Pathfinder ",
++            "underestimates fast drift and has few vectors near the ice edge: a lower bound where the ice is fast.\n")
++println(io, "## Means over the run\n")
++println(io, "| Region | model | GLORYS | observed | model / observed | GLORYS / observed |")
++println(io, "|---|---|---|---|---|---|")
++for (name, _) in regions
++    selected = filter(row -> row.region == name && isfinite(row.observed), rows)
++    model_mean, glorys_mean, observed_mean = (isempty(selected) ? NaN : mean(filter(isfinite, getproperty.(selected, key)))
++                                             for key in (:model, :glorys, :observed))
++    ratio(x) = isfinite(x) && isfinite(observed_mean) && observed_mean > 0 ? @sprintf("%.2f", x / observed_mean) : "—"
++    println(io, "| $name | $(format_speed(model_mean)) | $(format_speed(glorys_mean)) | $(format_speed(observed_mean)) | ",
++                "$(ratio(model_mean)) | $(ratio(glorys_mean)) |")
++end
++println(io, "\n## Each day compared\n")
++println(io, "| Day | Region | model | GLORYS | observed | observed vectors |")
++println(io, "|---|---|---|---|---|---|")
++for row in rows
++    println(io, "| $(row.date) | $(row.region) | $(format_speed(row.model)) | $(format_speed(row.glorys)) | ",
++                "$(format_speed(row.observed)) | $(row.observed_vectors) |")
++end
++
++table_text = String(take!(io))
++print(table_text)
++table_file = joinpath(output_dir, "ice_drift_observations.md")
++write(table_file, table_text)
++@info "Wrote $table_file"
+diff --git a/analysis/wind_stress_check.jl b/analysis/wind_stress_check.jl
+new file mode 100644
+index 0000000..04dc0f6
+--- /dev/null
++++ b/analysis/wind_stress_check.jl
+@@ -0,0 +1,135 @@
++# Is our wind stress stronger than NEMO's for the same wind? (patch 135)
++#
++# NumericalEarth computes the air–sea and air–ice stress by similarity theory (u★ from Monin–Obukhov with the ocean's
++# Charnock roughness, also over ice), stress = ρₐ u★². NEMO with CORE bulk formulas, as GLORYS12 used, takes
++# τ = ρₐ C_D U² with C_D over open water from Large & Yeager (2009) (a function of the wind speed, here its neutral form)
++# and a constant C_D over ice (CORE: 1.63e-3; LIM2 setups also use 1.4e-3). This compares our effective drag coefficient
++# u★² / U² (U the speed of the regridded JRA55 wind) with those, from the 3-hourly snapshots of [output]
++# surface_stress_hours, by wind-speed bin, over open water (concentration < 15 %) and compact ice (> 85 %), in the
++# Greenland Sea (65–82°N, 40°W–15°E) and the whole domain.
++#
++# Caveats: ours includes the stability correction and the convective gustiness (both raise C_D in cold air over warmer
++# water, as CORE's own stability correction does); the neutral Large & Yeager curve is the reference shape, not an
++# exact replica of NEMO's iterated value. Ours uses the wind relative to the surface current or ice; U here is the wind
++# itself (a few percent at most).
++#
++#   julia --project=. analysis/wind_stress_check.jl config_sep2005_30d_nemo_nz100_stress.toml
++#
++# Writes wind_stress_check.md to output_dir and wind_stress_check.png to figure_dir. CPU.
++
++include("../config.jl")
++
++using Oceananigans, JLD2, Printf, Statistics, CairoMakie
++using Oceananigans.OutputReaders: OnDisk
++
++stress_file = joinpath(output_dir, "arctic_surface_stress.jld2")
++isfile(stress_file) || error("$stress_file not found: run the config with [output] surface_stress_hours > 0 first")
++
++grid = FieldTimeSeries(ocean_output_file, "η"; backend = OnDisk()).grid
++Nx, Ny, Nz = size(grid)
++ug = grid.underlying_grid
++bottom_height = grid.immersed_boundary.bottom_height
++wet = [-Float64(bottom_height[i, j, 1]) > 0 for i in 1:Nx, j in 1:Ny]
++λ = mod.(Array(λnodes(ug, Center(), Center(), Center())) .+ 180, 360) .- 180
++φ = Array(φnodes(ug, Center(), Center(), Center()))
++greenland = [wet[i, j] && 65 ≤ φ[i, j] ≤ 82 && -40 ≤ λ[i, j] < 15 for i in 1:Nx, j in 1:Ny]
++regions = (("Greenland Sea", greenland), ("Whole domain", wet))
++
++function interior_part(a)
++    a = ndims(a) == 3 ? a[:, :, 1] : a
++    hx, hy = (size(a, 1) - Nx) ÷ 2, (size(a, 2) - Ny) ÷ 2
++    return Float64.(a[hx+1:hx+Nx, hy+1:hy+Ny])
++end
++
++# Large & Yeager (2009), neutral 10 m drag coefficient over open water (U in m/s)
++large_yeager(U) = 1e-3 * (2.7 / max(U, 0.5) + 0.142 + U / 13.09 - 3.14807e-10 * U^6)
++const core_ice_drag = 1.63e-3
++
++bin_edges = 0:2:24
++nbins = length(bin_edges) - 1
++bin_of(U) = clamp(floor(Int, U / step(bin_edges)) + 1, 1, nbins)
++
++# Sums per region, surface (open water, ice) and wind bin: Σ u★², Σ U², count
++sums = Dict((name, surface) => (u★² = zeros(nbins), U² = zeros(nbins), n = zeros(Int, nbins), U = zeros(nbins))
++            for (name, _) in regions, surface in (:water, :ice))
++
++snapshots = jldopen(stress_file) do f
++    iterations = sort(filter(!=("serialized"), keys(f["timeseries/t"])), by = s -> parse(Int, s))
++    for n in iterations
++        uᵃ = interior_part(f["timeseries/uᵃ/$n"])
++        vᵃ = interior_part(f["timeseries/vᵃ/$n"])
++        U  = sqrt.(uᵃ .^ 2 .+ vᵃ .^ 2)
++        ℵ  = interior_part(f["timeseries/ℵ/$n"])
++        u★ = (water = interior_part(f["timeseries/u★ᵃᵒ/$n"]), ice = interior_part(f["timeseries/u★ᵃⁱ/$n"]))
++        cells = (water = ℵ .< 0.15, ice = ℵ .> 0.85)
++        for (name, mask) in regions, surface in (:water, :ice)
++            s = sums[(name, surface)]
++            for idx in findall(mask .& cells[surface] .& isfinite.(U) .& isfinite.(u★[surface]))
++                b = bin_of(U[idx])
++                s.u★²[b] += u★[surface][idx]^2
++                s.U²[b]  += U[idx]^2
++                s.U[b]   += U[idx]
++                s.n[b]   += 1
++            end
++        end
++    end
++    length(iterations)
++end
++@info "Read $snapshots snapshots from $stress_file"
++
++#####
++##### Table and figure
++#####
++
++io = IOBuffer()
++println(io, "# $experiment: our drag coefficient against CORE's (NEMO, GLORYS12)\n")
++println(io, "$snapshots snapshots. Effective C_D = Σ u★² / Σ U² per wind-speed bin (U: regridded JRA55 wind speed, m/s); ",
++            "open water: concentration < 15 %, compact ice: > 85 %. CORE: Large & Yeager (2009) neutral C_D over water, ",
++            "1.63e-3 over ice. Ratio: ours / CORE, i.e. how much more stress we apply for the same wind.\n")
++fig = Figure(size = (1100, 450 * length(regions)))
++for (r, (name, _)) in enumerate(regions)
++    println(io, "## $name\n")
++    println(io, "| U (m/s) | water: samples | ours C_D (1e-3) | CORE C_D (1e-3) | ratio | ice: samples | ours C_D (1e-3) | CORE C_D (1e-3) | ratio |")
++    println(io, "|---|---|---|---|---|---|---|---|---|")
++    for b in 1:nbins
++        w, i = sums[(name, :water)], sums[(name, :ice)]
++        (w.n[b] == 0 && i.n[b] == 0) && continue
++        Ū_water = w.n[b] > 0 ? w.U[b] / w.n[b] : NaN
++        ours_water = w.n[b] > 0 ? w.u★²[b] / w.U²[b] : NaN
++        core_water = large_yeager(Ū_water)
++        ours_ice = i.n[b] > 0 ? i.u★²[b] / i.U²[b] : NaN
++        cell(x) = isfinite(x) ? @sprintf("%.2f", 1e3 * x) : "—"
++        ratio(x, y) = isfinite(x) && isfinite(y) ? @sprintf("%.2f", x / y) : "—"
++        println(io, "| $(bin_edges[b])–$(bin_edges[b + 1]) | $(w.n[b]) | $(cell(ours_water)) | $(cell(core_water)) | ",
++                    "$(ratio(ours_water, core_water)) | $(i.n[b]) | $(cell(ours_ice)) | $(cell(core_ice_drag)) | ",
++                    "$(ratio(ours_ice, core_ice_drag)) |")
++    end
++    # Stress-weighted summary: Σ u★² against Σ C_D,CORE U², over all winds
++    w, i = sums[(name, :water)], sums[(name, :ice)]
++    core_water_total = sum(large_yeager(w.n[b] > 0 ? w.U[b] / w.n[b] : 0.0) * w.U²[b] for b in 1:nbins)
++    core_ice_total = core_ice_drag * sum(i.U²)
++    total_ratio(x, y) = y > 0 ? @sprintf("%.2f", x / y) : "—"
++    println(io, "\nAll winds: our stress / CORE's stress, open water $(total_ratio(sum(w.u★²), core_water_total)), ",
++                "compact ice $(total_ratio(sum(i.u★²), core_ice_total)).\n")
++
++    centres = collect(bin_edges[1:end-1]) .+ step(bin_edges) / 2
++    for (c, surface) in enumerate((:water, :ice))
++        s = sums[(name, surface)]
++        ax = Axis(fig[r, c]; title = "$name, $(surface === :water ? "open water" : "compact ice")",
++                  xlabel = "wind speed U (m/s)", ylabel = "C_D (×1e-3)")
++        ours = [s.n[b] > 0 ? 1e3 * s.u★²[b] / s.U²[b] : NaN for b in 1:nbins]
++        scatterlines!(ax, centres, ours; color = :royalblue, label = "ours, u★²/U²")
++        reference = surface === :water ? [1e3 * large_yeager(U) for U in centres] : fill(1e3 * core_ice_drag, nbins)
++        lines!(ax, centres, reference; color = :black, label = surface === :water ? "CORE (Large & Yeager, neutral)" : "CORE ice 1.63e-3")
++        axislegend(ax; position = :lt)
++    end
++end
++Label(fig[0, :], "$experiment: effective drag coefficient"; fontsize = 18)
++
++table_text = String(take!(io))
++print(table_text)
++table_file = joinpath(output_dir, "wind_stress_check.md")
++write(table_file, table_text)
++figure_file = joinpath(figure_dir, "wind_stress_check.png")
++save(figure_file, fig)
++@info "Wrote $table_file and $figure_file"
+diff --git a/config_sep2005_30d_nemo_nz100_stress.toml b/config_sep2005_30d_nemo_nz100_stress.toml
+new file mode 100644
+index 0000000..60dea6d
+--- /dev/null
++++ b/config_sep2005_30d_nemo_nz100_stress.toml
+@@ -0,0 +1,98 @@
++# Patch 135. Wind stress check: 30 days from 1 Sep 2005, as the four-month run sep2005_4mo_nemo_glorys12_nz100_ne094
++# otherwise (NEMO TKE glorys12, nz100, 15 km, JRA55), with snapshots every 3 h of u★ (ocean, ice), the wind and the
++# ice concentration for analysis/wind_stress_check.jl. No scorecard, no online transports.
++
++architecture = "GPU"   # "GPU" or "CPU"
++experiment   = "sep2005_30d_nemo_nz100_stress"  # name of the run: output and figures go to output_dir/<experiment> and figure_dir/<experiment>
++
++[grid]
++spacing_km = 15     # largest horizontal grid spacing [km] (at the pole; ~15% finer near the Atlantic edge)
++Nz         = 100    # vertical levels
++depth      = 5000   # maximum depth (m)
++bathymetry       = "GEBCO2026"   # "GEBCO2026" (15″, with IBCAO), "ETOPO" (ETOPO 2022, 60″) or "GLORYS" (GLORYS's own sea floor)
++bottom           = "partial"     # "partial": bottom cells cut at the sea floor; "full": whole cells
++partial_cell_fix = true          # with partial cells: flux-form momentum advection at bottom-cell thickness jumps
++                                 # (Oceananigans.jl#6533), which removes the bottom jets of issue #6532
++
++[time]
++start_date = 2005-09-01   # initial condition (GLORYS); the run starts at 00:00 on this date
++end_date   = 2005-10-01   # the run ends at 00:00 on this date; for short tests a date and time, e.g. 1993-01-01T03:00
++dt_minutes = 10           # time step
++
++[atmosphere]
++jra55 = "multi_year"   # "multi_year": JRA55 for the run's own dates; "repeat_year": the 1990–91 repeat year
++pressure = false           # true: JRA55's sea-level pressure acts on the ocean (nested_pressure_fix.jl). Off for now: with it,
++                           # Fram Strait drifts far from GLORYS (1–5 Jan 1993, 15 km: day 4 −12.4 Sv, GLORYS −2.1, −5.6
++                           # without pressure; the same at 100 km), which looks like an error in the pressure path, not
++                           # physics. Main has had no pressure on the ocean since #43.
++inverse_barometer = false  # with pressure = true: GLORYS's η carries no response to the pressure (issue #37), so add the
++                           # inverse-barometer sea level −(pᵃ − ⟨pᵃ⟩)/(ρ₀g) to GLORYS's η at the open sides (Flather) and
++                           # to the initial free surface; its domain mean is removed, so the volume is unchanged.
++                           # Keep false with pressure = false: then neither the model nor GLORYS feels the pressure
++
++[output]
++surface_stress_hours = 3   # u★, wind, ice concentration every 3 h (patch 135)
++average_hours   = 24      # time-averaged output (3D ocean, free surface, sea ice), written to output_dir
++checkpoint_days = 10      # how often the full model state is saved for restarts
++restart         = false   # true: continue from the latest checkpoint in output_dir
++monitor_hours   = 1       # monitor.csv: transports through the open sides, mean η against GLORYS's, volume budget,
++                          # fastest point (plotting/volume_budget.jl, plotting/max_speed.jl); 0 = off
++mixing_depth    = 60      # daily CATKE κᶜ and e over the top this many metres in arctic_mixing.jld2; 0 = off
++scorecard       = false   # no scorecard from the runner (patch 112)
++post_run_analysis = false # at the end: clear the model from memory, then the scorecard (scorecard.md)
++
++[transports]
++# Volume, heat, salt and freshwater transports through the sections below and the open boundaries (see transports.jl).
++online                = false  # true: computed every time step and averaged over average_hours, written to arctic_transports.jld2
++reference_temperature = 0      # heat transport relative to this temperature (°C)
++reference_salinity    = 34.8   # freshwater transport relative to this salinity (g/kg)
++
++# Each section is a great-circle path through (longitude, latitude) waypoints. Positive transport flows to the right,
++# walking from the first waypoint to the last; these are ordered so that positive is into the Arctic. Both ends should
++# be on land, so the section spans the whole strait on any grid. Check with plotting/transport_sections.jl.
++[transports.sections]
++# Fram Strait follows the mooring array at 78°50′N; intermediate waypoints keep the great circles on that latitude.
++fram_strait         = { lon = [15.0, 10.0, 5.0, 0.0, -5.0, -10.0, -15.0, -20.0],
++                        lat = [78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333] }
++# Barents Sea Opening follows the mooring line from Norway (Fugløya) via Bjørnøya to Sørkapp, Svalbard.
++barents_sea_opening = { lon = [20.0, 19.0, 16.5],  lat = [70.0, 74.45, 77.0] }
++bering_strait       = { lon = [-166.0, -171.0], lat = [66.0, 66.0] }
++davis_strait        = { lon = [-53.0, -63.0],   lat = [67.0, 66.5] }
++
++[paths]
++data_dir   = ""   # where downloads are stored; "" = each dataset's default cache
++output_dir = "output"    # model output: time averages (.jld2), checkpoints and the config; one folder per experiment
++figure_dir = "figures"   # figures and movies from the plotting/ scripts; one folder per experiment
++
++[boundaries]
++velocity_inflow_days = 0.0417   # oblique radiation on u, v: nudging timescale toward GLORYS on inflow (0.0417 days = 1 hour).
++                                # With 1 day, a partial bottom cell on the Atlantic open face drifted to −0.9 m/s
++                                # (GLORYS −0.26); 1 hour removes it and moves the section transports by < 0.1 Sv
++tracer_inflow_km     = 20  # T, S reservoir inflow relaxation length, both open sides
++relaxation_hours     = 6   # T, S and baroclinic u, v relax toward GLORYS in a ~2/3° band along the open sides
++                           # over this timescale; 0 = off (nested_ocean_model's default is 6)
++
++# Volume control (volume_control.jl): the net inflow through the two open sides together is pinned at every barotropic
++# substep, as NEMO and ROMS do; Flather splits it between the sides. Without it the domain's volume drifts from GLORYS's.
++follow_glorys_volume      = true   # true: the net inflow follows GLORYS's domain-mean η, with the surface freshwater handed back
++volume_relaxation_days    = 1      # with follow_glorys_volume: time over which the remaining drift from GLORYS's mean η is removed
++follow_glorys_tendency    = false  # with follow_glorys_volume: true also follows GLORYS's rate of change exactly
++# net_inflow_Sv           = 0.0    # with follow_glorys_volume = false: a constant net inflow instead (Sv, positive into the domain);
++                                   # with neither, Flather alone (no volume control)
++net_inflow_depth_exponent = 0.5    # the pin's correction to each boundary column ∝ Hᵖ: 0 uniform per length, 1 uniform velocity
++                                   # (NEMO, ROMS), 0.5 a uniform shift of GLORYS's η in Flather
++
++[ocean]
++closure = "NEMO"   # NEMO's TKE scheme (patch 085): "CATKE" (default), "NEMO", "RiBased", "TKEDissipation" or "none"
++nemo_parameters = "glorys12"          # "reference" (NEMO 3.6-4.x namelist) or "glorys12" (NEMO 3.1 code defaults; patch 087)
++# nemo_surface_tke = 3.75             # surface TKE = this × u★² (NEMO's rn_ebb; default: the preset's)
++# nemo_convective_diffusivity = 100   # m²/s where N² < 0 (NEMO's rn_evd; 0 = off)
++
++[sea_ice]
++ice_salinity               = 6        # g/kg (default 4)
++ice_ocean_drag_coefficient = 5e-3     # (default 5.5e-3)
++ice_compressive_strength   = 20000    # P*, N/m² (default 27 500)
++albedo                     = "ccsm3"  # "constant" (0.7, default) or "ccsm3" (state-dependent, SeaIceAlbedo)
++
++[queue]
++long = false
+diff --git a/config_smoke_test_stress.toml b/config_smoke_test_stress.toml
+new file mode 100644
+index 0000000..e61d4c7
+--- /dev/null
++++ b/config_smoke_test_stress.toml
+@@ -0,0 +1,93 @@
++# Patch 135. Smoke test of [output] surface_stress_hours: 100 km, 4 days, as smoke_test_ne094 otherwise. Expect the log
++# line "Surface stress output" and output/smoke_test_stress/arctic_surface_stress.jld2.
++# Smoke test of patch 097: NumericalEarth fjp/net-inflow merged with v0.9.4 (patch 096), with NEMO's TKE scheme
++# (GLORYS12 settings) as in the four-month runs. 100 km, 1–5 September 2005. It checks that the merged NumericalEarth
++# builds, compiles and runs with sea ice before the four-month run; the numbers are not the test. Look for the lines
++#   Rivers: JRA55, each mouth spread over 1.2° (all wet cells)
++#   Vertical mixing: NEMO (…)
++
++architecture = "GPU"   # "GPU" or "CPU"
++experiment   = "smoke_test_stress"  # name of the run: output and figures go to output_dir/<experiment> and figure_dir/<experiment>
++
++[grid]
++spacing_km = 100    # largest horizontal grid spacing [km] (at the pole; ~15% finer near the Atlantic edge)
++Nz         = 20     # vertical levels
++depth      = 5000   # maximum depth (m)
++bathymetry       = "GEBCO2026"   # "GEBCO2026" (15″, with IBCAO), "ETOPO" (ETOPO 2022, 60″) or "GLORYS" (GLORYS's own sea floor)
++bottom           = "partial"     # "partial": bottom cells cut at the sea floor; "full": whole cells
++partial_cell_fix = true          # with partial cells: flux-form momentum advection at bottom-cell thickness jumps
++                                 # (Oceananigans.jl#6533), which removes the bottom jets of issue #6532
++
++[time]
++start_date = 2005-09-01   # initial condition (GLORYS); the run starts at 00:00 on this date
++end_date   = 2005-09-05   # the run ends at 00:00 on this date; for short tests a date and time, e.g. 1993-01-01T03:00
++dt_minutes = 10           # time step
++
++[atmosphere]
++jra55 = "multi_year"   # "multi_year": JRA55 for the run's own dates; "repeat_year": the 1990–91 repeat year
++pressure = false           # true: JRA55's sea-level pressure acts on the ocean (nested_pressure_fix.jl). Off for now: with it,
++                           # Fram Strait drifts far from GLORYS (1–5 Jan 1993, 15 km: day 4 −12.4 Sv, GLORYS −2.1, −5.6
++                           # without pressure; the same at 100 km), which looks like an error in the pressure path, not
++                           # physics. Main has had no pressure on the ocean since #43.
++inverse_barometer = false  # with pressure = true: GLORYS's η carries no response to the pressure (issue #37), so add the
++                           # inverse-barometer sea level −(pᵃ − ⟨pᵃ⟩)/(ρ₀g) to GLORYS's η at the open sides (Flather) and
++                           # to the initial free surface; its domain mean is removed, so the volume is unchanged.
++                           # Keep false with pressure = false: then neither the model nor GLORYS feels the pressure
++
++[output]
++average_hours   = 24      # time-averaged output (3D ocean, free surface, sea ice), written to output_dir
++checkpoint_days = 30      # how often the full model state is saved for restarts
++restart         = false   # true: continue from the latest checkpoint in output_dir
++surface_stress_hours = 6   # u★, wind, ice concentration every 6 h (patch 135)
++monitor_hours   = 1       # monitor.csv: transports through the open sides, mean η against GLORYS's, volume budget,
++                          # fastest point (plotting/volume_budget.jl, plotting/max_speed.jl); 0 = off
++
++[transports]
++# Volume, heat, salt and freshwater transports through the sections below and the open boundaries (see transports.jl).
++online                = true   # true: computed every time step and averaged over average_hours, written to arctic_transports.jld2
++reference_temperature = 0      # heat transport relative to this temperature (°C)
++reference_salinity    = 34.8   # freshwater transport relative to this salinity (g/kg)
++
++# Each section is a great-circle path through (longitude, latitude) waypoints. Positive transport flows to the right,
++# walking from the first waypoint to the last; these are ordered so that positive is into the Arctic. Both ends should
++# be on land, so the section spans the whole strait on any grid. Check with plotting/transport_sections.jl.
++[transports.sections]
++# Fram Strait follows the mooring array at 78°50′N; intermediate waypoints keep the great circles on that latitude.
++fram_strait         = { lon = [15.0, 10.0, 5.0, 0.0, -5.0, -10.0, -15.0, -20.0],
++                        lat = [78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333, 78.8333] }
++# Barents Sea Opening follows the mooring line from Norway (Fugløya) via Bjørnøya to Sørkapp, Svalbard.
++barents_sea_opening = { lon = [20.0, 19.0, 16.5],  lat = [70.0, 74.45, 77.0] }
++bering_strait       = { lon = [-166.0, -171.0], lat = [66.0, 66.0] }
++davis_strait        = { lon = [-53.0, -63.0],   lat = [67.0, 66.5] }
++
++[paths]
++data_dir   = ""   # where downloads are stored; "" = each dataset's default cache
++output_dir = "output"    # model output: time averages (.jld2), checkpoints and the config; one folder per experiment
++figure_dir = "figures"   # figures and movies from the plotting/ scripts; one folder per experiment
++
++[boundaries]
++velocity_inflow_days = 0.0417   # oblique radiation on u, v: nudging timescale toward GLORYS on inflow (0.0417 days = 1 hour).
++                                # With 1 day, a partial bottom cell on the Atlantic open face drifted to −0.9 m/s
++                                # (GLORYS −0.26); 1 hour removes it and moves the section transports by < 0.1 Sv
++tracer_inflow_km     = 20  # T, S reservoir inflow relaxation length, both open sides
++relaxation_hours     = 6   # T, S and baroclinic u, v relax toward GLORYS in a ~2/3° band along the open sides
++                           # over this timescale; 0 = off (nested_ocean_model's default is 6)
++
++# Volume control (volume_control.jl): the net inflow through the two open sides together is pinned at every barotropic
++# substep, as NEMO and ROMS do; Flather splits it between the sides. Without it the domain's volume drifts from GLORYS's.
++follow_glorys_volume      = true   # true: the net inflow follows GLORYS's domain-mean η, with the surface freshwater handed back
++volume_relaxation_days    = 1      # with follow_glorys_volume: time over which the remaining drift from GLORYS's mean η is removed
++follow_glorys_tendency    = false  # with follow_glorys_volume: true also follows GLORYS's rate of change exactly
++# net_inflow_Sv           = 0.0    # with follow_glorys_volume = false: a constant net inflow instead (Sv, positive into the domain);
++                                   # with neither, Flather alone (no volume control)
++net_inflow_depth_exponent = 0.5    # the pin's correction to each boundary column ∝ Hᵖ: 0 uniform per length, 1 uniform velocity
++                                   # (NEMO, ROMS), 0.5 a uniform shift of GLORYS's η in Flather
++
++[ocean]
++closure = "NEMO"   # NEMO's TKE scheme (patch 085): "CATKE" (default), "NEMO", "RiBased", "TKEDissipation" or "none"
++nemo_parameters = "glorys12"   # GLORYS12's NEMO 3.1 settings, as in the four-month runs
++# nemo_surface_tke = 67.83            # surface TKE = this × u★² (NEMO's rn_ebb)
++# nemo_convective_diffusivity = 100   # m²/s where N² < 0 (NEMO's rn_evd; 0 = off)
++
++[sea_ice]
++ice_ocean_friction_velocity = "drag"   # u★ of the ice–ocean heat exchange: "constant" (0.002 m/s) or "drag" (√Cᴰ |uⁱ − uᵒ|, ≥ 0.002 m/s)
+diff --git a/panarctic.jl b/panarctic.jl
+index 13c8158..a16982e 100644
+--- a/panarctic.jl
++++ b/panarctic.jl
+@@ -368,6 +368,25 @@ if get(output, "evp_diagnostics", false)
+     @info "EVP output: α, P and Δ in arctic_evp.jld2"
+ end
+ 
++# [output] surface_stress_hours (0, the default, = off; patch 135): snapshots every so many hours of the friction
++# velocity u★ of the atmosphere–ocean and atmosphere–sea-ice fluxes (stress = ρₐ u★²), the wind (u, v of the
++# atmosphere regridded to the model grid) and the ice concentration, in arctic_surface_stress.jld2
++# (analysis/wind_stress_check.jl). Snapshots, not averages: the drag coefficient u★²/U² is not linear in the wind.
++stress_hours = get(output, "surface_stress_hours", 0)
++if stress_hours > 0
++    stress_interfaces = coupled_model.interfaces
++    atmosphere_state  = stress_interfaces.exchanger.atmosphere.state
++    stress_outputs = (; u★ᵃᵒ = stress_interfaces.atmosphere_ocean_interface.fluxes.friction_velocity,
++                        u★ᵃⁱ = stress_interfaces.atmosphere_sea_ice_interface.fluxes.friction_velocity,
++                        uᵃ = atmosphere_state.u, vᵃ = atmosphere_state.v,
++                        ℵ = sea_ice.model.ice_concentration)
++    simulation.output_writers[:surface_stress] = JLD2Writer(child, stress_outputs;
++                                                            filename = joinpath(output_dir, "arctic_surface_stress.jld2"),
++                                                            schedule = TimeInterval(stress_hours * Oceananigans.Units.hours),
++                                                            overwrite_files = !restart)
++    @info "Surface stress output: u★ (ocean, ice), wind and ice concentration every $stress_hours h in arctic_surface_stress.jld2"
++end
++
+ # [output] mixing_depth (m; 0, the default, = off): averages of CATKE's tracer diffusivity κᶜ and its turbulent kinetic
+ # energy e over the top mixing_depth metres, in arctic_mixing.jld2 (analysis/mixing_timeseries.jl).
+ mixing_depth = get(output, "mixing_depth", 0)
+-- 
+2.43.0
+
