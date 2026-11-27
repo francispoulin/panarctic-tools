@@ -154,3 +154,4 @@ Plots, from `nested/`: `julia --project=.. plot_budget.jl <folder>` and `julia -
 - `nested_monitor.csv`: `pin_correction_Sv`, `pin_max_velocity` (how hard the pin pushes) and the Atlantic/Pacific
   split.
 | 119 | PanArcticShenanigans | `fjp/test-098` | after 118 | `analysis/atlantic_water.jl`: AW layer (core T, S, depth; 0 °C bounds, thickness, heat content) by region against WOA23 decade 2005–2014 (A5B4, annual, 1°; downloaded once from NCEI), for a period of a run (`[from] [to] [every n days]`); table, region-mean profiles, maps. CPU only |
+| 120 | NumericalEarth.jl | new branch `fjp/docs-compat` from `main` (PR to `main`) | 35ff7bf (main, #968) | `docs/Project.toml`: SpeedyWeather `0.23–0.26` and Terrarium `0.1.10, 0.2`, as #963 and #968 set in the root and `test/`; the workspace is resolved as a whole, so docs' old compat breaks every CI job (Terrarium main needs SpeedyWeatherInternals 1.0.1 → SpeedyWeather 0.25). Same change as 115 + 116 on #975 |

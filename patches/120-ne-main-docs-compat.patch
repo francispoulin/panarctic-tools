@@ -1,0 +1,33 @@
+From 6e0e93f8d7d72237122bfc27cbc7cdc6fd5f364c Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 26 Nov 2026 19:03:35 -0500
+Subject: [PATCH] docs/Project.toml: SpeedyWeather and Terrarium compat as in
+ test/ (missed in #963 and #968)
+
+The workspace (root, docs, examples, test) is resolved as a whole, so docs' compat binds every CI job. #963 widened
+SpeedyWeather to 0.23-0.26 in Project.toml and test/, #968 added Terrarium 0.2 in Project.toml, test/ and examples/;
+docs/ kept SpeedyWeather 0.23, 0.24 and Terrarium 0.1.10. Terrarium's main (0.2.0-DEV, the [sources] pin) now needs
+SpeedyWeatherInternals 1.0.1, which only SpeedyWeather 0.25 allows, so instantiating any environment fails:
+Unsatisfiable requirements detected for package Terrarium.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AbhhvpKgDchWb93a6aYpaq
+---
+ docs/Project.toml | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/docs/Project.toml b/docs/Project.toml
+index 2032cf5a..50966122 100755
+--- a/docs/Project.toml
++++ b/docs/Project.toml
+@@ -50,5 +50,5 @@ Enzyme = "0.13.166"
+ Literate = "2.2"
+ Oceananigans = "0.117.2, 0.118"
+ Reactant = "0.2.278"
+-SpeedyWeather = "0.23, 0.24"
+-Terrarium = "0.1.10"
++SpeedyWeather = "0.23, 0.24, 0.25, 0.26"
++Terrarium = "0.1.10, 0.2"
+-- 
+2.43.0
+
