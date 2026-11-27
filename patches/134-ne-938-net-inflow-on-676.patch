@@ -1,0 +1,290 @@
+From 17c18839387d628dc8837456dd79ec852c0589c8 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 27 Nov 2026 14:01:41 -0500
+Subject: [PATCH] Nested ocean: net_inflow pins the net inflow through the open
+ sides
+
+nested_ocean_model(parent, grid; net_inflow, net_inflow_depth_exponent). At every barotropic substep, after the Flather
+fill, one correction over all open faces sets their net inflow to net_inflow (a number or a Ref), as the volume
+constraints of NEMO and ROMS do (Oceananigans NetInflow, CliMA/Oceananigans.jl#6524); the split between the sides is
+left to Flather. The parent's depth means are shifted by one common velocity so that the exterior transport carries
+the same net inflow. The pin's shift of each column is proportional to H^net_inflow_depth_exponent (default 0: the same
+transport per unit length; 1: the same velocity; 1/2: the same exterior sea level in Flather).
+
+The test is skipped until an Oceananigans release has NetInflow (TODO in the test).
+
+Rebuilt on the current ss/nested-ocean-model (#676) from e22c1bfd: the exchanger's shift of the depth means now runs
+in sample_bands!, after each sampling of the parent.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Abhhvmt8meskhHGBgsw6yN
+---
+ src/NestedModels/nested_ocean_model.jl       | 13 ++-
+ src/NestedModels/ocean_boundary_exchanger.jl | 83 +++++++++++++++++---
+ src/NestedModels/ocean_open_boundaries.jl    |  7 +-
+ test/test_nested_ocean_model.jl              | 38 ++++++++-
+ 4 files changed, 126 insertions(+), 15 deletions(-)
+
+diff --git a/src/NestedModels/nested_ocean_model.jl b/src/NestedModels/nested_ocean_model.jl
+index 7f0ff42e..4064b093 100644
+--- a/src/NestedModels/nested_ocean_model.jl
++++ b/src/NestedModels/nested_ocean_model.jl
+@@ -132,7 +132,13 @@ corrected to integrate to it, and the child's bottom is blended toward the paren
+ cells of each open side (default: 1/3°), but no shallower than `minimum_depth`. Unless
+ `parent_includes_inverse_barometer = true`, the parent's sea level is taken to lack the inverse-barometer response to the
+ atmospheric pressure, as in an ocean reanalysis, and the Flather exterior sea level adds the child's own response to the
+-pressure it is forced with (zero when the child has no atmospheric pressure).
++pressure it is forced with (zero when the child has no atmospheric pressure). `net_inflow` (m³ s⁻¹,
++positive into the domain; a number, or a `Ref` to one that a callback may change) pins the net inflow through all open
++sides together at every barotropic substep and leaves its split between the sides to the Flather condition, as the
++volume constraints of NEMO and ROMS do; the parent's depth means are shifted by one common velocity so that the exterior
++transport carries the same net inflow. The pin shifts each column's transport in proportion to
++`H^net_inflow_depth_exponent`: `0` (default) uniformly per unit length, `1` as a uniform velocity, `1/2` as a uniform
++shift of the parent's free surface in the Flather condition.
+ 
+ The child's `clock` starts at the parent's time; a `clock` passed in must already be there. The child starts from
+ `initial_state` (default: the parent, unless the parent knows only the boundaries) interpolated onto `grid`, and
+@@ -151,6 +157,8 @@ function nested_ocean_model(parent::OceanParent, grid::AbstractGrid;
+                             minimum_depth = 10,
+                             parent_bottom_height = nothing,
+                             parent_includes_inverse_barometer = false,
++                            net_inflow = nothing,
++                            net_inflow_depth_exponent = 0,
+                             initial_state = default_initial_state(parent),
+                             clock = Clock{Float64}(time = parent.clock.time, kernel_time_type = eltype(grid)),
+                             boundary_conditions = NamedTuple(),
+@@ -169,12 +177,13 @@ function nested_ocean_model(parent::OceanParent, grid::AbstractGrid;
+     grid = blend_parent_bathymetry(grid, parent_bottom_height, open_sides; width = bathymetry_blend_width, minimum_depth)
+     width = isnothing(relaxation_rate) ? 1 : relaxation_width
+     validate_band_width(grid, open_sides, width, "relaxation_width")
+-    exchanger = OceanBoundaryExchanger(parent, grid, open_sides; width, time, parent_bottom_height)
++    exchanger = OceanBoundaryExchanger(parent, grid, open_sides; width, time, parent_bottom_height, net_inflow)
+ 
+     inverse_barometer_sea_level = parent_includes_inverse_barometer ? nothing : Field{Center, Center, Nothing}(grid)
+ 
+     nested_bcs = ocean_open_boundary_conditions(grid, exchanger.bands; depth_means = exchanger.depth_means,
+                                                 inverse_barometer = inverse_barometer_sea_level,
++                                                net_inflow, net_inflow_depth_exponent,
+                                                 normal_velocity_scheme, tangential_velocity_scheme, tracer_scheme)
+ 
+     relaxation = isnothing(relaxation_rate) ? NamedTuple() :
+diff --git a/src/NestedModels/ocean_boundary_exchanger.jl b/src/NestedModels/ocean_boundary_exchanger.jl
+index 975447b5..7c28db52 100644
+--- a/src/NestedModels/ocean_boundary_exchanger.jl
++++ b/src/NestedModels/ocean_boundary_exchanger.jl
+@@ -5,6 +5,9 @@
+ using ..Oceans: PrescribedOcean
+ using ..EarthSystemModels: BoundaryPrescribedComponent
+ 
++using Oceananigans.BoundaryConditions: net_inflow_value
++using Oceananigans.Operators: Δxᶜᶠᶜ, Δyᶠᶜᶜ
++
+ parent_ocean_sources(ocean::PrescribedOcean) = (u = ocean.velocities.u,
+                                                v = ocean.velocities.v,
+                                                η = ocean.free_surface,
+@@ -21,13 +24,23 @@ function parent_ocean_sources(parent::BoundaryPrescribedComponent, sides)
+     return NamedTuple{sides}(map(side -> parent_ocean_sources(getproperty(parent, side)), sides))
+ end
+ 
+-# The parent's sources and bands on each open side, and its depth-mean normal velocity where its seafloor is known
+-struct OceanBoundaryExchanger{S, B, D, F, T}
+-    sources     :: S
+-    bands       :: B
+-    depth_means :: D
+-    floors      :: F
+-    times       :: T
++# The parent's sources and bands on each open side, its depth-mean normal velocity where its seafloor is known, and
++# the shift of those depth means that sets the exterior net inflow (`nothing` without `net_inflow`)
++struct OceanBoundaryExchanger{S, B, D, F, T, N}
++    sources             :: S
++    bands               :: B
++    depth_means         :: D
++    floors              :: F
++    times               :: T
++    exterior_net_inflow :: N
++end
++
++# The wet area H Δ of the child's column at each boundary face of every open side (Δ the face's width along the
++# boundary), the target `net_inflow` (m³ s⁻¹, positive into the domain; a number or a `Ref`) and the grid
++struct ExteriorNetInflow{A, T, G}
++    face_areas :: A
++    net_inflow :: T
++    grid       :: G
+ end
+ 
+ normal_velocity_name(side) = boundary_dimension(side) == 1 ? :u : :v
+@@ -59,7 +72,54 @@ sample_depth_mean!(::Nothing, source, floor, side, time) = nothing
+ sample_depth_mean!(band, source, floor, side, time) =
+     sample_parent_depth_mean!(band.current, depth_mean_location(side), source, floor, time)
+ 
+-# Sample the parent at `time` into the current state of every band
++inflow_sign(side) = side ∈ (:west, :south) ? 1 : -1
++
++@inline face_width(::Val{1}, face, s, grid) = Δyᶠᶜᶜ(face, s, 1, grid)
++@inline face_width(::Val{2}, face, s, grid) = Δxᶜᶠᶜ(s, face, 1, grid)
++
++@kernel function _compute_face_area!(area, grid, dim, series, face, cell)
++    i, j = @index(Global, NTuple)
++    s = ifelse(dim === Val(1), j, i)
++    _, H = wet_column_integral(dim, series, face, cell, s, s, grid, Time(0))
++    @inbounds area[i, j, 1] = H * face_width(dim, face, s, grid)
++end
++
++function face_area(grid, side, depth_mean, normal_velocity)
++    dim = boundary_dimension(side)
++    N = size(grid, dim)
++    face = boundary_index(Face(), side, N)
++    cell = boundary_index(Center(), side, N)
++    area = band_field(grid, depth_mean_location(side), depth_mean.current.indices)
++    Nx, Ny, _ = size(grid)
++    params = dim == 1 ? KernelParameters((1, Ny), (face - 1, 0)) : KernelParameters((Nx, 1), (0, face - 1))
++    launch!(architecture(grid), grid, params, _compute_face_area!, area, grid, Val(dim), normal_velocity, face, cell)
++    return area
++end
++
++exterior_net_inflow(grid, sides, bands, depth_means, ::Nothing) = nothing
++
++function exterior_net_inflow(grid, sides, bands, depth_means, net_inflow)
++    areas = map(side -> face_area(grid, side, depth_means[side], bands[side][normal_velocity_name(side)]), sides)
++    return ExteriorNetInflow(NamedTuple{sides}(areas), net_inflow, grid)
++end
++
++adjust_exterior_transport!(depth_means, ::Nothing) = nothing
++
++# ū ← ū - sᵢ (Q - T) / A on every open side i, with sᵢ = ±1 its inflow sign, Q = Σᵢ sᵢ Σ ū H Δ the exterior net
++# inflow, A = Σᵢ Σ H Δ the wet area of the open sides and T the target net inflow
++function adjust_exterior_transport!(depth_means, correction::ExteriorNetInflow)
++    sides = keys(depth_means)
++    areas = correction.face_areas
++    arch  = architecture(correction.grid)
++    Q = all_reduce(+, sum(side -> inflow_sign(side) * sum(Base.parent(depth_means[side].current) .* Base.parent(areas[side])), sides), arch)
++    A = all_reduce(+, sum(side -> sum(Base.parent(areas[side])), sides), arch)
++    for side in sides
++        Base.parent(depth_means[side].current) .-= inflow_sign(side) * (Q - net_inflow_value(correction.net_inflow)) / A
++    end
++    return nothing
++end
++
++# Sample the parent at `time` into the current state of every band, then shift the depth means to the net inflow
+ function sample_bands!(exchanger, time)
+     for side in keys(exchanger.bands)
+         sources = exchanger.sources[side]
+@@ -68,6 +128,7 @@ function sample_bands!(exchanger, time)
+         end
+         sample_depth_mean!(exchanger.depth_means[side], sources[normal_velocity_name(side)], exchanger.floors[side], side, time)
+     end
++    adjust_exterior_transport!(exchanger.depth_means, exchanger.exterior_net_inflow)
+     return nothing
+ end
+ 
+@@ -80,7 +141,8 @@ function roll_bands!(exchanger)
+     return nothing
+ end
+ 
+-function OceanBoundaryExchanger(parent, grid::AbstractGrid, sides::Tuple; width, time, parent_bottom_height = nothing)
++function OceanBoundaryExchanger(parent, grid::AbstractGrid, sides::Tuple; width, time, parent_bottom_height = nothing,
++                                net_inflow = nothing)
+     sources = map(side_sources -> child_frame_sources(grid, side_sources), parent_ocean_sources(parent, sides))
+     times = ParentTimes(time, time)
+ 
+@@ -94,7 +156,8 @@ function OceanBoundaryExchanger(parent, grid::AbstractGrid, sides::Tuple; width,
+     floors = boundary_floors(grid, sides, parent_bottom_height)
+     depth_means = NamedTuple{sides}(map(side -> depth_mean_band(grid, side, floors[side], times), sides))
+ 
+-    exchanger = OceanBoundaryExchanger(sources, bands, depth_means, floors, times)
++    net_inflow_shift = exterior_net_inflow(grid, sides, bands, depth_means, net_inflow)
++    exchanger = OceanBoundaryExchanger(sources, bands, depth_means, floors, times, net_inflow_shift)
+     sample_bands!(exchanger, time)
+     roll_bands!(exchanger)
+ 
+diff --git a/src/NestedModels/ocean_open_boundaries.jl b/src/NestedModels/ocean_open_boundaries.jl
+index afbe6d8f..04150c45 100644
+--- a/src/NestedModels/ocean_open_boundaries.jl
++++ b/src/NestedModels/ocean_open_boundaries.jl
+@@ -2,7 +2,7 @@
+ ##### Open lateral boundary conditions for a regional ocean, read from its boundary bands
+ #####
+ 
+-using Oceananigans.BoundaryConditions: BoundaryConditions, GravityWaveRadiationBoundaryCondition,
++using Oceananigans.BoundaryConditions: BoundaryConditions, GravityWaveRadiationBoundaryCondition, NetInflow,
+                                        SurfaceWaveRadiationBoundaryCondition,
+                                        ValueBoundaryCondition
+ using Oceananigans.Operators: Δzᶠᶜᶜ, Δzᶜᶠᶜ
+@@ -127,6 +127,8 @@ side_scheme(schemes::NamedTuple, side) = schemes[side]
+ function ocean_open_boundary_conditions(grid, bands;
+                                         depth_means,
+                                         inverse_barometer,
++                                        net_inflow = nothing,
++                                        net_inflow_depth_exponent = 0,
+                                         normal_velocity_scheme, tangential_velocity_scheme, tracer_scheme)
+ 
+     sides = keys(bands)
+@@ -168,7 +170,8 @@ function ocean_open_boundary_conditions(grid, bands;
+         # Flather is the only route by which the parent's η reaches the child: Chapman on η only radiates.
+         transport = BarotropicBoundaryTransport{dim}(side_bands[normal], depth_mean, face, cell, along)
+         sea_level = with_inverse_barometer(boundary_value(side_bands.η, :η, side), inverse_barometer)
+-        push!(transport_bcs, side => GravityWaveRadiationBoundaryCondition((transport, sea_level)))
++        target_transport = isnothing(net_inflow) ? nothing : NetInflow(net_inflow; depth_exponent = net_inflow_depth_exponent)
++        push!(transport_bcs, side => GravityWaveRadiationBoundaryCondition((transport, sea_level); target_transport))
+         push!(η_bcs, side => SurfaceWaveRadiationBoundaryCondition())
+ 
+         for name in tracer_names
+diff --git a/test/test_nested_ocean_model.jl b/test/test_nested_ocean_model.jl
+index 6e2f131e..ba2ed68f 100644
+--- a/test/test_nested_ocean_model.jl
++++ b/test/test_nested_ocean_model.jl
+@@ -13,7 +13,7 @@ using Oceananigans.BoundaryConditions: fill_halo_regions!, getbc, GravityWaveRad
+                                        SurfaceWaveRadiation, TracerReservoir, Value
+ using Oceananigans.Grids: MutableVerticalDiscretization, inactive_cell
+ using Oceananigans.ImmersedBoundaries: bottom_height_field, has_active_cells_map
+-using Oceananigans.Operators: Azᶜᶜᶜ, Δzᶠᶜᶜ, rotation_angle
++using Oceananigans.Operators: Azᶜᶜᶜ, Δxᶜᶠᶜ, Δyᶠᶜᶜ, Δzᶠᶜᶜ, rotation_angle
+ using Oceananigans.OrthogonalSphericalShellGrids: RotatedLatitudeLongitudeGrid
+ using Oceananigans.TimeSteppers: update_state!
+ using Oceananigans.Units: days
+@@ -602,6 +602,42 @@ end
+     end
+ end
+ 
++# TODO: drop the guard once an Oceananigans release has `NetInflow` (CliMA/Oceananigans.jl#6524)
++isdefined(Oceananigans.BoundaryConditions, :NetInflow) &&
++@testset "net_inflow pins the net inflow through the open sides together on $(arch)" for arch in test_architectures
++    # The parent's u = 0.1 m/s brings about 22 Sv in through the west side; ask for 2 Sv in through both sides together,
++    # then for 1 Sv out
++    parent_ocean = nesting_test_parent(arch)
++    parent_bottom_height = Field{Center, Center, Nothing}(parent_ocean.grid)
++    set!(parent_bottom_height, -1000)
++    net_inflow = Ref(2e6)
++
++    model = nested_ocean_model(parent_ocean, nesting_test_child_grid(arch); parent_bottom_height,
++                               open_sides = (:west, :north), net_inflow)
++    child = model.child
++    volume() = (grid = on_architecture(CPU(), child.grid); η = on_architecture(CPU(), child.free_surface.displacement);
++                sum(η[i, j, size(grid, 3) + 1] * Azᶜᶜᶜ(i, j, 1, grid) for i in 1:size(grid, 1), j in 1:size(grid, 2)))
++
++    volume₀ = volume()
++    for _ in 1:3
++        time_step!(model, 60)
++    end
++
++    grid = on_architecture(CPU(), child.grid)
++    Nx, Ny, _ = size(grid)
++    U, V = on_architecture(CPU(), child.free_surface.barotropic_velocities.U), on_architecture(CPU(), child.free_surface.barotropic_velocities.V)
++    west  = sum(U[1, j, 1] * Δyᶠᶜᶜ(1, j, 1, grid) for j in 1:Ny)
++    north = -sum(V[i, Ny + 1, 1] * Δxᶜᶠᶜ(i, Ny + 1, 1, grid) for i in 1:Nx)
++
++    @test west + north ≈ net_inflow[] rtol = 1e-6
++    @test volume() - volume₀ ≈ net_inflow[] * 3 * 60 rtol = 1e-3
++
++    net_inflow[] = -1e6
++    volume₁ = volume()
++    time_step!(model, 60)
++    @test volume() - volume₁ ≈ net_inflow[] * 60 rtol = 1e-3
++end
++
+ @testset "nested_ocean_model blends the child bathymetry toward the parent's seafloor on $(arch)" for arch in test_architectures
+     parent_ocean = nesting_test_parent(arch)
+ 
+-- 
+2.43.0
+
