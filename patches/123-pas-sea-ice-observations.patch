@@ -1,0 +1,327 @@
+From c7dbf17ab26e7b7e8600d165ac2d919d45696644 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 26 Nov 2026 21:14:05 -0500
+Subject: [PATCH] analysis/sea_ice_observations.jl: sea ice against NOAA/NSIDC
+ satellite concentration
+
+Criterion 4 of #15. For a period of a run (default the whole run), one daily mean every n days of the model's sea-ice
+concentration against the NOAA/NSIDC CDR daily passive-microwave concentration (25 km, from NCEI's THREDDS server,
+downloaded once), mapped onto the model's columns by the product's polar-stereographic projection and checked against
+the file's latitudes. Extent and area by region (the regions of sea_ice_comparison.jl) on the same valid columns;
+monthly table for the whole domain; extent time series and concentration maps (mid-March, mid-September). CPU only.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AbhhvpKgDchWb93a6aYpaq
+---
+ analysis/sea_ice_observations.jl | 299 +++++++++++++++++++++++++++++++
+ 1 file changed, 299 insertions(+)
+ create mode 100644 analysis/sea_ice_observations.jl
+
+diff --git a/analysis/sea_ice_observations.jl b/analysis/sea_ice_observations.jl
+new file mode 100644
+index 0000000..2a5a43a
+--- /dev/null
++++ b/analysis/sea_ice_observations.jl
+@@ -0,0 +1,299 @@
++# Criterion 4 of issue #15 (Shu et al. 2023): sea ice against satellite observations. The model's daily sea-ice
++# concentration is compared with the NOAA/NSIDC Climate Data Record of passive-microwave sea-ice concentration (daily,
++# 25 km, north polar stereographic; SSM/I in 2004–06), mapped onto the model's columns: extent (Σ A over ℵ > 0.15) and
++# area (Σ A ℵ) by region, on the same columns for both (where the observation is valid: ocean, outside the coast and
++# land flags; the pole hole counts as full ice), plus maps of the concentration.
++#
++#   julia --project=. analysis/sea_ice_observations.jl config.toml [from yyyy-mm-dd] [to yyyy-mm-dd] [every n days, default 5]
++#
++# For example the Tsubouchi year of the hindcast:
++#   julia --project=. analysis/sea_ice_observations.jl config_hindcast_2004_2006_nemo_nz100.toml 2005-09-01 2006-09-01
++# Without dates: the whole run. Reads arctic_sea_ice.jld2 (daily ℵ) and the grid of arctic_ocean.jld2 from
++# `output_dir`; CPU only. Downloads one observed file (~4 MB) per sampled day from NCEI's THREDDS server into the
++# NumericalEarth data cache ("NOAA_CDR_SIC"), or into data_dir/NOAA_CDR_SIC. Writes
++# sea_ice_observations_<from>_<to>.md to `output_dir`, and sea_ice_observations_extent_<from>_<to>.png and
++# sea_ice_observations_maps_<from>_<to>.png to `figure_dir`.
++#
++# Mapping: each model column takes the observed cell it falls in, from the product's projection (NSIDC north polar
++# stereographic: Hughes 1980 ellipsoid, true scale at 70°N, central meridian 45°W) and the file's own x and y
++# coordinates. The script checks this against the latitudes stored in the file and stops if they disagree by more than
++# 0.5°. Caveats: 25 km observations against 15 km model cells (the edge is smoother in the observations); passive
++# microwave underestimates concentration in summer melt (ponds), so summer area is biased low in the observations.
++
++include("../config.jl")
++
++using NumericalEarth, Oceananigans
++using Oceananigans.Operators: Azᶜᶜᶜ
++using Oceananigans.OutputReaders: OnDisk
++using NumericalEarth.DataWrangling: NCDatasets, Downloads, download_cache
++using .NCDatasets: Dataset
++using CairoMakie, Dates, JLD2, Printf
++
++start_date = DateTime(config["time"]["start_date"])
++end_date   = DateTime(config["time"]["end_date"])
++from_date  = length(ARGS) ≥ 2 ? DateTime(ARGS[2]) : start_date
++to_date    = length(ARGS) ≥ 3 ? DateTime(ARGS[3]) : end_date
++every      = length(ARGS) ≥ 4 ? parse(Int, ARGS[4]) : 5
++window     = config["output"]["average_hours"] / 24
++period_tag = Dates.format(from_date, "yyyymmdd") * "_" * Dates.format(to_date, "yyyymmdd")
++sea_ice_file = joinpath(output_dir, "arctic_sea_ice.jld2")
++
++#####
++##### Grid (from the ocean output: the sea ice uses the same horizontal grid)
++#####
++
++grid = FieldTimeSeries(ocean_output_file, "η"; backend = OnDisk()).grid
++Nx, Ny, Nz = size(grid)
++ug = grid.underlying_grid
++bottom_height = grid.immersed_boundary.bottom_height
++H  = [max(-Float64(bottom_height[i, j, 1]), 0.0) for i in 1:Nx, j in 1:Ny]
++ocean = H .> 0
++λ  = mod.(Array(λnodes(ug, Center(), Center(), Center())) .+ 180, 360) .- 180
++φ  = Array(φnodes(ug, Center(), Center(), Center()))
++A  = [Azᶜᶜᶜ(i, j, 1, ug) for i in 1:Nx, j in 1:Ny]
++
++# The same regions as analysis/sea_ice_comparison.jl
++regions = [("Whole domain",     (λ, φ, H) -> true),
++           ("Beaufort Gyre",    (λ, φ, H) -> 70.5 ≤ φ ≤ 80.5 && -170 ≤ λ ≤ -130 && H > 300),
++           ("Central Arctic",   (λ, φ, H) -> φ > 82),
++           ("Siberian shelves", (λ, φ, H) -> 66 ≤ φ ≤ 82 && (λ ≥ 60 || λ ≤ -170) && H < 200),
++           ("Barents Sea",      (λ, φ, H) -> 68 ≤ φ ≤ 80 && 15 ≤ λ < 60),
++           ("Greenland Sea",    (λ, φ, H) -> 65 ≤ φ ≤ 82 && -40 ≤ λ < 15),
++           ("Archipelago",      (λ, φ, H) -> 68 ≤ φ ≤ 82 && -125 ≤ λ ≤ -80),
++           ("Baffin Bay",       (λ, φ, H) -> 67 ≤ φ ≤ 78 && -80 < λ ≤ -55)]
++masks = [[ocean[i, j] && test(λ[i, j], φ[i, j], H[i, j]) for i in 1:Nx, j in 1:Ny] for (_, test) in regions]
++
++#####
++##### Model concentration: one daily mean every `every` days within the period
++#####
++
++# Interior of a saved 2-D array, with or without halos
++function interior_part(a, Nx, Ny)
++    a = ndims(a) == 3 ? a[:, :, 1] : a
++    hx, hy = (size(a, 1) - Nx) ÷ 2, (size(a, 2) - Ny) ÷ 2
++    return Float64.(a[hx+1:hx+Nx, hy+1:hy+Ny])
++end
++
++after_start(d) = start_date + Millisecond(round(Int64, d * 86400e3))
++
++sample_dates, model_ℵ = jldopen(sea_ice_file) do file
++    iterations = sort(filter(!=("serialized"), keys(file["timeseries/t"])), by = s -> parse(Int, s))
++    saved_days = [file["timeseries/t/$n"] for n in iterations] ./ 86400
++    in_period = [n for n in eachindex(iterations) if saved_days[n] > 0 &&
++                 from_date ≤ after_start(saved_days[n] - window) && after_start(saved_days[n]) ≤ to_date]
++    isempty(in_period) && error("No saved sea-ice average of $experiment lies between $(Date(from_date)) and $(Date(to_date))")
++    chosen = in_period[1:every:end]
++    dates = [Date(after_start(saved_days[n] - window)) for n in chosen]   # the day each daily mean covers
++    fields = [clamp.(interior_part(file["timeseries/ℵ/$(iterations[n])"], Nx, Ny), 0, 1) for n in chosen]
++    dates, fields
++end
++@info "Model sea ice: $(length(sample_dates)) daily means, $(first(sample_dates)) to $(last(sample_dates)) (one every $every)"
++
++#####
++##### Observations: NOAA/NSIDC CDR daily concentration, from NCEI's THREDDS server
++#####
++
++observation_dir = isempty(data_dir) ? download_cache("NOAA_CDR_SIC") : mkpath(joinpath(data_dir, "NOAA_CDR_SIC"))
++thredds = "https://www.ncei.noaa.gov/thredds"
++catalogs = Dict{Int, String}()
++
++function year_catalog(year)
++    haskey(catalogs, year) && return catalogs[year]
++    url = "$thredds/catalog/cdr/sea-ice-concentration/$year/catalog.xml"
++    catalogs[year] = String(take!(Downloads.download(url, IOBuffer())))
++    return catalogs[year]
++end
++
++function observation_file(date)
++    stamp = Dates.format(date, "yyyymmdd")
++    names = sort(unique(m.match for m in eachmatch(Regex("seaice_conc_daily_nh_[a-z0-9]+_$(stamp)_v[0-9]+r[0-9]+\\.nc"),
++                                                     year_catalog(year(date)))))
++    isempty(names) && return nothing
++    path = joinpath(observation_dir, first(names))
++    if !isfile(path)
++        partial = path * ".part"
++        Downloads.download("$thredds/fileServer/cdr/sea-ice-concentration/$(year(date))/$(first(names))", partial)
++        mv(partial, path; force = true)
++    end
++    return path
++end
++
++first_variable(ds, candidates) = (name = findfirst(n -> haskey(ds, n), candidates);
++                                  name === nothing ? nothing : candidates[name])
++
++# Concentration in 0–1; the pole hole (flag 2.51) as full ice; coast, land, lakes and missing as NaN
++function read_observation(path)
++    ds = Dataset(path)
++    name = first_variable(ds, ["cdr_seaice_conc", "seaice_conc_cdr"])
++    name === nothing && error("No CDR concentration variable in $path; it has: $(join(keys(ds), ", "))")
++    raw = ds[name]
++    data = ndims(raw) == 3 ? raw[:, :, 1] : raw[:, :]
++    # The cell centres (m); the product's documented 25 km grid when the file does not carry them
++    x = haskey(ds, "xgrid") ? Float64.(ds["xgrid"][:]) : collect(-3837500.0:25000.0:3737500.0)
++    y = haskey(ds, "ygrid") ? Float64.(ds["ygrid"][:]) : collect(5837500.0:-25000.0:-5337500.0)
++    latitude_name = first_variable(ds, ["latitude", "lat"])
++    latitude = latitude_name === nothing ? nothing : Float64.(ds[latitude_name][:, :])
++    close(ds)
++    size(data) == (length(x), length(y)) || error("Unexpected grid in $path: $(size(data)) values, $(length(x)) × $(length(y)) cells")
++    c = map(data) do v
++        ismissing(v) ? NaN : v ≤ 1 ? Float64(v) : 2.505 < v < 2.515 ? 1.0 : NaN
++    end
++    return c, x, y, latitude
++end
++
++# NSIDC north polar stereographic (Hughes 1980 ellipsoid, true scale at 70°N, central meridian 45°W; Snyder 1987)
++function polar_stereographic(λ, φ)
++    a, e = 6378273.0, 0.081816153
++    φc, λ₀ = deg2rad(70), deg2rad(-45)
++    t(ϕ) = tan(π/4 - ϕ/2) / ((1 - e * sin(ϕ)) / (1 + e * sin(ϕ)))^(e/2)
++    m(ϕ) = cos(ϕ) / sqrt(1 - e^2 * sin(ϕ)^2)
++    ρ = a * m(φc) * t(deg2rad(φ)) / t(φc)
++    return ρ * sin(deg2rad(λ) - λ₀), -ρ * cos(deg2rad(λ) - λ₀)
++end
++
++# The observed cell of each wet model column (0 outside the observed grid)
++function observation_cells(x, y, λ, φ, ocean)
++    cell_x, cell_y = zeros(Int, size(λ)), zeros(Int, size(λ))
++    for j in axes(λ, 2), i in axes(λ, 1)
++        ocean[i, j] || continue
++        px, py = polar_stereographic(λ[i, j], φ[i, j])
++        ix = round(Int, (px - x[1]) / (x[2] - x[1])) + 1
++        iy = round(Int, (py - y[1]) / (y[2] - y[1])) + 1
++        if 1 ≤ ix ≤ length(x) && 1 ≤ iy ≤ length(y)
++            cell_x[i, j], cell_y[i, j] = ix, iy
++        end
++    end
++    return cell_x, cell_y
++end
++
++on_columns(c, cell_x, cell_y) = [cell_x[i, j] > 0 ? c[cell_x[i, j], cell_y[i, j]] : NaN
++                                 for i in axes(cell_x, 1), j in axes(cell_x, 2)]
++
++observed_ℵ = Matrix{Float64}[]
++kept = Int[]
++cell_x, cell_y = nothing, nothing
++for (n, date) in enumerate(sample_dates)
++    path = observation_file(date)
++    if path === nothing
++        @warn "No observed concentration on $date; skipped"
++        continue
++    end
++    c, x, y, latitude = read_observation(path)
++    if cell_x === nothing
++        global cell_x, cell_y = observation_cells(x, y, λ, φ, ocean)
++        mapped = cell_x .> 0
++        @info "Observed grid $(length(x)) × $(length(y)); $(count(mapped)) of $(count(ocean)) wet columns inside it"
++        if latitude !== nothing
++            mismatch = maximum(abs(latitude[cell_x[i, j], cell_y[i, j]] - φ[i, j]) for i in 1:Nx, j in 1:Ny if mapped[i, j])
++            @info @sprintf("Mapping check: largest latitude difference %.2f° (25 km cells: expect under ~0.3°)", mismatch)
++            mismatch > 0.5 && error("The polar-stereographic mapping disagrees with the file's latitudes; stopping")
++        end
++    end
++    push!(observed_ℵ, on_columns(c, cell_x, cell_y))
++    push!(kept, n)
++end
++isempty(kept) && error("No observed concentration found for the sampled days")
++sample_dates = sample_dates[kept]
++model_ℵ = model_ℵ[kept]
++@info "Observations on $(length(kept)) of the sampled days"
++
++#####
++##### Extent and area by region, on the columns where the observation is valid
++#####
++
++function ice_statistics(ℵ, valid, mask, A)
++    m = mask .& valid
++    extent = sum(A[m .& (ℵ .> 0.15)]; init = 0.0) / 1e12    # 10⁶ km²
++    area = sum(A[m] .* ℵ[m]; init = 0.0) / 1e12
++    return extent, area
++end
++
++Ns, Nr = length(sample_dates), length(regions)
++model_extent, model_area = zeros(Ns, Nr), zeros(Ns, Nr)
++observed_extent, observed_area = zeros(Ns, Nr), zeros(Ns, Nr)
++for s in 1:Ns
++    valid = isfinite.(observed_ℵ[s])
++    for r in 1:Nr
++        model_extent[s, r], model_area[s, r] = ice_statistics(model_ℵ[s], valid, masks[r], A)
++        observed_extent[s, r], observed_area[s, r] = ice_statistics(observed_ℵ[s], valid, masks[r], A)
++    end
++end
++
++#####
++##### Tables
++#####
++
++io = IOBuffer()
++println(io, "# Sea ice against satellite observations: $experiment, $(first(sample_dates)) to $(last(sample_dates))\n")
++println(io, "Observations: NOAA/NSIDC CDR daily sea-ice concentration (25 km), mapped onto the model's columns. Both on ",
++            "the columns where the observation is valid; the pole hole counts as full ice. Extent: area of cells with ",
++            "concentration above 15 %; area: Σ A ℵ. $(Ns) days (one every $every). Units 10⁶ km².\n")
++println(io, "## Period means by region\n")
++println(io, "| Region | Extent model | Extent obs | Δ extent | RMS Δ extent | Area model | Area obs | Δ area |")
++println(io, "|---|---|---|---|---|---|---|---|")
++for (r, (name, _)) in enumerate(regions)
++    Δextent = model_extent[:, r] .- observed_extent[:, r]
++    Δarea = model_area[:, r] .- observed_area[:, r]
++    println(io, @sprintf("| %s | %.3f | %.3f | %+.3f | %.3f | %.3f | %.3f | %+.3f |", name,
++                         sum(model_extent[:, r]) / Ns, sum(observed_extent[:, r]) / Ns, sum(Δextent) / Ns,
++                         sqrt(sum(Δextent .^ 2) / Ns), sum(model_area[:, r]) / Ns, sum(observed_area[:, r]) / Ns,
++                         sum(Δarea) / Ns))
++end
++println(io, "\n## Whole domain by month\n")
++println(io, "| Month | Days | Extent model | Extent obs | Area model | Area obs |")
++println(io, "|---|---|---|---|---|---|")
++for month_start in unique(Date.(year.(sample_dates), month.(sample_dates)))
++    in_month = [s for s in 1:Ns if Date(year(sample_dates[s]), month(sample_dates[s])) == month_start]
++    k = length(in_month)
++    println(io, @sprintf("| %s | %d | %.3f | %.3f | %.3f | %.3f |", Dates.format(month_start, "yyyy-mm"), k,
++                         sum(model_extent[in_month, 1]) / k, sum(observed_extent[in_month, 1]) / k,
++                         sum(model_area[in_month, 1]) / k, sum(observed_area[in_month, 1]) / k))
++end
++println(io)
++table_text = String(take!(io))
++print(table_text)
++table_file = joinpath(output_dir, "sea_ice_observations_$(period_tag).md")
++write(table_file, table_text)
++@info "Wrote $table_file"
++
++#####
++##### Figures: extent through the period by region; concentration maps
++#####
++
++day_axis = [Dates.value(d - first(sample_dates)) for d in sample_dates]
++fig = Figure(size = (1600, 800))
++for (r, (name, _)) in enumerate(regions)
++    ax = Axis(fig[(r - 1) ÷ 4 + 1, (r - 1) % 4 + 1]; title = name, ylabel = r % 4 == 1 ? "extent (10⁶ km²)" : "",
++              xlabel = "days after $(first(sample_dates))")
++    lines!(ax, day_axis, model_extent[:, r]; color = :red, label = "model")
++    lines!(ax, day_axis, observed_extent[:, r]; color = :black, label = "NOAA/NSIDC CDR")
++    r == 1 && axislegend(ax; position = :lb, framevisible = false, labelsize = 10)
++end
++Label(fig[0, :], "$experiment: sea-ice extent against satellite observations"; fontsize = 18)
++file = joinpath(figure_dir, "sea_ice_observations_extent_$(period_tag).png")
++save(file, fig)
++@info "Wrote $file"
++
++# Maps on the sampled days nearest mid-March and mid-September (the first and last days when neither is in the period)
++nearest(target) = argmin([abs(Dates.value(d - target)) for d in sample_dates])
++targets = [Date(y, m, 15) for y in year(first(sample_dates)):year(last(sample_dates)) for m in (3, 9)]
++targets = filter(d -> first(sample_dates) ≤ d ≤ last(sample_dates), targets)
++map_days = isempty(targets) ? unique([1, Ns]) : unique(nearest.(targets))
++
++fig = Figure(size = (1500, 480 * length(map_days)))
++for (row, s) in enumerate(map_days)
++    shown = ocean .& isfinite.(observed_ℵ[s])
++    mm = ifelse.(shown, model_ℵ[s], NaN)
++    om = ifelse.(shown, observed_ℵ[s], NaN)
++    for (col, (panel, panel_values, cmap, crange)) in enumerate((("model", mm, :ice, (0, 1)),
++                                                                 ("observed", om, :ice, (0, 1)),
++                                                                 ("model − observed", mm .- om, :balance, (-0.5, 0.5))))
++        ax = Axis(fig[row, 2col - 1]; title = "$panel, $(sample_dates[s])", aspect = DataAspect(), xlabel = "i", ylabel = "j")
++        hm = heatmap!(ax, 1:Nx, 1:Ny, panel_values; colormap = cmap, colorrange = crange, nan_color = :lightgray)
++        Colorbar(fig[row, 2col], hm)
++    end
++end
++Label(fig[0, :], "$experiment: sea-ice concentration against NOAA/NSIDC CDR"; fontsize = 18)
++file = joinpath(figure_dir, "sea_ice_observations_maps_$(period_tag).png")
++save(file, fig)
++@info "Wrote $file"
+-- 
+2.43.0
+
