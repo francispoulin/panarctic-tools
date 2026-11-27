@@ -1,4 +1,4 @@
-From 488351bb36bb5d1e80a2c10b8a0ae9458157316d Mon Sep 17 00:00:00 2001
+From 5c083f585133bb5a6bbd2508f60d79227a22d3a8 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Fri, 27 Nov 2026 07:54:50 -0500
 Subject: [PATCH] Sea ice: [sea_ice] evp_substeps, EVP diagnostics output, and
@@ -718,7 +718,7 @@ index 0000000..ff892e8
 +evp_substeps = 300   # EVP substeps per time step (default 150; patch 128)
 +ice_ocean_friction_velocity = "drag"   # u★ of the ice–ocean heat exchange: "constant" (0.002 m/s) or "drag" (√Cᴰ |uⁱ − uᵒ|, ≥ 0.002 m/s)
 diff --git a/panarctic.jl b/panarctic.jl
-index e68df53..15fc6f9 100644
+index 12fb5a0..e97d54a 100644
 --- a/panarctic.jl
 +++ b/panarctic.jl
 @@ -68,6 +68,7 @@ using Oceananigans.ImmersedBoundaries: immersed_inactive_node
@@ -729,24 +729,24 @@ index e68df53..15fc6f9 100644
  using NumericalEarth.SeaIces: sea_ice_dynamics
  using NumericalEarth.Radiations: SeaIceAlbedo, SurfaceRadiationProperties
  using NumericalEarth.EarthSystemModels: reference_density, heat_capacity
-@@ -195,9 +196,14 @@ ice_compressive_strength   = get(sea_ice_settings, "ice_compressive_strength", 2
- # ice_consolidation_thickness (m, ClimaSeaIce's hᶜ, default 0.05): both the lead-closing thickness h₀ of the concentration
- # update and the thickness below which ice gets no conductive flux
- ice_consolidation_thickness = get(sea_ice_settings, "ice_consolidation_thickness", 0.05)
+@@ -192,9 +193,14 @@ sea_ice_settings = get(config, "sea_ice", Dict{String, Any}())
+ ice_salinity               = get(sea_ice_settings, "ice_salinity", 4)
+ ice_ocean_drag_coefficient = get(sea_ice_settings, "ice_ocean_drag_coefficient", 5.5e-3)
+ ice_compressive_strength   = get(sea_ice_settings, "ice_compressive_strength", 27500)
 +# evp_substeps (default 150, NumericalEarth's): substeps of the EVP solver per time step. ClimaSeaIce's adaptive EVP
 +# relaxes the stresses by about 1/α per substep, with α set locally between 50 and 300, so where α exceeds the number of
 +# substeps the stresses do not reach their plastic values within a step (analysis/evp_convergence.jl).
 +evp_substeps = get(sea_ice_settings, "evp_substeps", 150)
  dynamics = sea_ice_dynamics(child.grid, ocean; sea_ice_ocean_drag_coefficient = ice_ocean_drag_coefficient,
 -                            rheology = ElastoViscoPlasticRheology(; ice_compressive_strength))
--@info "Sea ice: salinity $ice_salinity, ice–ocean drag $ice_ocean_drag_coefficient, P* $ice_compressive_strength N/m², consolidation thickness $ice_consolidation_thickness m"
+-@info "Sea ice: salinity $ice_salinity, ice–ocean drag $ice_ocean_drag_coefficient, P* $ice_compressive_strength N/m²"
 +                            rheology = ElastoViscoPlasticRheology(; ice_compressive_strength),
 +                            solver = SplitExplicitSolver(child.grid; substeps = evp_substeps))
-+@info "Sea ice: salinity $ice_salinity, ice–ocean drag $ice_ocean_drag_coefficient, P* $ice_compressive_strength N/m², consolidation thickness $ice_consolidation_thickness m, EVP substeps $evp_substeps"
++@info "Sea ice: salinity $ice_salinity, ice–ocean drag $ice_ocean_drag_coefficient, P* $ice_compressive_strength N/m², EVP substeps $evp_substeps"
  
  sea_ice = nested_sea_ice_simulation(ocean, dataset; dates = (start_date, end_date), dir_kw...,
                                      advection = IncrementalRemapping(), timestepper = :ForwardEuler,
-@@ -354,6 +360,17 @@ simulation.output_writers[:sea_ice] = JLD2Writer(sea_ice.model, sea_ice_outputs;
+@@ -351,6 +357,17 @@ simulation.output_writers[:sea_ice] = JLD2Writer(sea_ice.model, sea_ice_outputs;
                                                   schedule = AveragedTimeInterval(output["average_hours"] * Oceananigans.Units.hours),
                                                   overwrite_files = !restart)
  
